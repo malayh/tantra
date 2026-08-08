@@ -23,6 +23,15 @@ from tantra.events import Lease, SessionEvent, SessionHeader, SessionStatus, Sta
 from tantra.harness import Harness
 from tantra.hooks import Denial, Hook
 from tantra.loop import Emitted, RetryConfig
+from tantra.memory import (
+    BuiltinMemory,
+    Memory,
+    MemoryHit,
+    MemoryRecord,
+    MemoryWrite,
+    memory_recall,
+    memory_write,
+)
 from tantra.providers.base import Embedder, ModelLimits, Provider, ProviderEvent, SampleRequest
 from tantra.providers.fake import FakeProvider, Sample
 from tantra.providers.openai_compat import OpenAICompatible, OpenAICompatibleEmbedder
@@ -38,6 +47,7 @@ __all__ = [
     "ApprovalResponse",
     "AskRequest",
     "AskResponse",
+    "BuiltinMemory",
     "Choice",
     "ChoiceResponse",
     "Context",
@@ -52,7 +62,11 @@ __all__ = [
     "Harness",
     "Hook",
     "Lease",
+    "Memory",
+    "MemoryHit",
+    "MemoryRecord",
     "MemoryStore",
+    "MemoryWrite",
     "ModelLimits",
     "OpenAICompatible",
     "OpenAICompatibleEmbedder",
@@ -81,5 +95,7 @@ __all__ = [
     "agent_name",
     "build_name_table",
     "collect",
+    "memory_recall",
+    "memory_write",
     "tool",
 ]

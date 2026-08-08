@@ -9,10 +9,11 @@ from pydantic import BaseModel, create_model
 from tantra.ask import AskRequest, AskResponse
 from tantra.errors import TantraError
 from tantra.providers.base import ToolSchema
-from tantra.stores.base import Store
 
 if TYPE_CHECKING:
     from tantra.agent import Agent
+    from tantra.memory import Memory
+    from tantra.stores.base import Store
 
 
 class Context:
@@ -34,6 +35,7 @@ class Context:
         ask: Callable[[AskRequest], Awaitable[AskResponse]] | None = None,
         spawn: Callable[[type[Agent] | str, str], Awaitable[Any]] | None = None,
         fan_out: Callable[[Sequence[tuple[type[Agent] | str, str]], int], Awaitable[list[Any]]] | None = None,
+        memory: Memory | None = None,
     ) -> None:
         self.session_id = session_id
         self.turn_id = turn_id
@@ -41,6 +43,7 @@ class Context:
         self.depth = depth
         self.deps = deps
         self.store = store
+        self.memory = memory
         self._emit = emit
         self._ask = ask
         self._spawn = spawn

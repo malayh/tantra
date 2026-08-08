@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -49,6 +49,9 @@ from tantra.providers.base import (
 from tantra.skills import SkillInfo
 from tantra.stores.base import Store
 from tantra.tools import Context, Tool
+
+if TYPE_CHECKING:
+    from tantra.memory import Memory
 
 SUBMIT_OUTPUT = "submit_output"
 
@@ -200,6 +203,7 @@ class TurnLoop:
         permission_chain: Sequence[Mapping[str, str]] = (),
         spawner: Spawner | None = None,
         skills_index: Sequence[SkillInfo] = (),
+        memory: Memory | None = None,
     ) -> None:
         self.store = store
         self.provider = provider
@@ -217,6 +221,7 @@ class TurnLoop:
         self.permission_chain = list(permission_chain)
         self.spawner = spawner
         self.skills_index = list(skills_index)
+        self.memory = memory
         self.failed = False
         self.lease_lost = False
         self.suspended: str | None = None
@@ -450,6 +455,7 @@ class TurnLoop:
             ask=ask,
             spawn=spawn if delegates else None,
             fan_out=fan_out if delegates else None,
+            memory=self.memory,
         )
         task = asyncio.ensure_future(tool.invoke(args, ctx))
         getter: asyncio.Future[tuple[str, Any, asyncio.Future[Any] | None]] | None = None

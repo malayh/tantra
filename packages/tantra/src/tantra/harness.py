@@ -4,7 +4,7 @@ import inspect
 from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from contextlib import aclosing
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from tantra.agent import Agent, agent_name, build_name_table
@@ -32,6 +32,9 @@ from tantra.providers.base import Provider
 from tantra.skills import SkillInfo, Skills
 from tantra.stores.base import Store
 from tantra.tools import Context, Tool
+
+if TYPE_CHECKING:
+    from tantra.memory import Memory
 
 TYPED_KEYS = frozenset({"type", "anyOf", "allOf", "oneOf", "$ref", "enum", "const"})
 
@@ -176,6 +179,7 @@ class Harness:
         default_permission: str = "allow",
         max_depth: int = 3,
         skills: Skills | None = None,
+        memory: Memory | None = None,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -186,6 +190,7 @@ class Harness:
         self.max_depth = max_depth
         self.hooks = list(hooks)
         self.skills = skills
+        self.memory = memory
         self.default_permission = check_permission("harness default_permission", default_permission)
         self.agents = build_name_table(agents)
         self.tools = {name: _tool_table(agent) for name, agent in self.agents.items()}
@@ -274,6 +279,7 @@ class Harness:
             permission_chain=chain,
             spawner=_ChildRunner(self, header),
             skills_index=skills_index,
+            memory=self.memory,
         )
 
     async def _notify(self, emitted: Emitted) -> None:

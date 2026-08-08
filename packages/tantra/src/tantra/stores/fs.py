@@ -12,11 +12,13 @@ from pydantic import ValidationError
 
 from tantra.errors import CorruptLog, SeqConflict, SessionExists, SessionNotFound
 from tantra.events import Lease, SessionEvent, SessionHeader, Stamped
+from tantra.memory import MemoryRecord
 from tantra.stores.base import select_headers
 
 HEADER_FILE = "session.json"
 EVENTS_FILE = "events.jsonl"
 LOCK_FILE = ".lock"
+MEMORY_DIR = "_memory"
 TAIL_CHUNK = 65536
 
 
@@ -140,6 +142,28 @@ class FileSystemStore:
             if lease is not None and lease.holder == holder:
                 _store_lease(fd, None)
 
+    async def memory_put(self, row: MemoryRecord) -> None:
+        directory = self.root / MEMORY_DIR
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{row.id}.json"
+        tmp = path.with_name(f"{row.id}.json.tmp")
+        tmp.write_text(row.model_dump_json(), encoding="utf-8")
+        os.replace(tmp, path)
+
+    async def memory_get(self, mid: str) -> MemoryRecord | None:
+        path = self.root / MEMORY_DIR / f"{mid}.json"
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        return _parse_row(path, raw)
+
+    async def memory_all(self) -> list[MemoryRecord]:
+        directory = self.root / MEMORY_DIR
+        if not directory.is_dir():
+            return []
+        return [_parse_row(path, path.read_text(encoding="utf-8")) for path in sorted(directory.glob("*.json"))]
+
     @contextmanager
     def _flock(self, sid: str, mode: int) -> Iterator[int]:
         fd = os.open(self.root / sid / LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o644)
@@ -177,6 +201,13 @@ class FileSystemStore:
         tmp = path.with_name(HEADER_FILE + ".tmp")
         tmp.write_text(header.model_dump_json(), encoding="utf-8")
         os.replace(tmp, path)
+
+
+def _parse_row(path: Path, raw: str) -> MemoryRecord:
+    try:
+        return MemoryRecord.model_validate_json(raw)
+    except ValidationError as exc:
+        raise CorruptLog(f"{path}: unreadable memory row") from exc
 
 
 def _parse(sid: str, line: str | bytes) -> Stamped:

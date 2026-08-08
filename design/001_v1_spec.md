@@ -162,6 +162,7 @@ class Skills(Protocol):
 
 class Memory(Protocol):
     async def write(self, m: MemoryWrite) -> str: ...
+    async def get(self, mid: str) -> MemoryRecord | None: ...   # added in P6: Verify needs get() on dead rows
     async def recall(self, q: str, *, k: int = 5, kind: str | None = None, tags: list[str] | None = None,
                      entity: str | None = None, metadata: dict | None = None) -> list[MemoryHit]: ...
     async def supersede(self, old_id: str, new: MemoryWrite) -> str: ...
@@ -476,18 +477,27 @@ First genuinely useful phase: non-interactive agents work end to end.
   - Fail-loud by design: a malformed `SKILL.md` anywhere under the root (or a missing root) fails every agent's run/resume at entry, even agents filtered away from it. A skills root is config; a bad file should not be silently skipped.
   - Follow-ups: empty catalogue still advertises the `skill` tool (tool injection is construction-time, index is run-time); `Agent.skills = ()` (tuple) is not recognized as opt-out (`[]` is); index order is skill-directory order, not name order.
 
-### Phase 6 — Memory · deps: P2 · ∥ P4, P5, P7 · needs P8 for pgvector · —
+### Phase 6 — Memory · deps: P2 · ∥ P4, P5, P7 · needs P8 for pgvector · **done**
 - `memory.py`: `Memory` protocol. `BuiltinMemory` over the store backends: kind/title/body, tags, entities, `metadata` scoping, soft delete, supersede.
 - Hybrid recall: keyword always; vector where the backend supports it (Postgres/pgvector), degrading to keyword-only elsewhere — **explicitly, with the degradation visible in `MemoryHit`**, not silently.
 - `memory_recall` / `memory_write` tools.
 - Embeddings via the `Embedder` protocol, best-effort: a failed embed never fails the write (kalki's `_embed_best_effort` pattern), with a `backfill` entrypoint to repair.
-- **Verify:** write 3 memories, `recall` ranks the matching one first on SQLite (keyword) and on Postgres (hybrid); `supersede` removes the old row from recall while `get` still returns it; a write with the embedding provider unreachable still commits and is repaired by `backfill`.
+- **Verify:** write 3 memories, `recall` ranks the matching one first on ~~SQLite (keyword) and on Postgres (hybrid)~~ MemoryStore and FileSystemStore — **SQLite/Postgres land in P8**; `supersede` removes the old row from recall while `get` still returns it; a write with the embedding provider unreachable still commits and is repaired by `backfill`.
 - Checklist:
-  - [ ] Memory protocol
-  - [ ] BuiltinMemory + schema
-  - [ ] Hybrid recall + honest degradation
-  - [ ] Tools
-  - [ ] Best-effort embed + backfill
+  - [x] Memory protocol
+  - [x] BuiltinMemory + schema
+  - [x] Hybrid recall + honest degradation *(keyword half + the degradation surface; the vector half is P8/pgvector)*
+  - [x] Tools
+  - [x] Best-effort embed + backfill
+- Landed notes (P6):
+  - Rows live on the **concrete** stores, not in `BuiltinMemory`: MemoryStore/FileSystemStore grew `memory_put`/`memory_get`/`memory_all` (the frozen `Store` protocol is untouched); `BuiltinMemory` duck-checks for them and raises `TantraError` otherwise. P8's pgvector extends the same seam. FS rows are one JSON file each under `<root>/_memory/` (tmp + `os.replace`, last-write-wins, no lease); `_memory` is invisible to `list()` because it has no `session.json`.
+  - Recall is keyword-only for now: score = matched lowercase-alnum query tokens / total query tokens, `score > 0` required, sorted score desc then `created_at` desc, every hit `mode="keyword"`. Empty query, `k <= 0`, or no match → `[]`, never "everything". `kind`/`tags`/`entity` filters compare casefolded; `metadata` subset-match stays exact. Vectors are stored and backfilled but nothing reads them until P8.
+  - The built-in tools expose **no `metadata` parameter** and always write `metadata={}` — tenancy is app-scoped (decision above) and unreachable through the shipped tools; a multi-tenant app writes its own tools over `ctx.memory` (which cannot see session metadata — one `Memory` per tenant, or wrap it). `embedding` and `metadata` never appear in tool output.
+  - Embedder results are coerced to `list[float]` — at write time inside the best-effort try (junk vectors become the embed-failed → `embedding=None` case), at backfill time before any `memory_put` (raises loudly, nothing persisted). Without this a junk vector bricked every subsequent read.
+  - `supersede` of a deleted or already-superseded row raises (no forked chains). Put-order is new-then-old, so a failure superseding leaves the old row live and un-pointed; the reverse half-failure (new landed, old put failed) leaves two live rows — accepted, callers retry.
+  - `MemoryWrite` is `extra="forbid"` (callers can't smuggle `deleted`/`created_at`/`id` into rows); `MemoryRecord` stays `extra="allow"` as the persisted model. Corrupt FS row files raise `CorruptLog` naming the path.
+  - Import shape: `stores/fs.py` → `memory.py` → `tools.py`, so `tools.py` now imports `Store` (and `Memory`) under `TYPE_CHECKING` only — a runtime import of `tantra.stores.base` there re-creates a real cycle currently masked by import order.
+  - Follow-ups: same-score+same-timestamp ordering differs per backend (MemoryStore insertion order, FS filename sort — no id tie-break); `metadata={"k": None}` matches rows lacking the key; `memory_all` is a full scan per recall (fine now, P8 pushes down).
 
 ### Phase 7 — Compaction · deps: P2 · ∥ P4, P5, P6, P8 · —
 - `compaction.py`: `Compactor` protocol, `CompactionConfig`, `PruneThenSummarize`.

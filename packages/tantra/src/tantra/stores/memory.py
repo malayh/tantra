@@ -7,6 +7,7 @@ from typing import Any
 
 from tantra.errors import SeqConflict, SessionExists, SessionNotFound
 from tantra.events import Lease, SessionEvent, SessionHeader, Stamped
+from tantra.memory import MemoryRecord
 from tantra.stores.base import select_headers
 
 
@@ -15,6 +16,7 @@ class MemoryStore:
         self._headers: dict[str, SessionHeader] = {}
         self._events: dict[str, list[Stamped]] = {}
         self._leases: dict[str, Lease] = {}
+        self._memories: dict[str, MemoryRecord] = {}
         self._lock = threading.Lock()
 
     async def setup(self) -> None:
@@ -101,6 +103,19 @@ class MemoryStore:
             lease = self._leases.get(sid)
             if lease is not None and lease.holder == holder:
                 del self._leases[sid]
+
+    async def memory_put(self, row: MemoryRecord) -> None:
+        with self._lock:
+            self._memories[row.id] = row.model_copy(deep=True)
+
+    async def memory_get(self, mid: str) -> MemoryRecord | None:
+        with self._lock:
+            row = self._memories.get(mid)
+            return row.model_copy(deep=True) if row is not None else None
+
+    async def memory_all(self) -> list[MemoryRecord]:
+        with self._lock:
+            return [row.model_copy(deep=True) for row in self._memories.values()]
 
     def _with_lease(self, header: SessionHeader) -> SessionHeader:
         snapshot = header.model_copy(deep=True)

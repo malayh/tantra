@@ -144,7 +144,11 @@ class OpenAICompatible:
                 raise ProviderError(f"no SSE data frames from {self.base_url}")
             final = state.get_final_completion()
         except openai.OpenAIError as exc:
-            raise ProviderError(str(exc), status_code=getattr(exc, "status_code", None)) from exc
+            raise ProviderError(
+                str(exc),
+                status_code=getattr(exc, "status_code", None),
+                retryable=True if isinstance(exc, openai.APIConnectionError) else None,
+            ) from exc
         except (TypeError, ValueError, AttributeError, KeyError, AssertionError) as exc:
             raise ProviderError(f"malformed stream from {self.base_url}: {exc!r}") from exc
 

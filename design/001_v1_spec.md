@@ -384,7 +384,7 @@ Where the graph lies: **P5, P6 and P7 all edit context assembly** (`context.py:b
   - ~~Tool-call slots key by `index`, else by `id`, else continue the last slot~~ **Changed in the SDK swap.** Accumulation is the SDK's; a delta without `index` raises `ProviderError`. Missing ids are still synthesized as `call_{index}`.
   - `ProviderError` carries `status_code: int | None` — P2's `RetryConfig` keys retryability (429/5xx/timeout) off it, no message parsing.
 
-### Phase 2 — The turn loop · deps: P0, P1 · —
+### Phase 2 — The turn loop · deps: P0, P1 · **done**
 First genuinely useful phase: non-interactive agents work end to end.
 - `agent.py` (`Agent` + name derivation + transitive `subagents` name table), `tools.py` (`@tool`, schema inference from type hints + docstring, `ctx` stripping), `context.py` (system prompt + history + tool schemas), `loop.py`, `harness.py` (`create_session`, `run`, `replay`).
 - Serial tool dispatch. Tool exceptions become `is_error` results the model can see. `max_steps` stop with orphan-call synthesis. Usage accumulation onto the header. `RetryConfig` backoff around the sample step.
@@ -392,12 +392,23 @@ First genuinely useful phase: non-interactive agents work end to end.
 - `adapters/collect.py`.
 - **Verify:** with `FakeProvider` scripted to call `search_metrics` then answer, `collect(harness.run(...))` yields `ToolCallRequested → ToolCallStarted → ToolCallCompleted → TextPart → TurnCompleted` in that order, and `replay()` from a fresh `Harness` over the same store reconstructs identical events. A tool that raises produces `is_error=True` and the loop continues to a second sample.
 - Checklist:
-  - [ ] Agent class + name table
-  - [ ] `@tool` schema inference + ctx injection
-  - [ ] Context assembly
-  - [ ] Loop with serial dispatch + max_steps
-  - [ ] `output_schema` via submit_output
-  - [ ] collect adapter
+  - [x] Agent class + name table
+  - [x] `@tool` schema inference + ctx injection
+  - [x] Context assembly
+  - [x] Loop with serial dispatch + max_steps
+  - [x] `output_schema` via submit_output
+  - [x] collect adapter
+- Landed notes (P2):
+  - Emitted envelope: `Emitted(session_id, depth, seq: int | None, event)` in `loop.py`; deltas carry `seq=None`. `run()`/`replay()` are async generators — `SessionBusy`/`TurnIncomplete`/`SessionNotFound`/missing-model errors surface on first iteration, not at call time.
+  - `ProviderError` gained `retryable: bool | None` (errors.py is not frozen); `openai_compat` sets it for `APIConnectionError` (timeouts have no status). Retryable = flag OR 429 OR ≥500; FakeProvider exhaustion (neither) is never retried.
+  - Lease is re-acquired (same holder, TTL extended) at every sample boundary; a stolen lease raises mid-turn with nothing further appended and the header left untouched — the loser must not clobber the new holder's `status`.
+  - `SampleStarted` is appended once per sample before the first attempt; a failed sample's log tail is exactly `SampleStarted → TurnFailed`. Partial-stream parts are buffered and discarded on retry.
+  - `ToolCallStarted` only for calls that actually execute; invalid-JSON / unknown-tool / capped / post-submit orphans go `ToolCallRequested → ToolCallCompleted(is_error=True)` with no Started.
+  - `submit_output` dispatches before the `max_steps` cap check (submitting costs no sample) and is only special when `output_schema` is set.
+  - `ctx.emit` is queue-mediated — only the loop generator ever appends, keeping `expect_seq` single-threaded; `ToolProgress` lands between Started and Completed. The append happens at the tool's next await point, not inside `emit` itself.
+  - Tool tasks are cancelled and awaited when the consumer abandons the stream (`aclosing` throughout) — abandonment leaves status `idle`, lease released, turn incomplete; the next `run()` raises `TurnIncomplete` (P3's `resume` entry point).
+  - Follow-up (P9): a retried sample re-yields its live deltas with no reset marker on the stream — adapters double-render partial text; `Emitted` is `extra="allow"`, an attempt marker would do.
+  - Schema validation at `Harness` construction rejects unannotated `ctx` params and required properties with no inferable JSON type; `max_steps < 1` also rejected there.
 
 ### Phase 3 — Control layer: ask/resume, permissions, cancel, hooks · deps: P2 · —
 - `ask.py`: `Approval`/`Choice`/`FreeText` + response types.

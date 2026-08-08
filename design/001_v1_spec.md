@@ -287,7 +287,7 @@ summarize_at    = 0.95     # of usable, after pruning
 | Backend | Layout | Notes |
 |---|---|---|
 | `MemoryStore` | dicts | Test default; zero config. |
-| `FileSystemStore` | `<root>/<sid>/session.json` + `events.jsonl` | Lease is an `fcntl.flock` on a lockfile. |
+| `FileSystemStore` | `<root>/<sid>/session.json` + `events.jsonl` | ~~Lease is an `fcntl.flock` on a lockfile.~~ **Changed in P0.** Lease is a TTL'd record inside `<sid>/.lock`, with `fcntl.flock` as the mutex guarding it — bare flock can't express TTL and dies with the process, contradicting durable suspend. |
 | `SQLiteStore` | `sessions`, `events(session_id, seq)` PK | WAL mode. |
 | `PostgresStore` | same tables in a dedicated `tantra` schema | `setup()` is idempotent and versioned; `metadata` is JSONB + GIN. Mirrors what `core/langgraph.py` already does with `search_path=langgraph` and `saver.setup()`. |
 
@@ -337,18 +337,30 @@ Where the graph lies: **P5, P6 and P7 all edit context assembly** (`context.py:b
 - After a phase lands, add only detail that would surprise the next reader — a constant whose value is load-bearing, a behavior that isn't what the name suggests, an ordering that matters. Skip anything the code already says plainly.
 - Problems found but not fixed go to Open Decisions or a Follow-up note, with enough detail to act on later. Don't fix them inline and don't leave them unrecorded.
 
-### Phase 0 — Event log + Store protocol + memory/FS backends · deps: none · ∥ P1 · blocks all · —
+### Phase 0 — Event log + Store protocol + memory/FS backends · deps: none · ~~∥ P1~~ · blocks all · **done**
+
+~~∥ P1~~ **Run sequentially in P0.** Empty repo — both phases would create the same scaffolding (workspace pyproject, justfile); parallel worktrees would conflict there.
 - `events.py`: the `SessionEvent` discriminated union and `SessionHeader`, as tabled above; version int on the envelope, unknown fields tolerated on read.
 - `stores/base.py`: `Store` protocol with `expect_seq` optimistic concurrency and leases.
 - `stores/memory.py`, `stores/fs.py`. FS lease via `fcntl.flock` on `<sid>/.lock`.
 - `testing.py`: `store_conformance(store)` — one suite every backend must pass.
 - **Verify:** conformance suite green on both backends. Specifically: appending with a stale `expect_seq` raises; two concurrent `acquire_lease` calls, exactly one wins; `read(from_seq=n)` returns a contiguous suffix; a JSONL file with a truncated final line still reads every complete event before it.
 - Checklist:
-  - [ ] Event union + header
-  - [ ] Store protocol
-  - [ ] MemoryStore
-  - [ ] FileSystemStore
-  - [ ] Conformance suite
+  - [x] Event union + header
+  - [x] Store protocol
+  - [x] MemoryStore
+  - [x] FileSystemStore
+  - [x] Conformance suite
+- Landed notes (P0):
+  - `store_conformance(store_factory)`, not `(store)` — multi-instance/multi-thread lease checks need fresh instances.
+  - `Store.read` is `def` returning `AsyncIterator[Stamped]` (structural match for async generators), not `async def`.
+  - Typed errors in `errors.py`: `SeqConflict`, `SessionExists` (`create` on existing id raises), `SessionNotFound`, `CorruptLog`.
+  - `read()` tolerates only a torn (newline-less) final line; a complete line that fails validation raises `CorruptLog` — unknown event *types* are never silently dropped.
+  - FS `append` reconciles `session.json` from the log tail seq under flock (log is source of truth after a crash between fsync and header write).
+  - `put_header` preserves store-owned `last_seq` and `lease`; expired leases are returned unfiltered on headers (callers compare `expires_at`).
+  - `Usage` (token counts) and `Lease` (holder, expires_at) models added; both `extra="allow"`.
+  - `AskRaised.request` / `AskAnswered.response` are `dict` until P3 lands the typed ask classes — P3 swaps them in; noted here since the union freezes after P0/P1.
+  - `SessionCreated` is in the union but nothing appends it yet — P2's job.
 
 ### Phase 1 — Provider protocol + OpenAI-compatible + FakeProvider · deps: none · ∥ P0 · —
 - `providers/base.py`: `Provider`, `Embedder`, `SampleRequest` (`model`, system blocks with `cache` markers, messages, tool schemas, params), `ProviderEvent` union, `ModelLimits` via `limits(model)`.
@@ -474,6 +486,7 @@ Real and usable, not elaborate. It exists to make gaps in the library show up.
 
 ## Open Decisions
 
+- **Event timestamps.** The event table has no per-event timestamp and P0 added none. Adding one later is a log-format change; decide before anything depends on replay ordering by time. (Raised in P0 review.)
 - **Cross-process live tailing.** v1 ships `replay(from_seq)` (finite) only. A client reconnecting to a pod that isn't running the turn must poll. Resolving it needs a pub/sub — Postgres `LISTEN/NOTIFY` for the PG backend, or a `Bus` protocol with a Redis implementation. Decide once a real deployment hits it.
 - **Artifact / `editable_object`.** Kept out of core; `observability_ui`'s dashboard editor needs it and will implement it application-side first. Promote to core only if a second consumer needs the same thing.
 - **MCP client.** Deferred. Nothing in the current agents needs it. Revisit when an external tool server is actually wanted.

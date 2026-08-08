@@ -1,0 +1,38 @@
+[project]
+name = "tantra-workspace"
+version = "0.0.0"
+description = "Tantra — agent harness framework (monorepo workspace root)"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+authors = [{ name = "Malay Hazarika", email = "malay.hazarika@gmail.com" }]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/tantra", "apps/agni"]
+
+[tool.uv.sources]
+tantra = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tantra", "agni"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["packages/tantra/tests"]

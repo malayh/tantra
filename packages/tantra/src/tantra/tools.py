@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable
-from typing import Any, get_type_hints
+from collections.abc import Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING, Any, get_type_hints
 
 from pydantic import BaseModel, create_model
 
@@ -10,6 +10,9 @@ from tantra.ask import AskRequest, AskResponse
 from tantra.errors import TantraError
 from tantra.providers.base import ToolSchema
 from tantra.stores.base import Store
+
+if TYPE_CHECKING:
+    from tantra.agent import Agent
 
 
 class Context:
@@ -29,6 +32,8 @@ class Context:
         store: Store,
         emit: Callable[[str], Awaitable[None]],
         ask: Callable[[AskRequest], Awaitable[AskResponse]] | None = None,
+        spawn: Callable[[type[Agent] | str, str], Awaitable[Any]] | None = None,
+        fan_out: Callable[[Sequence[tuple[type[Agent] | str, str]], int], Awaitable[list[Any]]] | None = None,
     ) -> None:
         self.session_id = session_id
         self.turn_id = turn_id
@@ -38,6 +43,8 @@ class Context:
         self.store = store
         self._emit = emit
         self._ask = ask
+        self._spawn = spawn
+        self._fan_out = fan_out
 
     async def emit(self, message: str) -> None:
         """Record progress for the running tool call as a persisted `ToolProgress` event."""
@@ -53,6 +60,26 @@ class Context:
         if self._ask is None:
             raise TantraError("ctx.ask is only available inside a running tool call")
         return await self._ask(request)
+
+    async def spawn(self, agent: type[Agent] | str, input: str) -> Any:
+        """Run `agent` as a child session and return its final text, or its parsed `output_schema`.
+
+        Re-entrant: a resumed turn re-executes the tool and attaches to the child already recorded
+        for this call rather than creating a second one. A child that asks suspends this turn too.
+        """
+        if self._spawn is None:
+            raise TantraError("ctx.spawn is only available inside a running tool call")
+        return await self._spawn(agent, input)
+
+    async def fan_out(self, tasks: Sequence[tuple[type[Agent] | str, str]], max_concurrency: int = 4) -> list[Any]:
+        """Run `(agent, input)` pairs as concurrent child sessions.
+
+        Results are positionally aligned with `tasks`; a task that fails contributes its exception
+        in place of a result instead of failing the turn.
+        """
+        if self._fan_out is None:
+            raise TantraError("ctx.fan_out is only available inside a running tool call")
+        return await self._fan_out(tasks, max_concurrency)
 
 
 def _args_model(fn: Callable[..., Any], name: str) -> tuple[str | None, type[BaseModel]]:

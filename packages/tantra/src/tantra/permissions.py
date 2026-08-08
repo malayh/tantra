@@ -16,6 +16,11 @@ def check_permission(label: str, value: str) -> str:
     return value
 
 
+def strictest(*verdicts: str) -> str:
+    """Return the most restrictive of the given verdicts: `deny` beats `ask` beats `allow`."""
+    return max(verdicts, key=lambda verdict: _STRICTNESS[verdict])
+
+
 def decide(name: str, rules: Mapping[str, str], tool_permission: str | None, default: str) -> str:
     """Resolve a tool name to `allow`, `ask` or `deny`.
 

@@ -434,18 +434,27 @@ First genuinely useful phase: non-interactive agents work end to end.
   - `TurnState.observe` (loop.py) is the single turn-state mutation point — `_append`, `_absorb` and `derive_turn_state` all feed it; P4 must teach it `ChildSessionSpawned` for re-entrant spawn.
   - Follow-up (P9): `AskAnswered.answered_by` is never populated — `resume()` exposes no parameter for it.
 
-### Phase 4 — Sub-agents + fan-out · deps: P3 · ∥ P5, P6, P7, P8 · —
+### Phase 4 — Sub-agents + fan-out · deps: P3 · ∥ P5, P6, P7, P8 · **done**
 - Child sessions (`parent_id`, `depth`), `max_depth`, derived permissions.
 - `subagents = [...]` → auto-generated tools; `ctx.spawn` (re-entrant, attaches via `ChildSessionSpawned`); `ctx.fan_out(max_concurrency)`.
 - Live child-event forwarding onto the parent stream with `session_id` + `depth`; child asks bubble and suspend the ancestry.
-- **Verify:** a parent whose sub-agent calls two tools shows those events on the parent stream at `depth=1`, and the parent's own log contains only the `task` call plus `ChildSessionSpawned`. `fan_out` of 3 where one raises returns 2 results + 1 error and the parent turn completes. Depth 4 with `max_depth=3` raises before the child session is created. A child that asks suspends both sessions; `resume(child_sid, ask_id, response)` then `resume(parent_sid)` — from a fresh `Harness` — completes both turns without a duplicate child.
+- **Verify:** a parent whose sub-agent calls two tools shows those events on the parent stream at `depth=1`, and the parent's own log contains only the `task` call plus `ChildSessionSpawned`. `fan_out` of 3 where one raises returns 2 results + 1 error and the parent turn completes. ~~Depth 4 with `max_depth=3`~~ **Tested as depth 2 with `max_depth=1` (P4)** — same single code path (`parent.depth + 1 > max_depth`), far fewer scripted samples — raises before the child session is created. A child that asks suspends both sessions; `resume(child_sid, ask_id, response)` then `resume(parent_sid)` — from a fresh `Harness` — completes both turns without a duplicate child.
 - Checklist:
-  - [ ] Child sessions + depth limit
-  - [ ] Derived permissions
-  - [ ] subagents-as-tools + re-entrant spawn
-  - [ ] fan_out with partial failure
-  - [ ] Event forwarding
-  - [ ] Bubbled ask + two-step resume
+  - [x] Child sessions + depth limit
+  - [x] Derived permissions
+  - [x] subagents-as-tools + re-entrant spawn
+  - [x] fan_out with partial failure
+  - [x] Event forwarding
+  - [x] Bubbled ask + two-step resume
+- Landed notes (P4):
+  - Spawn/fan_out are queue-mediated through `_execute` like ask; only the loop appends `ChildSessionSpawned`. Attach-or-create is by spawn index per call_id (`TurnState.children` + a per-call cursor). `Spawner.resolve` — name-table lookup **and** the `max_depth` check, both pure functions of `(agent, parent depth)` — runs *before* the cursor is read, so a failing spawn never consumes an attachment slot; ordering it after created twin children on resume (caught in review). Store-level `create()` failures propagate out of the turn instead of filling a slot, for the same reason.
+  - Child outcome mapping: `TurnCompleted.output` → result; else the final sample's text. `TurnFailed`, a cancelled child, and `max_steps` with no output are all **errors** (spawn raises → `is_error` result; the fan_out slot holds the exception). `SessionBusy` while driving a child propagates out of the parent turn, leaving it incomplete and resumable — it must never terminally answer the spawn call while the child sits suspended.
+  - Bubbling: the parent suspends with `loop.suspended` = the child's pending ask, so its header shows `awaiting_input`/`pending_ask` — but the ask lives in the **child's** log, so `resume(parent, ask_id, …)` rejects it and bare `resume(parent)` takes the re-drive path (re-executes the spawn tool from the start; attach makes it idempotent; recursive over depth). fan_out lets runnable children finish before bubbling the lowest waiting task index. The parent's `pending_ask` can go stale between resume cycles (child moved on to a second ask) — self-heals on the next bare resume.
+  - Derived permissions: verdict = strictest of the child's `decide(...)` and each ancestor's `decide(name, rules, None, default_permission)`. A rule-less ancestor still contributes the harness default, so `default_permission="ask"` overrides a child's explicit `allow` (never-widening, by design). The chain is rebuilt on resume by walking `parent_id`; a missing ancestor header fails closed (raises), and resuming a child requires its ancestor agents to be registered in the harness.
+  - Subagent tool: param is `task: str`; description = `sub.__doc__`, **not** `inspect.getdoc` (which inherits `Agent`'s base docstring).
+  - `on_event` fires once per forwarded child event — the parent's `run()` skips non-parent session_ids because the child's own loop already fired the hooks. Child metadata is a copy of the parent's (`deps_factory` scoping).
+  - `SessionBusy(sid)` now requires the sid and carries a real message (errors.py is not frozen).
+  - Follow-up (P9): cancelling a parent that is suspended on a child ask synthesizes the spawn call and ends the parent, but the child stays `awaiting_input` forever — no ancestor will re-drive it; a server sweep must notice orphaned children via `list(parent_id=...)`.
 
 ### Phase 5 — Skills · deps: P2 · ∥ P4, P6, P7, P8 · —
 - `skills.py`: `Skills` protocol, `FileSystemSkills(root)` parsing `SKILL.md` YAML frontmatter (`name`, `description`) — the format already used across `kalki/skills/` and `.agents/skills/`.

@@ -5,7 +5,7 @@ description = "Agent harness framework — the turn loop as a library"
 requires-python = ">=3.13"
 license = "Apache-2.0"
 authors = [{ name = "Malay Hazarika", email = "malay.hazarika@gmail.com" }]
-dependencies = ["pydantic>=2.9", "httpx>=0.27"]
+dependencies = ["pydantic>=2.9", "httpx>=0.27", "openai>=2.0"]
 
 [build-system]
 requires = ["hatchling"]

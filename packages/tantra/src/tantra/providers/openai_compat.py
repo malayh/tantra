@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+import openai
+from openai import AsyncOpenAI
+from openai.lib.streaming.chat import ChatCompletionStreamState
 
 from tantra.errors import ProviderError
 from tantra.events import Usage
@@ -52,27 +54,6 @@ def _usage_payload(raw: dict[str, Any]) -> Usage:
     )
 
 
-def _slot_for(
-    raw_call: dict[str, Any],
-    slots: list[dict[str, Any]],
-    by_key: dict[Any, dict[str, Any]],
-) -> dict[str, Any]:
-    key = raw_call.get("index")
-    if key is None:
-        key = raw_call.get("id")
-    if key is None:
-        if slots:
-            return slots[-1]
-    elif key in by_key:
-        return by_key[key]
-
-    slot: dict[str, Any] = {"index": raw_call.get("index", len(slots)), "id": None, "name": None, "args": ""}
-    slots.append(slot)
-    if key is not None:
-        by_key[key] = slot
-    return slot
-
-
 class OpenAICompatible:
     def __init__(
         self,
@@ -80,19 +61,25 @@ class OpenAICompatible:
         api_key: str,
         *,
         limits: dict[str, ModelLimits] | None = None,
-        client: httpx.AsyncClient | None = None,
+        http_client: httpx.AsyncClient | None = None,
         timeout: float = 120.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self._limits = dict(limits or {})
-        self._client = client if client is not None else httpx.AsyncClient(timeout=timeout)
+        self._client = AsyncOpenAI(
+            base_url=self.base_url,
+            api_key=api_key,
+            http_client=http_client,
+            timeout=timeout,
+            max_retries=0,
+        )
 
     def limits(self, model: str) -> ModelLimits:
         return self._limits.get(model, FALLBACK_LIMITS)
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        await self._client.close()
 
     def build_payload(self, req: SampleRequest) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
@@ -100,11 +87,11 @@ class OpenAICompatible:
             messages.append({"role": "system", "content": "\n\n".join(block.text for block in req.system)})
         messages.extend(_message_payload(message) for message in req.messages)
 
-        payload: dict[str, Any] = {key: value for key, value in req.params.items() if key not in RESERVED_KEYS}
-        payload["model"] = req.model
-        payload["messages"] = messages
-        payload["stream"] = True
-        payload["stream_options"] = {"include_usage": True}
+        payload: dict[str, Any] = {
+            "model": req.model,
+            "messages": messages,
+            "stream_options": {"include_usage": True},
+        }
         if req.tools:
             payload["tools"] = [
                 {
@@ -117,101 +104,70 @@ class OpenAICompatible:
                 }
                 for tool in req.tools
             ]
+        extra = {key: value for key, value in req.params.items() if key not in RESERVED_KEYS}
+        if extra:
+            payload["extra_body"] = extra
         return payload
 
     async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
-        headers = {"Authorization": f"Bearer {self.api_key}", "Accept": "text/event-stream"}
-        text = ""
         reasoning = ""
-        slots: list[dict[str, Any]] = []
-        by_key: dict[Any, dict[str, Any]] = {}
-        usage = Usage()
-        finish_reason: str | None = None
-        saw_data = False
+        saw_chunk = False
 
-        async with self._client.stream(
-            "POST",
-            f"{self.base_url}/chat/completions",
-            json=self.build_payload(req),
-            headers=headers,
-        ) as response:
-            if response.status_code >= 300:
-                body = (await response.aread()).decode(errors="replace")
-                raise ProviderError(f"{response.status_code} from {self.base_url}: {body[:500]}")
-
-            async for line in response.aiter_lines():
-                data = _sse_data(line)
-                if data is None:
+        state = ChatCompletionStreamState()
+        try:
+            chunks = await self._client.chat.completions.create(stream=True, **self.build_payload(req))
+            async for chunk in chunks:
+                saw_chunk = True
+                state.handle_chunk(chunk)
+                if not chunk.choices:
                     continue
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError as exc:
-                    raise ProviderError(f"malformed SSE payload: {data[:200]}") from exc
 
-                saw_data = True
-                if chunk.get("error"):
-                    raise ProviderError(f"stream error from {self.base_url}: {json.dumps(chunk['error'])[:500]}")
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    yield TextDelta(text=delta.content)
 
-                if chunk.get("usage"):
-                    usage = _usage_payload(chunk["usage"])
+                fragment = getattr(delta, "reasoning", None)
+                if fragment:
+                    reasoning += fragment
+                    yield ReasoningDelta(text=fragment)
 
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                choice = choices[0]
-                if choice.get("finish_reason"):
-                    finish_reason = choice["finish_reason"]
-
-                delta = choice.get("delta") or {}
-                if delta.get("content"):
-                    text += delta["content"]
-                    yield TextDelta(text=delta["content"])
-                if delta.get("reasoning"):
-                    reasoning += delta["reasoning"]
-                    yield ReasoningDelta(text=delta["reasoning"])
-
-                for raw_call in delta.get("tool_calls") or []:
-                    function = raw_call.get("function") or {}
-                    fragment = function.get("arguments") or ""
-                    slot = _slot_for(raw_call, slots, by_key)
-                    if raw_call.get("id"):
-                        slot["id"] = raw_call["id"]
-                    if function.get("name"):
-                        slot["name"] = function["name"]
-                    slot["args"] += fragment
+                for raw_call in delta.tool_calls or []:
+                    function = raw_call.function
                     yield ToolCallDelta(
-                        index=slot["index"],
-                        id=raw_call.get("id"),
-                        name=function.get("name"),
-                        args_fragment=fragment,
+                        index=raw_call.index,
+                        id=raw_call.id,
+                        name=function.name if function else None,
+                        args_fragment=(function.arguments if function else None) or "",
                     )
 
-        if not saw_data:
-            raise ProviderError(f"no SSE data frames from {self.base_url}")
+            if not saw_chunk:
+                raise ProviderError(f"no SSE data frames from {self.base_url}")
+            final = state.get_final_completion()
+        except openai.OpenAIError as exc:
+            raise ProviderError(str(exc), status_code=getattr(exc, "status_code", None)) from exc
+        except (TypeError, ValueError, AttributeError, KeyError, AssertionError) as exc:
+            raise ProviderError(f"malformed stream from {self.base_url}: {exc!r}") from exc
 
+        choice = final.choices[0] if final.choices else None
+        message = choice.message if choice else None
         calls = [
-            ToolCall(id=slot["id"] or f"call_{slot['index']}", name=slot["name"] or "", args=slot["args"])
-            for slot in sorted(slots, key=lambda slot: slot["index"])
+            ToolCall(
+                id=raw_call.id or f"call_{index}",
+                name=raw_call.function.name or "",
+                args=raw_call.function.arguments or "",
+            )
+            for index, raw_call in enumerate(message.tool_calls or [] if message else [])
         ]
         for call in calls:
             yield call
 
         yield StreamEnd(
-            text=text,
+            text=(message.content if message else None) or "",
             reasoning=[ReasoningBlock(text=reasoning)] if reasoning else [],
             tool_calls=calls,
-            usage=usage,
-            finish_reason=finish_reason,
+            usage=_usage_payload(final.usage.model_dump()) if final.usage else Usage(),
+            finish_reason=choice.finish_reason if choice else None,
         )
-
-
-def _sse_data(line: str) -> str | None:
-    stripped = line.strip()
-    if not stripped or stripped.startswith(":") or not stripped.startswith("data:"):
-        return None
-    return stripped[len("data:") :].strip()
 
 
 class OpenAICompatibleEmbedder:
@@ -221,24 +177,26 @@ class OpenAICompatibleEmbedder:
         api_key: str,
         model: str,
         *,
-        client: httpx.AsyncClient | None = None,
+        http_client: httpx.AsyncClient | None = None,
         timeout: float = 120.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
-        self._client = client if client is not None else httpx.AsyncClient(timeout=timeout)
+        self._client = AsyncOpenAI(
+            base_url=self.base_url,
+            api_key=api_key,
+            http_client=http_client,
+            timeout=timeout,
+            max_retries=0,
+        )
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        await self._client.close()
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        response = await self._client.post(
-            f"{self.base_url}/embeddings",
-            json={"model": self.model, "input": texts},
-            headers={"Authorization": f"Bearer {self.api_key}"},
-        )
-        if response.status_code >= 300:
-            raise ProviderError(f"{response.status_code} from {self.base_url}: {response.text[:500]}")
-        rows = response.json().get("data") or []
-        return [row["embedding"] for row in sorted(rows, key=lambda row: row.get("index", 0))]
+        try:
+            response = await self._client.embeddings.create(model=self.model, input=texts)
+        except openai.OpenAIError as exc:
+            raise ProviderError(str(exc), status_code=getattr(exc, "status_code", None)) from exc
+        return [row.embedding for row in sorted(response.data, key=lambda row: row.index)]

@@ -134,7 +134,9 @@ async def test_recorder_survives_a_multibyte_char_split_across_chunks(tmp_path: 
         body.decode() + "data: [DONE]\n\n"
     )
 
-    api = OpenAICompatible("https://api.test/v1", "sk", client=httpx.AsyncClient(transport=cassette_transport(path)))
+    api = OpenAICompatible(
+        "https://api.test/v1", "sk", http_client=httpx.AsyncClient(transport=cassette_transport(path))
+    )
     events = [event async for event in api.stream(REQ)]
     assert events[-1].text == "café"
     await api.aclose()

@@ -43,7 +43,7 @@ async def provider() -> AsyncIterator[Callable[[httpx.MockTransport], OpenAIComp
 
     def factory(transport: httpx.MockTransport, **kwargs) -> OpenAICompatible:
         api = OpenAICompatible(
-            "https://api.test/v1", "sk-test", client=httpx.AsyncClient(transport=transport), **kwargs
+            "https://api.test/v1", "sk-test", http_client=httpx.AsyncClient(transport=transport), **kwargs
         )
         built.append(api)
         return api
@@ -62,7 +62,7 @@ async def embedder() -> AsyncIterator[Callable[[httpx.MockTransport], OpenAIComp
             "https://api.test/v1",
             "sk-test",
             "text-embedding-3-small",
-            client=httpx.AsyncClient(transport=transport),
+            http_client=httpx.AsyncClient(transport=transport),
         )
         built.append(api)
         return api
@@ -184,22 +184,14 @@ async def test_two_tool_calls_with_interleaved_index_fragments(tmp_path: Path, p
     assert events[-1].tool_calls == calls
 
 
-async def test_tool_calls_without_an_index_stay_separate(tmp_path: Path, provider) -> None:
+async def test_tool_call_delta_without_an_index_raises_a_typed_error(tmp_path: Path, provider) -> None:
     chunks = [
-        frame({"tool_calls": [{"id": "a", "function": {"name": "left", "arguments": '{"x"'}}]}),
-        frame({"tool_calls": [{"function": {"arguments": ":1}"}}]}),
-        frame({"tool_calls": [{"id": "b", "function": {"name": "right", "arguments": '{"y"'}}]}),
-        frame({"tool_calls": [{"function": {"arguments": ":2}"}}]}),
+        frame({"tool_calls": [{"id": "a", "function": {"name": "left", "arguments": "{}"}}]}),
         "data: [DONE]\n\n",
     ]
 
-    events = await collect(provider(replay(tmp_path, chunks)).stream(REQ))
-
-    calls = [event for event in events if isinstance(event, ToolCall)]
-    assert [(call.id, call.name, call.args) for call in calls] == [
-        ("a", "left", '{"x":1}'),
-        ("b", "right", '{"y":2}'),
-    ]
+    with pytest.raises(ProviderError, match="malformed stream"):
+        await collect(provider(replay(tmp_path, chunks)).stream(REQ))
 
 
 async def test_missing_tool_call_id_is_synthesized(tmp_path: Path, provider) -> None:
@@ -272,7 +264,7 @@ async def test_non_2xx_raises_provider_error(tmp_path: Path, provider) -> None:
 async def test_malformed_sse_payload_raises_provider_error(tmp_path: Path, provider) -> None:
     transport = replay(tmp_path, ["data: {not json\n\n"])
 
-    with pytest.raises(ProviderError, match="malformed SSE"):
+    with pytest.raises(ProviderError, match="JSONDecodeError"):
         await collect(provider(transport).stream(REQ))
 
 
@@ -389,7 +381,8 @@ async def test_embedder_returns_vectors_in_input_order(embedder) -> None:
     api = embedder(httpx.MockTransport(handler))
 
     assert await api.embed(["a", "b"]) == [[0.1, 0.2], [0.3, 0.4]]
-    assert seen[0] == {"model": "text-embedding-3-small", "input": ["a", "b"]}
+    assert seen[0]["model"] == "text-embedding-3-small"
+    assert seen[0]["input"] == ["a", "b"]
 
 
 async def test_embedder_raises_on_error_status(embedder) -> None:

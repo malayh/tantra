@@ -61,6 +61,7 @@
 - **Events carry a version int**; readers tolerate unknown fields. The log outlives the code that wrote it.
 - **`TurnStarted.input` is `str`.** Multimodal input is out of v1.
 - **Memory rows carry `metadata: dict`** exactly like sessions — recall filters on it, tantra enforces nothing. Without it a multi-tenant app leaks memories across tenants with no way to filter.
+- **Unattended guardrails are `before_tool` hooks, not declarative arg rules.** No-HITL runs use `allow`/`deny` rulesets plus a hook that denies or transforms calls by args; `deny` is an `is_error` result the model adapts to, never a suspend. Declarative arg-level rules stay parked in Open Decisions. Demonstrated in `apps/agni` (P10).
 - **Compaction: prune-then-summarize**, all thresholds in `CompactionConfig`, behind a `Compactor` protocol.
 - **Structured final output via a synthetic tool.** `Agent.output_schema` appends a `submit_output` tool; the turn ends when the model calls it. Rejected the current two-pass approach (`dashboard_editor.py:134-144` runs a second LLM with `with_structured_output` and routes on a regex) — one model call, no regex, and the schema is enforced by the provider.
 - **License: Apache-2.0.** Patent grant; what a framework is expected to ship under.
@@ -460,12 +461,14 @@ Real and usable, not elaborate. It exists to make gaps in the library show up.
 - Tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`.
 - Agents: `build` (full access) and `explore` (read-only, available as a sub-agent).
 - Permissions: reads allow, writes and bash ask. FS skills from `./skills`. Session resume. Compaction on.
+- `--auto` mode: everything `allow`, no prompts; a `before_tool` bash guard denies destructive commands (`rm -rf`, `git push --force`, …) — the hook-based unattended-guardrail pattern, demonstrated.
 - `main.py` over `adapters/cli.py`, ~30 lines.
-- **Verify:** on a scratch git repo, ask it to add a function to an existing file — it greps, reads, prompts before writing, and produces a correct edit. `^C` mid-turn then re-running with the same session id resumes rather than restarting. A task that fills the context window compacts and continues instead of erroring.
+- **Verify:** on a scratch git repo, ask it to add a function to an existing file — it greps, reads, prompts before writing, and produces a correct edit. `^C` mid-turn then re-running with the same session id resumes rather than restarting. A task that fills the context window compacts and continues instead of erroring. In `--auto`, a prompt that leads the model to `rm -rf` gets a denial the model recovers from, with zero human input for the whole turn.
 - Checklist:
   - [ ] Six tools
   - [ ] build + explore agents
   - [ ] Permission prompts
+  - [ ] `--auto` + bash guard hook
   - [ ] Session resume
   - [ ] End-to-end run on a scratch repo
 

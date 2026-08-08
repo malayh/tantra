@@ -1,0 +1,36 @@
+{
+  "interactions": [
+    {
+      "method": "POST",
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "status": 200,
+      "content_type": "text/event-stream",
+      "chunks": [
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"The user wants request rate. \"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"Search the metric catalogue first.\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me look \"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"that up.\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_9xQvT2\",\"type\":\"function\",\"function\":{\"name\":\"search_metrics\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"qu\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ery\\\"\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\": \\\"h\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ttp_\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"requ\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ests\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"_tot\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"al r\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"ate \"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"by (\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"job)\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\", \\\"\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"limi\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"t\\\": \"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"25}\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: {\"id\":\"chatcmpl-tantra-p1\",\"object\":\"chat.completion.chunk\",\"created\":1770000000,\"model\":\"google/gemini-3-pro\",\"choices\":[],\"usage\":{\"prompt_tokens\":1834,\"completion_tokens\":47,\"total_tokens\":1881,\"prompt_tokens_details\":{\"cached_tokens\":1024}}}\n\n",
+        "data: [DONE]\n\n"
+      ]
+    }
+  ]
+}

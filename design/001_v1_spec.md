@@ -362,16 +362,25 @@ Where the graph lies: **P5, P6 and P7 all edit context assembly** (`context.py:b
   - `AskRaised.request` / `AskAnswered.response` are `dict` until P3 lands the typed ask classes — P3 swaps them in; noted here since the union freezes after P0/P1.
   - `SessionCreated` is in the union but nothing appends it yet — P2's job.
 
-### Phase 1 — Provider protocol + OpenAI-compatible + FakeProvider · deps: none · ∥ P0 · —
+### Phase 1 — Provider protocol + OpenAI-compatible + FakeProvider · deps: none · ∥ P0 · **done**
 - `providers/base.py`: `Provider`, `Embedder`, `SampleRequest` (`model`, system blocks with `cache` markers, messages, tool schemas, params), `ProviderEvent` union, `ModelLimits` via `limits(model)`.
 - `providers/openai_compat.py`: streaming chat completions against OpenRouter; accumulates fragmented `ToolCallDelta`s into complete calls; surfaces `usage`; constructor takes `limits: dict[str, ModelLimits]` with a conservative fallback for unknown models.
 - `providers/fake.py`: `FakeProvider([Sample(text=...), Sample(tool_calls=[...])])` plus cassette record/replay.
-- **Verify:** a recorded OpenRouter cassette with tool-call arguments split across 12 SSE chunks replays into exactly one `ToolCallRequested` with byte-identical JSON args. `FakeProvider` scripted with two samples yields the exact expected `ProviderEvent` sequence.
+- **Verify:** a ~~recorded~~ **hand-authored (P1: no network/keys in CI; recorder exists for dev-time capture)** OpenRouter cassette with tool-call arguments split across 12 SSE chunks (landed: 15) replays into exactly one `ToolCallRequested` with byte-identical JSON args. `FakeProvider` scripted with two samples yields the exact expected `ProviderEvent` sequence.
 - Checklist:
-  - [ ] Provider protocol + request/event types
-  - [ ] OpenAI-compatible streaming + tool-call accumulation
-  - [ ] FakeProvider
-  - [ ] Cassette record/replay
+  - [x] Provider protocol + request/event types
+  - [x] OpenAI-compatible streaming + tool-call accumulation
+  - [x] FakeProvider
+  - [x] Cassette record/replay
+- Landed notes (P1):
+  - `ProviderEvent` = `TextDelta | ReasoningDelta | ToolCallDelta` (live fragments) `| ToolCall` (complete; `args` is the raw accumulated JSON **string**) `| StreamEnd` (terminal; carries full accumulated text/reasoning/tool_calls/usage/finish_reason). Complete `ToolCall`s appear both standalone and inside `StreamEnd` — P2 must consume exactly one of the two or it will duplicate `ToolCallRequested`.
+  - `ToolCall.args: str` vs `ToolCallRequested.args: dict` — the loop does the `json.loads`; P2 must decide what invalid JSON from the model produces (likely an `is_error` result, not a crash).
+  - Usage fields are disjoint: `input_tokens` excludes `cache_read_tokens` (Anthropic-native semantics; `prompt_tokens - cached_tokens`).
+  - `SystemBlock.cache` is modeled but `openai_compat` flattens system blocks to one string and drops the flag — the wire-level `cache_control` emission waits for the native Anthropic provider (Open Decisions).
+  - `AssistantMessage.reasoning` is modeled but not serialized upstream by `openai_compat` (OpenAI-compat endpoints don't accept it; a native Anthropic provider will need it for thinking signatures).
+  - Mid-stream `error` frames and zero-data-frame streams raise `ProviderError` — a partial stream is never a success-shaped `StreamEnd`. Reserved payload keys (`model`, `messages`, `stream`, `stream_options`, `tools`) cannot be overridden via `params`.
+  - `ProviderError` also signals FakeProvider script/cassette exhaustion — P2's retry must not blindly retry it 3× in tests.
+  - Tool-call slots key by `index`, else by `id`, else continue the last slot; missing ids are synthesized as `call_{index}`.
 
 ### Phase 2 — The turn loop · deps: P0, P1 · —
 First genuinely useful phase: non-interactive agents work end to end.

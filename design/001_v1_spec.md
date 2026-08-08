@@ -22,6 +22,7 @@
 
 **Out (v1)**
 - MCP client. ACP adapter. OTel instrumentation. Evals framework.
+- Multimodal turn input (`TurnStarted.input` is `str`).
 - Artifact / `editable_object` as a core concept — stays application-level.
 - Handoff and blackboard multi-agent patterns.
 - Native Anthropic provider (the protocol is shaped to accept one; the impl is later).
@@ -48,6 +49,18 @@
 - **Memory implementation is thin**: rows with kind/title/body, tags, entities, soft delete, supersede, hybrid keyword+vector recall. No document ingestion, no extraction, no reconcile — kalki keeps owning those.
 - **Sessions carry `metadata: dict` and nothing else.** Tantra performs no tenancy or authorization checks. Rejected first-class `tenant_id`/`user_id`: it imposes a two-level model on a single-user CLI, and a framework that half-enforces isolation is worse than one that clearly doesn't.
 - **Provider protocol models cache markers and reasoning blocks natively**, not lowest-common-denominator, so a native Anthropic implementation drops in without a schema change. Rejected LiteLLM — inheriting someone else's bugs at the tool-call-streaming layer is the one place that must be exact.
+- **Model rides the request, not the provider.** `Provider` holds transport only (base_url, key); `SampleRequest.model` names the model, sourced from `Agent.model` with `Harness(default_model=)` fallback; `limits(model)` replaces the `limits` property. Rejected model-in-provider — `dashboard_editor.py:29-43` needs pro for the loop and flash for parsing; one model per harness can't express a cheaper sub-agent. Rejected a named provider registry — a naming layer taxing the single-vendor common case.
+- **`run()`/`resume()` are consumption-driven.** The loop advances as the caller iterates; nothing runs detached. A disconnect mid-turn pauses the turn durably at the last persisted event; any process re-enters with `resume(sid)`. Rejected a background task: `Harness` would own task lifecycles, and reconnect needs the live tailing already deferred to Open Decisions.
+- **Typed ask vocabulary.** `Approval`, `Choice`, `FreeText` requests with matching responses, each carrying `extra: dict`. The permission auto-responder answers `Approval`; adapters render all three with no app code; custom payloads ride `extra`. Rejected opaque dicts — the auto-responder and the CLI renderer both need a recognizable shape.
+- **`deps_factory(header)` takes the `SessionHeader`**, sync or async, called at each `run`/`resume` entry. `metadata` is how deps get tenant-scoped (per-company clients, as the current agents do per request). Cleanup is the app's own lifecycle — no managed teardown in v1.
+- **Embeddings are a separate `Embedder` protocol**, not `Provider.embed`. OpenRouter serves no embeddings endpoint — the one shipped provider couldn't implement its own protocol. `BuiltinMemory(store, embedder=...)`.
+- **Memory tools are ordinary tools.** `memory_recall`/`memory_write` are imported and listed in `Agent.tools`; setting `Harness(memory=)` injects nothing.
+- **`TurnCompleted` carries `output`.** The parsed `output_schema` value lands on the terminal event; callers never fish `submit_output` args out of the stream.
+- **Child asks bubble.** A sub-agent's `ctx.ask` (or `ask` permission) suspends the child durably and forwards `AskRaised` onto the parent's live stream; the whole ancestry suspends. The answer targets the child session; bare `resume(root)` re-drives the chain. Rejected ask→deny in children (Grok Build style) — it silently changes what the one HITL primitive means at depth≥1.
+- **The loop owns provider retry.** Transient failures (429, 5xx, timeout) retry with capped exponential backoff — `RetryConfig` on `Harness`, default 3 attempts — then `TurnFailed`. A partial stream is discarded, never persisted. Hand-rolled backoff, not tenacity: one call site, and the discard-partial-sample semantics don't fit a generic decorator; not worth a dependency.
+- **Events carry a version int**; readers tolerate unknown fields. The log outlives the code that wrote it.
+- **`TurnStarted.input` is `str`.** Multimodal input is out of v1.
+- **Memory rows carry `metadata: dict`** exactly like sessions — recall filters on it, tantra enforces nothing. Without it a multi-tenant app leaks memories across tenants with no way to filter.
 - **Compaction: prune-then-summarize**, all thresholds in `CompactionConfig`, behind a `Compactor` protocol.
 - **Structured final output via a synthetic tool.** `Agent.output_schema` appends a `submit_output` tool; the turn ends when the model calls it. Rejected the current two-pass approach (`dashboard_editor.py:134-144` runs a second LLM with `with_structured_output` and routes on a regex) — one model call, no regex, and the schema is enforced by the provider.
 - **License: Apache-2.0.** Patent grant; what a framework is expected to ship under.
@@ -81,7 +94,9 @@ run(session_id, input):
   release lease
 ```
 
-`resume(session_id, ask_id, response)` re-enters this loop from replayed state: it appends `AskAnswered`, synthesizes the result for the asked-about call, and continues at the next tool call in the batch.
+Transient provider errors (429, 5xx, timeout) are retried inside the sample step per `RetryConfig` before becoming `TurnFailed`; a partially streamed sample is discarded, nothing persisted.
+
+`resume(session_id, ask_id=None, response=None)` re-enters any incomplete turn from replayed state. With `ask_id` + `response` it appends `AskAnswered`, synthesizes the result for the asked-about call, and continues at the next tool call in the batch. With neither, it re-drives a turn abandoned mid-flight (caller stopped consuming). `run()` with a turn incomplete raises `TurnIncomplete`; `run()` while the lease is held raises `SessionBusy` — typed errors, no queuing.
 
 ## Event model
 
@@ -101,12 +116,12 @@ Two streams, deliberately different.
 | `ToolProgress` | `call_id`, `message` |
 | `ToolCallCompleted` | `call_id`, `result`, `is_error` |
 | `ChildSessionSpawned` | `call_id`, `child_session_id`, `agent` |
-| `AskRaised` | `ask_id`, `call_id`, `request` |
-| `AskAnswered` | `ask_id`, `response`, `answered_by` |
+| `AskRaised` | `ask_id`, `call_id`, `request: AskRequest` |
+| `AskAnswered` | `ask_id`, `response: AskResponse`, `answered_by` |
 | `SampleCompleted` | `sample_id`, `usage`, `finish_reason` |
 | `CompactionApplied` | `strategy`, `tokens_before`, `tokens_after`, `summary` |
 | `CancelRequested` | `turn_id` |
-| `TurnCompleted` | `turn_id`, `stop_reason` |
+| `TurnCompleted` | `turn_id`, `stop_reason`, `output` |
 | `TurnFailed` | `turn_id`, `error` |
 
 **Emitted only (never persisted):** `TextDelta`, `ReasoningDelta`, `ToolArgsDelta`.
@@ -134,9 +149,10 @@ class Store(Protocol):
 
 class Provider(Protocol):
     def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]: ...
+    def limits(self, model: str) -> ModelLimits: ...
+
+class Embedder(Protocol):
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
-    @property
-    def limits(self) -> ModelLimits: ...   # context_window, max_output
 
 class Skills(Protocol):
     async def index(self, names: list[str] | None) -> list[SkillRef]:  ...   # name + description
@@ -144,8 +160,8 @@ class Skills(Protocol):
 
 class Memory(Protocol):
     async def write(self, m: MemoryWrite) -> str: ...
-    async def recall(self, q: str, *, k: int = 5, kind: str | None = None,
-                     tags: list[str] | None = None, entity: str | None = None) -> list[MemoryHit]: ...
+    async def recall(self, q: str, *, k: int = 5, kind: str | None = None, tags: list[str] | None = None,
+                     entity: str | None = None, metadata: dict | None = None) -> list[MemoryHit]: ...
     async def supersede(self, old_id: str, new: MemoryWrite) -> str: ...
     async def delete(self, mid: str) -> None: ...
 
@@ -153,18 +169,45 @@ class Compactor(Protocol):
     async def compact(self, ctx: TurnContext) -> list[SessionEvent]: ...
 ```
 
-`append(..., expect_seq=)` is optimistic concurrency: two workers cannot both advance one session.
+`append(..., expect_seq=)` is optimistic concurrency: two workers cannot both advance one session. `Stamped` is `(seq, SessionEvent)`. `SampleRequest` carries `model`; `ModelLimits` is `context_window` + `max_output`.
+
+### Ask vocabulary
+
+```python
+class Approval(AskRequest):  title: str; body: str; extra: dict
+class Choice(AskRequest):    title: str; options: list[str]; extra: dict
+class FreeText(AskRequest):  prompt: str; extra: dict
+
+await ctx.ask(Approval(title="Write dashboard?", body=diff))  # -> ApprovalResponse(allow=True)
+```
+
+Responses mirror requests (`ApprovalResponse(allow)`, `ChoiceResponse(selected)`, `FreeTextResponse(text)`). This is the wire contract the existing `APPROVAL`/`CHOICE` union in `observability_ui`'s `schema.py:35-49` maps onto.
+
+## Agent vs Session vs Harness
+
+| | What it is | Lifetime | Holds |
+|---|---|---|---|
+| `Agent` | declaration | process, immutable | `model`, `prompt`, `tools`, `subagents`, `permissions`, `max_steps`, `output_schema` |
+| `Session` | one conversation | rows in the store | event log + header (agent **name**, depth, parent_id, metadata) |
+| `Harness` | the runtime | process, one or more per app | provider, `default_model`, store, `deps_factory`, hooks, the loop, the name→class table |
+
+- **`Agent` holds no I/O.** No provider, no client, no DSN, no pool — only values and function references. Forced by the durable loop: a resume runs in a different process, which rebuilds `Harness` from config and looks up the agent **by name** from the persisted header. An `Agent` holding a live client cannot survive that. Same constraint that produced `deps_factory`. This is the defect in `dashboard_editor.py:29-43` — `init_chat_model` at import time welds the agent to a provider and an API key.
+- **Cardinality differs**: many agents, one set of infrastructure. Merged, every agent would need a store and a provider passed in, and `provider=FakeProvider()` for tests would touch every agent class instead of one line.
+- **Sub-agents need no second mechanism.** `ctx.spawn(PromQLWriter)` re-enters the *same* `Harness` — same store, provider and deps — with a new session at `depth+1`. If `Agent` owned the runtime, each child would re-plumb infrastructure.
+- Analogy: `Harness` : `Agent` :: FastAPI app : router. The app owns the server, middleware and lifespan; the router owns paths and handlers and is inert alone.
+- **Prior art has the same split with the runtime half ambient.** opencode has first-class agent config (`Agent.Info`: name, `mode` primary/subagent, model, prompt, tools, permission) but no runtime object — `Session`, `SessionPrompt.loop`, `SessionProcessor`, `Provider`, `Storage` read process-global app state. Grok Build likewise: subagent definitions are config, the runtime is crates behind ACP. Both ship an *app*, so one runtime per process was always true. Tantra is a library, so the runtime must be constructible: two `Harness` instances over one Postgres store, one starting a turn and the other resuming it, is unrepresentable in either of theirs and is the Phase 9 verify.
 
 ## Public API
 
 ```python
 harness = Harness(
-    provider=OpenAICompatible(base_url=OPENROUTER, api_key=..., model="google/gemini-3-pro"),
+    provider=OpenAICompatible(base_url=OPENROUTER, api_key=...),
+    default_model="google/gemini-3-pro",
     store=PostgresStore(dsn, schema="tantra"),
     agents=[Build, Explore, DashboardEditor],
     skills=FileSystemSkills("./skills"),
-    memory=BuiltinMemory(store),
-    deps_factory=lambda: Deps(mimir=MimirClient(), db=async_session),
+    memory=BuiltinMemory(store, embedder=OpenAICompatibleEmbedder(base_url=..., api_key=..., model=...)),
+    deps_factory=lambda header: Deps(mimir=MimirClient(company=header.metadata["company"]), db=async_session),
     hooks=[audit_hook],
     default_permission="ask",
 )
@@ -172,7 +215,7 @@ harness = Harness(
 s = await harness.create_session(agent="build", metadata={"company": 42, "user": 7})
 async for ev in harness.run(s.id, "fix the p99 panel"):
     ...
-async for ev in harness.resume(s.id, ask_id, Approve(allow=True)):
+async for ev in harness.resume(s.id, ask_id, ApprovalResponse(allow=True)):
     ...
 await harness.cancel(s.id)
 async for ev in harness.replay(s.id, from_seq=0):
@@ -202,6 +245,8 @@ async def search_metrics(query: str, ctx: Context) -> list[dict]:
 
 `prompt` accepts `str | Callable[[TurnContext], str | Awaitable[str]]`. `load_prompt(path)` reads a file. No template engine.
 
+`Agent.model` is optional; unset falls back to `Harness(default_model=)`. Anywhere an agent is named — `create_session`, `spawn`, `fan_out` — the class and its name are both accepted.
+
 ## Permissions and hooks
 
 - Ruleset is `dict[glob, "allow" | "ask" | "deny"]`; longest matching glob wins; unmatched falls back to `Harness(default_permission=)`.
@@ -214,8 +259,11 @@ async def search_metrics(query: str, ctx: Context) -> list[dict]:
 - A sub-agent is a **child session** with `parent_id` and `depth+1`, run by the same loop. No second abstraction.
 - `subagents = [PromQLWriter]` exposes each as a tool named after the agent. `ctx.spawn(Agent, input)` is the imperative form.
 - `max_depth` on `Harness` (default 3) prevents runaway recursion.
-- `ctx.fan_out(tasks, max_concurrency=4)` spawns N children concurrently and returns `list[Result | Error]` — one failure does not fail the turn.
+- `ctx.fan_out(tasks, max_concurrency=4)` — `tasks` is `list[tuple[Agent | str, input]]` — spawns N children concurrently and returns `list[Result | Error]`; one failure does not fail the turn.
+- `spawn` of an agent absent from the transitive name table raises at spawn, before the child session is created.
+- `spawn` returns the child's final text, or its parsed `output` when the child has an `output_schema`.
 - Child events are forwarded onto the parent's **live** stream tagged with the child `session_id` and `depth`.
+- A child's ask suspends the whole ancestry: the child suspends durably, the parent's spawn tool call stays incomplete, `AskRaised` is forwarded live. Answer with `resume(child_sid, ask_id, response)`, then bare `resume(root_sid)` re-drives the chain top-down.
 
 ## Compaction
 
@@ -231,6 +279,7 @@ summarize_at    = 0.95     # of usable, after pruning
 
 - **Stage 1 (free):** replace bulky tool-result content with metadata stubs, newest-first, protecting `tail_turns`. Never prunes `skill` tool output — that would silently drop a capability the model believes it has.
 - **Stage 2 (one LLM call):** summarize the pruned prefix into a structured brief — Goal / Constraints / Progress / Key Decisions / Next Steps / Critical Context — and replace those messages. Emits `CompactionApplied`.
+- Nothing is rewritten in the log — context assembly treats the latest `CompactionApplied` as the floor: its summary plus every event after it. `replay()` still returns full history.
 
 ## Storage backends
 
@@ -247,11 +296,13 @@ All four pass one shared conformance suite in `tantra.testing`.
 
 Things that will surprise an implementer. Each is load-bearing.
 
-- **Cancel is a persisted flag, not `task.cancel()`.** The loop may be running in another process. `cancel()` appends `CancelRequested`; the loop checks the store at sample and tool-call boundaries. An in-flight tool in *your* process also gets an asyncio cancellation, but that is an optimization, not the mechanism.
+- **The loop advances only while someone consumes the iterator.** `run()`/`resume()` are generators; a WS client that drops mid-turn pauses the turn at the last persisted event — durable and resumable, but nothing re-drives it by itself. Detection: lease expired with the turn incomplete. Re-entry: `resume(sid)` with no `ask_id`. Server adapters must own this sweep; the library will not.
+- **Cancel is a persisted flag, not `task.cancel()`.** The loop may be running in another process. `cancel()` appends `CancelRequested`; the loop checks the store at sample and tool-call boundaries. An in-flight tool in *your* process also gets an asyncio cancellation, but that is an optimization, not the mechanism. Cancelling a *suspended* turn takes effect at the next `resume`, which appends `TurnCompleted(stop_reason="cancelled")` without sampling.
 - **Nothing may be captured in a Python closure across a suspend.** After `ctx.ask` the process can die. Anything a tool needs post-resume comes from `ctx.deps` (rebuilt per process by `deps_factory`) or from the event log. `deps_factory` must be a factory for exactly this reason — a captured connection pool will not survive a resume on another pod.
 - **`O_APPEND` is not atomic above `PIPE_BUF` (4096 bytes).** A single JSON line longer than that can interleave under concurrent append, which any tool result will exceed. The FS backend does not rely on append atomicity — correctness comes from the **single-writer lease per session**. Fan-out children write to their own logs, so they never contend.
 - **Replaying a parent session does not reproduce the child events you saw live.** Child events persist only to the child's log; forwarding is live-only. A client reconstructing history must fetch child sessions via `list(parent_id=...)`. This asymmetry is deliberate — the alternative doubles every child write.
-- **OpenAI-compatible APIs require every `tool_call_id` in an assistant message to be answered before the next sample.** So a suspend mid-batch must, on resume, still emit results for the calls that were never executed — `"denied by user"` or `"not executed: turn interrupted"`. These are real `ToolCallCompleted` events with `is_error=True`, not omissions. Getting this wrong produces a 400 that only reproduces after a denial.
+- **OpenAI-compatible APIs require every `tool_call_id` in an assistant message to be answered before the next sample.** So *any* early stop mid-batch — suspend, deny, cancel, `max_steps` — must still emit results for the calls that were never executed: `"denied by user"` or `"not executed: turn interrupted"`. These are real `ToolCallCompleted` events with `is_error=True`, not omissions. `max_steps` is the sneaky one: the cap hitting on a sample that requested tools orphans the batch. Getting this wrong produces a 400 that only reproduces after a denial.
+- **`spawn` must be re-entrant.** If the process dies (or the child suspends) mid-spawn, resume replays the parent and re-executes the spawn tool call — it must attach to the existing child found via `ChildSessionSpawned`, never create a twin. This same mechanism is what makes bubbled child asks resumable.
 - **Compaction must never orphan a tool_call/tool_result pair.** Stage 1 replaces result *content* and never removes a message. Stage 2 cuts only at turn boundaries. A prefix cut mid-turn yields an assistant message with a `tool_call` whose result was dropped, which is a 400 on every OpenAI-compatible provider.
 - **Token counts come from the provider's reported usage on the previous sample**, plus a `len(text) // 4` estimate for content added since. There is no local tokenizer and no attempt to match one; the compaction `buffer` exists to absorb the error.
 - **`ctx.emit` progress is persisted** as `ToolProgress`. The existing `AgentProgress` writer (`dashboard_editor.py:60-61`) is live-only and its output is lost on reconnect — this fixes that.
@@ -286,7 +337,7 @@ Where the graph lies: **P5, P6 and P7 all edit context assembly** (`context.py:b
 - Problems found but not fixed go to Open Decisions or a Follow-up note, with enough detail to act on later. Don't fix them inline and don't leave them unrecorded.
 
 ### Phase 0 — Event log + Store protocol + memory/FS backends · deps: none · ∥ P1 · blocks all · —
-- `events.py`: the `SessionEvent` discriminated union and `SessionHeader`, as tabled above.
+- `events.py`: the `SessionEvent` discriminated union and `SessionHeader`, as tabled above; version int on the envelope, unknown fields tolerated on read.
 - `stores/base.py`: `Store` protocol with `expect_seq` optimistic concurrency and leases.
 - `stores/memory.py`, `stores/fs.py`. FS lease via `fcntl.flock` on `<sid>/.lock`.
 - `testing.py`: `store_conformance(store)` — one suite every backend must pass.
@@ -299,8 +350,8 @@ Where the graph lies: **P5, P6 and P7 all edit context assembly** (`context.py:b
   - [ ] Conformance suite
 
 ### Phase 1 — Provider protocol + OpenAI-compatible + FakeProvider · deps: none · ∥ P0 · —
-- `providers/base.py`: `Provider`, `SampleRequest` (system blocks with `cache` markers, messages, tool schemas, params), `ProviderEvent` union, `ModelLimits`.
-- `providers/openai_compat.py`: streaming chat completions against OpenRouter; accumulates fragmented `ToolCallDelta`s into complete calls; surfaces `usage`.
+- `providers/base.py`: `Provider`, `Embedder`, `SampleRequest` (`model`, system blocks with `cache` markers, messages, tool schemas, params), `ProviderEvent` union, `ModelLimits` via `limits(model)`.
+- `providers/openai_compat.py`: streaming chat completions against OpenRouter; accumulates fragmented `ToolCallDelta`s into complete calls; surfaces `usage`; constructor takes `limits: dict[str, ModelLimits]` with a conservative fallback for unknown models.
 - `providers/fake.py`: `FakeProvider([Sample(text=...), Sample(tool_calls=[...])])` plus cassette record/replay.
 - **Verify:** a recorded OpenRouter cassette with tool-call arguments split across 12 SSE chunks replays into exactly one `ToolCallRequested` with byte-identical JSON args. `FakeProvider` scripted with two samples yields the exact expected `ProviderEvent` sequence.
 - Checklist:
@@ -312,7 +363,7 @@ Where the graph lies: **P5, P6 and P7 all edit context assembly** (`context.py:b
 ### Phase 2 — The turn loop · deps: P0, P1 · —
 First genuinely useful phase: non-interactive agents work end to end.
 - `agent.py` (`Agent` + name derivation + transitive `subagents` name table), `tools.py` (`@tool`, schema inference from type hints + docstring, `ctx` stripping), `context.py` (system prompt + history + tool schemas), `loop.py`, `harness.py` (`create_session`, `run`, `replay`).
-- Serial tool dispatch. Tool exceptions become `is_error` results the model can see. `max_steps` stop. Usage accumulation onto the header.
+- Serial tool dispatch. Tool exceptions become `is_error` results the model can see. `max_steps` stop with orphan-call synthesis. Usage accumulation onto the header. `RetryConfig` backoff around the sample step.
 - `Agent.output_schema` → synthetic `submit_output` tool ends the turn.
 - `adapters/collect.py`.
 - **Verify:** with `FakeProvider` scripted to call `search_metrics` then answer, `collect(harness.run(...))` yields `ToolCallRequested → ToolCallStarted → ToolCallCompleted → TextPart → TurnCompleted` in that order, and `replay()` from a fresh `Harness` over the same store reconstructs identical events. A tool that raises produces `is_error=True` and the loop continues to a second sample.
@@ -325,7 +376,8 @@ First genuinely useful phase: non-interactive agents work end to end.
   - [ ] collect adapter
 
 ### Phase 3 — Control layer: ask/resume, permissions, cancel, hooks · deps: P2 · —
-- `ctx.ask()` → `AskRaised`, lease released, turn returns. `harness.resume(sid, ask_id, response)` replays and continues mid-batch.
+- `ask.py`: `Approval`/`Choice`/`FreeText` + response types.
+- `ctx.ask()` → `AskRaised`, lease released, turn returns. `harness.resume(sid, ask_id=None, response=None)` replays and continues mid-batch; bare `resume(sid)` re-drives an abandoned turn.
 - Unexecuted calls in a suspended batch get synthesized `is_error` results on resume.
 - `permissions.py`: glob ruleset, longest-match, `default_permission`, auto-answer of permission asks.
 - `harness.cancel()` via `CancelRequested` + boundary checks.
@@ -340,15 +392,16 @@ First genuinely useful phase: non-interactive agents work end to end.
 
 ### Phase 4 — Sub-agents + fan-out · deps: P3 · ∥ P5, P6, P7, P8 · —
 - Child sessions (`parent_id`, `depth`), `max_depth`, derived permissions.
-- `subagents = [...]` → auto-generated tools; `ctx.spawn`; `ctx.fan_out(max_concurrency)`.
-- Live child-event forwarding onto the parent stream with `session_id` + `depth`.
-- **Verify:** a parent whose sub-agent calls two tools shows those events on the parent stream at `depth=1`, and the parent's own log contains only the `task` call plus `ChildSessionSpawned`. `fan_out` of 3 where one raises returns 2 results + 1 error and the parent turn completes. Depth 4 with `max_depth=3` raises before the child session is created.
+- `subagents = [...]` → auto-generated tools; `ctx.spawn` (re-entrant, attaches via `ChildSessionSpawned`); `ctx.fan_out(max_concurrency)`.
+- Live child-event forwarding onto the parent stream with `session_id` + `depth`; child asks bubble and suspend the ancestry.
+- **Verify:** a parent whose sub-agent calls two tools shows those events on the parent stream at `depth=1`, and the parent's own log contains only the `task` call plus `ChildSessionSpawned`. `fan_out` of 3 where one raises returns 2 results + 1 error and the parent turn completes. Depth 4 with `max_depth=3` raises before the child session is created. A child that asks suspends both sessions; `resume(child_sid, ask_id, response)` then `resume(parent_sid)` — from a fresh `Harness` — completes both turns without a duplicate child.
 - Checklist:
   - [ ] Child sessions + depth limit
   - [ ] Derived permissions
-  - [ ] subagents-as-tools + spawn
+  - [ ] subagents-as-tools + re-entrant spawn
   - [ ] fan_out with partial failure
   - [ ] Event forwarding
+  - [ ] Bubbled ask + two-step resume
 
 ### Phase 5 — Skills · deps: P2 · ∥ P4, P6, P7, P8 · —
 - `skills.py`: `Skills` protocol, `FileSystemSkills(root)` parsing `SKILL.md` YAML frontmatter (`name`, `description`) — the format already used across `kalki/skills/` and `.agents/skills/`.
@@ -362,10 +415,10 @@ First genuinely useful phase: non-interactive agents work end to end.
   - [ ] skill tool + file listing
 
 ### Phase 6 — Memory · deps: P2 · ∥ P4, P5, P7 · needs P8 for pgvector · —
-- `memory.py`: `Memory` protocol. `BuiltinMemory` over the store backends: kind/title/body, tags, entities, soft delete, supersede.
+- `memory.py`: `Memory` protocol. `BuiltinMemory` over the store backends: kind/title/body, tags, entities, `metadata` scoping, soft delete, supersede.
 - Hybrid recall: keyword always; vector where the backend supports it (Postgres/pgvector), degrading to keyword-only elsewhere — **explicitly, with the degradation visible in `MemoryHit`**, not silently.
 - `memory_recall` / `memory_write` tools.
-- Embeddings via `Provider.embed`, best-effort: a failed embed never fails the write (kalki's `_embed_best_effort` pattern), with a `backfill` entrypoint to repair.
+- Embeddings via the `Embedder` protocol, best-effort: a failed embed never fails the write (kalki's `_embed_best_effort` pattern), with a `backfill` entrypoint to repair.
 - **Verify:** write 3 memories, `recall` ranks the matching one first on SQLite (keyword) and on Postgres (hybrid); `supersede` removes the old row from recall while `get` still returns it; a write with the embedding provider unreachable still commits and is repaired by `backfill`.
 - Checklist:
   - [ ] Memory protocol
@@ -394,7 +447,7 @@ First genuinely useful phase: non-interactive agents work end to end.
   - [ ] Conformance green on all four backends
 
 ### Phase 9 — Adapters · deps: P3 · ∥ P5–P8 · —
-- `adapters/cli.py` (terminal renderer, prompts on ask), `adapters/ws.py`, `adapters/sse.py`.
+- `adapters/cli.py` (terminal renderer, prompts on ask), `adapters/ws.py`, `adapters/sse.py`; a typed inbound command envelope (`run` / `resume` / `cancel`) shared by WS and SSE.
 - **Verify:** against a FastAPI `TestClient`, a WS session runs a turn, receives an ask, sends a response, and receives `TurnCompleted`. With a Postgres store and two separate `Harness` instances, instance A starts the turn and instance B resumes it — the pattern the current `WSConnectionManager` dict makes impossible.
 - Checklist:
   - [ ] CLI renderer
@@ -425,6 +478,7 @@ Real and usable, not elaborate. It exists to make gaps in the library show up.
 - **Native Anthropic provider.** The protocol accommodates cache markers and thinking blocks. Explicit prompt caching is the single largest cost lever on a loop that replays a growing history every sample — worth measuring before deciding.
 - **ACP adapter.** Would give editor integration. Only worth it if someone wants tantra agents inside Zed.
 - **Handoff pattern.** ~50 LOC (swap the agent on the session). Left out because nobody has asked for triage-style routing yet.
+- **Argument-level permission rules.** Globs match tool *names* only; "bash: allow `ls`, deny `rm`" is inexpressible. agni's bash tool will want it. Candidate: optional per-tool `permission_key(args) -> str` routed through the same ruleset.
 - **Migrating `observability_ui` agents.** Blocked on the artifact decision above.
 
 ## Risks

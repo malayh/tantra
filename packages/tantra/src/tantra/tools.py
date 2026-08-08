@@ -6,6 +6,8 @@ from typing import Any, get_type_hints
 
 from pydantic import BaseModel, create_model
 
+from tantra.ask import AskRequest, AskResponse
+from tantra.errors import TantraError
 from tantra.providers.base import ToolSchema
 from tantra.stores.base import Store
 
@@ -26,6 +28,7 @@ class Context:
         deps: Any,
         store: Store,
         emit: Callable[[str], Awaitable[None]],
+        ask: Callable[[AskRequest], Awaitable[AskResponse]] | None = None,
     ) -> None:
         self.session_id = session_id
         self.turn_id = turn_id
@@ -34,10 +37,22 @@ class Context:
         self.deps = deps
         self.store = store
         self._emit = emit
+        self._ask = ask
 
     async def emit(self, message: str) -> None:
         """Record progress for the running tool call as a persisted `ToolProgress` event."""
         await self._emit(message)
+
+    async def ask(self, request: AskRequest) -> AskResponse:
+        """Suspend the turn until a human answers, then return their response.
+
+        The process may die while suspended: on resume the tool is re-executed from the start and
+        every already-answered `ask` returns its recorded response without prompting again. Nothing
+        may be captured in a closure across the suspend.
+        """
+        if self._ask is None:
+            raise TantraError("ctx.ask is only available inside a running tool call")
+        return await self._ask(request)
 
 
 def _args_model(fn: Callable[..., Any], name: str) -> tuple[str | None, type[BaseModel]]:

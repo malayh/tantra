@@ -410,7 +410,7 @@ First genuinely useful phase: non-interactive agents work end to end.
   - Follow-up (P9): a retried sample re-yields its live deltas with no reset marker on the stream — adapters double-render partial text; `Emitted` is `extra="allow"`, an attempt marker would do.
   - Schema validation at `Harness` construction rejects unannotated `ctx` params and required properties with no inferable JSON type; `max_steps < 1` also rejected there.
 
-### Phase 3 — Control layer: ask/resume, permissions, cancel, hooks · deps: P2 · —
+### Phase 3 — Control layer: ask/resume, permissions, cancel, hooks · deps: P2 · **done**
 - `ask.py`: `Approval`/`Choice`/`FreeText` + response types.
 - `ctx.ask()` → `AskRaised`, lease released, turn returns. `harness.resume(sid, ask_id=None, response=None)` replays and continues mid-batch; bare `resume(sid)` re-drives an abandoned turn.
 - Unexecuted calls in a suspended batch get synthesized `is_error` results on resume.
@@ -419,11 +419,20 @@ First genuinely useful phase: non-interactive agents work end to end.
 - `hooks.py`: the six hook points; `before_tool` allow/deny/transform.
 - **Verify:** run a turn that asks; **discard the `Harness` object entirely**, build a new one over the same store, call `resume()` — the turn completes with the tool executed and the log contiguous. A `deny` rule produces an error tool result without ever invoking the tool. `cancel()` from a second `Harness` instance stops a running turn at the next boundary.
 - Checklist:
-  - [ ] ask/resume across process boundary
-  - [ ] Synthesized results for unexecuted calls
-  - [ ] Permission ruleset + auto-answer
-  - [ ] Cancellation
-  - [ ] Hooks
+  - [x] ask/resume across process boundary
+  - [x] Synthesized results for unexecuted calls
+  - [x] Permission ruleset + auto-answer
+  - [x] Cancellation
+  - [x] Hooks
+- Landed notes (P3):
+  - Two ask flavors. Permission asks (`Approval` with `extra={"permission": name}`) are framework-consumed: suspend before `ToolCallStarted`, `resume(sid, ask_id, ApprovalResponse)` executes on allow / synthesizes `"denied by user"` on deny; a non-`ApprovalResponse` answer is rejected at `resume()`. `ctx.ask` suspends mid-tool; on resume the tool **re-executes from the start** with recorded answers replayed by ask-index per `call_id` — pre-ask side effects (incl. `ToolProgress`) repeat. A permission ask consumes index 0 for its call.
+  - A suspended batch stays half-answered in the log (legal — no sample until resume answers the rest); resume executes the remaining calls. Synthesis (`is_error=True`) covers deny, cancel (`"not executed: turn cancelled"`) and post-submit orphans.
+  - Invalid-JSON calls are rejected **in the log** at parts time — `ToolCallCompleted(is_error=True)` lands in the same append batch right after `SampleCompleted` — so the rejection survives suspend/resume (it used to be in-memory only, which executed the tool with default args after a resume). Tool results are no longer strictly in `tool_calls` order; every id is still answered before the next sample.
+  - Bare `resume(sid)` is the safe sweep entry point: it re-drives an abandoned turn but **replays** a suspended one (yields the original `AskRaised` at its seq, no tool re-run, log untouched). `resume(ask_id)` accepts only the current turn's single pending ask; stale ask_ids from terminated turns are rejected. `_pending_ask` assumes ≤1 unanswered ask per turn — P4's bubbled child asks live in the child's log so this holds; revisit if that changes.
+  - `cancel(sid)` appends `CancelRequested` lease-less under `expect_seq` (5-attempt read-retry; `False` when no turn in flight). The loop absorbs foreign events at sample tops, before each tool call, and in `_append`'s single-shot `SeqConflict` retry — foreign **non-cancel** events raise instead of being absorbed. Once `submit_output` has stopped a batch, cancel no longer relabels the turn. The in-process asyncio-cancellation optimization was not built.
+  - Hooks: `before_tool` runs after `ToolCallRequested` is persisted — a transform changes executed args only, the log keeps what the model asked (`name`/`call_id` changes are ignored); it re-fires on resume for the same call. `after_tool` fires only for tools that actually executed. `before_turn` only on `run()`. A raising hook aborts the turn like abandonment (`resume` re-enters). `on_event` sees live deltas too.
+  - `TurnState.observe` (loop.py) is the single turn-state mutation point — `_append`, `_absorb` and `derive_turn_state` all feed it; P4 must teach it `ChildSessionSpawned` for re-entrant spawn.
+  - Follow-up (P9): `AskAnswered.answered_by` is never populated — `resume()` exposes no parameter for it.
 
 ### Phase 4 — Sub-agents + fan-out · deps: P3 · ∥ P5, P6, P7, P8 · —
 - Child sessions (`parent_id`, `depth`), `max_depth`, derived permissions.

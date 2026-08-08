@@ -5,6 +5,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from tantra.ask import AskRequest, AskResponse
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -103,13 +105,13 @@ class AskRaised(EventBase):
     type: Literal["ask_raised"] = "ask_raised"
     ask_id: str
     call_id: str | None = None
-    request: dict[str, Any]
+    request: AskRequest
 
 
 class AskAnswered(EventBase):
     type: Literal["ask_answered"] = "ask_answered"
     ask_id: str
-    response: dict[str, Any]
+    response: AskResponse
     answered_by: str | None = None
 
 

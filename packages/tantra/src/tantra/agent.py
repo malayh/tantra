@@ -26,6 +26,7 @@ class Agent:
     model: str | None = None
     prompt: str | Callable[[TurnContext], str | Awaitable[str]] = ""
     tools: list[Tool] = []
+    skills: list[str] | None = None
     subagents: list[type[Agent]] = []
     permissions: dict[str, str] = {}
     max_steps: int = 40

@@ -26,6 +26,7 @@ from tantra.loop import Emitted, RetryConfig
 from tantra.providers.base import Embedder, ModelLimits, Provider, ProviderEvent, SampleRequest
 from tantra.providers.fake import FakeProvider, Sample
 from tantra.providers.openai_compat import OpenAICompatible, OpenAICompatibleEmbedder
+from tantra.skills import FileSystemSkills, Skill, SkillInfo, Skills
 from tantra.stores.base import Store
 from tantra.stores.fs import FileSystemStore
 from tantra.stores.memory import MemoryStore
@@ -44,6 +45,7 @@ __all__ = [
     "Embedder",
     "Emitted",
     "FakeProvider",
+    "FileSystemSkills",
     "FileSystemStore",
     "FreeText",
     "FreeTextResponse",
@@ -66,6 +68,9 @@ __all__ = [
     "SessionHeader",
     "SessionNotFound",
     "SessionStatus",
+    "Skill",
+    "SkillInfo",
+    "Skills",
     "Stamped",
     "Store",
     "TantraError",

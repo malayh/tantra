@@ -46,6 +46,7 @@ from tantra.providers.base import (
     ToolCallDelta,
     ToolSchema,
 )
+from tantra.skills import SkillInfo
 from tantra.stores.base import Store
 from tantra.tools import Context, Tool
 
@@ -198,6 +199,7 @@ class TurnLoop:
         default_permission: str = "allow",
         permission_chain: Sequence[Mapping[str, str]] = (),
         spawner: Spawner | None = None,
+        skills_index: Sequence[SkillInfo] = (),
     ) -> None:
         self.store = store
         self.provider = provider
@@ -214,6 +216,7 @@ class TurnLoop:
         self.default_permission = default_permission
         self.permission_chain = list(permission_chain)
         self.spawner = spawner
+        self.skills_index = list(skills_index)
         self.failed = False
         self.lease_lost = False
         self.suspended: str | None = None
@@ -701,7 +704,13 @@ class TurnLoop:
 
             sample_id = uuid4().hex
             prompt = await resolve_prompt(self.agent.prompt, self.turn)
-            req = build_sample_request(model=self.model, prompt=prompt, events=self.history, tools=self.schemas)
+            req = build_sample_request(
+                model=self.model,
+                prompt=prompt,
+                events=self.history,
+                tools=self.schemas,
+                skills=self.skills_index,
+            )
             for emitted in await self._append(
                 [SampleStarted(turn_id=self.turn.turn_id, sample_id=sample_id, model=self.model)]
             ):

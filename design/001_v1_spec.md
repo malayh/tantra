@@ -157,8 +157,8 @@ class Embedder(Protocol):
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
 
 class Skills(Protocol):
-    async def index(self, names: list[str] | None) -> list[SkillRef]:  ...   # name + description
-    async def load(self, name: str) -> SkillBody: ...                        # body + file listing
+    async def index(self) -> Sequence[SkillInfo]: ...   # name + description; filtering moved to Harness (P5)
+    async def load(self, name: str) -> Skill: ...       # body + file listing
 
 class Memory(Protocol):
     async def write(self, m: MemoryWrite) -> str: ...
@@ -456,16 +456,25 @@ First genuinely useful phase: non-interactive agents work end to end.
   - `SessionBusy(sid)` now requires the sid and carries a real message (errors.py is not frozen).
   - Follow-up (P9): cancelling a parent that is suspended on a child ask synthesizes the spawn call and ends the parent, but the child stays `awaiting_input` forever — no ancestor will re-drive it; a server sweep must notice orphaned children via `list(parent_id=...)`.
 
-### Phase 5 — Skills · deps: P2 · ∥ P4, P6, P7, P8 · —
+### Phase 5 — Skills · deps: P2 · ∥ P4, P6, P7, P8 · **done**
 - `skills.py`: `Skills` protocol, `FileSystemSkills(root)` parsing `SKILL.md` YAML frontmatter (`name`, `description`) — the format already used across `kalki/skills/` and `.agents/skills/`.
 - Index (name + description) injected into the system prompt; `skill(name)` tool returns the body plus a listing of files in the skill directory.
 - `Agent.skills` filters which skills are indexed (`None` = all).
 - **Verify:** an agent with 3 skills adds 3 lines to the system prompt and nothing else; the assembled request is under 200 tokens larger than the same agent with no skills. Calling `skill("cold-email")` places the full body in context and the listing includes `references/`.
 - Checklist:
-  - [ ] Skills protocol
-  - [ ] FileSystemSkills + frontmatter parsing
-  - [ ] Index injection
-  - [ ] skill tool + file listing
+  - [x] Skills protocol
+  - [x] FileSystemSkills + frontmatter parsing
+  - [x] Index injection
+  - [x] skill tool + file listing
+- Landed notes (P5):
+  - `Skills.index()` takes no filter argument (spec sketch struck): filtering lives in `Harness._skill_index`, which validates `Agent.skills` names against the index and fails loudly on typos. Consequence: a DB-backed `Skills` cannot push the filter down; the harness fetches the full catalogue and filters in memory.
+  - Index block = one extra `SystemBlock` (preamble + one `- name: description` line per skill), assembled per sample, never persisted. Token delta for 3 skills measured at 155 (< 200); ~100 of that is the `skill` tool schema — its docstring has ~180 chars of headroom before the Verify bound flips.
+  - The `skill` tool is injected per agent at construction (`permission="allow"`; collision with a user tool named `skill` raises). Filter check runs before `Skills.load` (no I/O for a forbidden name). Unknown/filtered names are `is_error` results; the turn continues.
+  - Sub-agent skill calls under `default_permission="ask"` DO ask: a rule-less ancestor contributes the harness default via P4 derived permissions, and declared `allow` wins only at depth 0. Deliberate — one permission engine, no framework-tool exemption; parents grant silent loads with a `"skill": "allow"` rule. Both behaviors test-pinned.
+  - `resume()` now validates (agent, model, chain, skill index, deps) BEFORE appending `AskAnswered` — a broken skills root no longer burns the ask and strands a stale `pending_ask`; the same `resume(ask_id)` retries cleanly after the root is fixed.
+  - Parser is hand-rolled (no pyyaml): top-level single-line `key: value` between `---` fences, quotes stripped, nested keys ignored, CRLF + UTF-8 BOM tolerated, `utf-8` pinned. YAML block-scalar markers (`>`, `|`, variants) as name/description raise instead of leaking `>` into the prompt.
+  - Fail-loud by design: a malformed `SKILL.md` anywhere under the root (or a missing root) fails every agent's run/resume at entry, even agents filtered away from it. A skills root is config; a bad file should not be silently skipped.
+  - Follow-ups: empty catalogue still advertises the `skill` tool (tool injection is construction-time, index is run-time); `Agent.skills = ()` (tuple) is not recognized as opt-out (`[]` is); index order is skill-directory order, not name order.
 
 ### Phase 6 — Memory · deps: P2 · ∥ P4, P5, P7 · needs P8 for pgvector · —
 - `memory.py`: `Memory` protocol. `BuiltinMemory` over the store backends: kind/title/body, tags, entities, `metadata` scoping, soft delete, supersede.

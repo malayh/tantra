@@ -27,6 +27,9 @@ from tantra.providers.base import (
     ToolSchema,
     UserMessage,
 )
+from tantra.skills import SkillInfo
+
+SKILLS_PREAMBLE = "Skills available via the skill(name) tool:"
 
 
 @dataclass
@@ -79,6 +82,11 @@ def build_messages(events: Sequence[SessionEvent]) -> list[Message]:
     return messages
 
 
+def _skills_block(skills: Sequence[SkillInfo]) -> SystemBlock:
+    lines = [SKILLS_PREAMBLE, *(f"- {skill.name}: {skill.description}" for skill in skills)]
+    return SystemBlock(text="\n".join(lines))
+
+
 def build_sample_request(
     *,
     model: str,
@@ -86,10 +94,14 @@ def build_sample_request(
     events: Sequence[SessionEvent],
     tools: Sequence[ToolSchema],
     params: dict[str, Any] | None = None,
+    skills: Sequence[SkillInfo] = (),
 ) -> SampleRequest:
+    system = [SystemBlock(text=prompt)] if prompt else []
+    if skills:
+        system.append(_skills_block(skills))
     return SampleRequest(
         model=model,
-        system=[SystemBlock(text=prompt)] if prompt else [],
+        system=system,
         messages=build_messages(events),
         tools=list(tools),
         params=dict(params or {}),

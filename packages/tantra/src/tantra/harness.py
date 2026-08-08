@@ -29,12 +29,15 @@ from tantra.hooks import Hook
 from tantra.loop import DEFAULT_RETRY, ChildOutcome, Emitted, RetryConfig, TurnLoop
 from tantra.permissions import check_permission
 from tantra.providers.base import Provider
+from tantra.skills import SkillInfo, Skills
 from tantra.stores.base import Store
 from tantra.tools import Context, Tool
 
 TYPED_KEYS = frozenset({"type", "anyOf", "allOf", "oneOf", "$ref", "enum", "const"})
 
 CANCEL_ATTEMPTS = 5
+
+SKILL_TOOL = "skill"
 
 
 def _check_schema(label: str, entry: Tool) -> None:
@@ -60,6 +63,23 @@ def _subagent_tool(sub: type[Agent]) -> Tool:
         return await ctx.spawn(name, task)
 
     return Tool(delegate, name=name, description=described or f"Delegate a task to the {name} sub-agent.")
+
+
+def _skill_tool(skills: Skills, allowed: list[str] | None) -> Tool:
+    async def skill(name: str) -> str:
+        """Load one skill's full instructions by name.
+
+        The system prompt lists only each skill's name and description; call this to pull the body,
+        and the paths of any reference files shipped alongside it, into context before acting.
+        """
+        if allowed is not None and name not in allowed:
+            raise TantraError(f"skill {name!r} is not available to this agent")
+        loaded = await skills.load(name)
+        if not loaded.files:
+            return loaded.body
+        return loaded.body + "\n\n## Files\n" + "\n".join(loaded.files)
+
+    return Tool(skill, permission="allow")
 
 
 def _tool_table(agent: type[Agent]) -> dict[str, Tool]:
@@ -155,6 +175,7 @@ class Harness:
         hooks: Sequence[Hook] = (),
         default_permission: str = "allow",
         max_depth: int = 3,
+        skills: Skills | None = None,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -164,9 +185,17 @@ class Harness:
         self.lease_ttl = lease_ttl
         self.max_depth = max_depth
         self.hooks = list(hooks)
+        self.skills = skills
         self.default_permission = check_permission("harness default_permission", default_permission)
         self.agents = build_name_table(agents)
         self.tools = {name: _tool_table(agent) for name, agent in self.agents.items()}
+        if skills is not None:
+            for name, agent in self.agents.items():
+                if agent.skills == []:
+                    continue
+                if SKILL_TOOL in self.tools[name]:
+                    raise TantraError(f"agent {name!r}: duplicate tool name {SKILL_TOOL!r}")
+                self.tools[name][SKILL_TOOL] = _skill_tool(skills, agent.skills)
 
     def agent_for(self, name: str) -> type[Agent]:
         agent = self.agents.get(name)
@@ -204,6 +233,18 @@ class Harness:
         chain.reverse()
         return chain
 
+    async def _skill_index(self, agent: type[Agent]) -> list[SkillInfo]:
+        if self.skills is None or agent.skills == []:
+            return []
+        index = list(await self.skills.index())
+        if agent.skills is None:
+            return index
+        wanted = set(agent.skills)
+        missing = sorted(wanted - {info.name for info in index})
+        if missing:
+            raise TantraError(f"agent {agent_name(agent)!r}: unknown skills {missing}")
+        return [info for info in index if info.name in wanted]
+
     def _build_loop(
         self,
         *,
@@ -214,6 +255,7 @@ class Harness:
         history: Sequence[SessionEvent],
         holder: str,
         chain: Sequence[dict[str, str]],
+        skills_index: Sequence[SkillInfo],
     ) -> TurnLoop:
         return TurnLoop(
             store=self.store,
@@ -231,6 +273,7 @@ class Harness:
             default_permission=self.default_permission,
             permission_chain=chain,
             spawner=_ChildRunner(self, header),
+            skills_index=skills_index,
         )
 
     async def _notify(self, emitted: Emitted) -> None:
@@ -266,6 +309,7 @@ class Harness:
             agent = self.agent_for(header.agent)
             model = resolve_model(agent, self.default_model)
             chain = await self._permission_chain(header)
+            skills_index = await self._skill_index(agent)
             deps = await _resolve(self.deps_factory(header)) if self.deps_factory is not None else None
 
             header.status = "running"
@@ -292,7 +336,14 @@ class Harness:
                 await hook.before_turn(turn)
 
             loop = self._build_loop(
-                header=header, agent=agent, model=model, turn=turn, history=history, holder=holder, chain=chain
+                header=header,
+                agent=agent,
+                model=model,
+                turn=turn,
+                history=history,
+                holder=holder,
+                chain=chain,
+                skills_index=skills_index,
             )
             async with aclosing(loop.run()) as turn_stream:
                 async for emitted in turn_stream:
@@ -329,6 +380,12 @@ class Harness:
                 yield replayed
                 return
 
+            agent = self.agent_for(header.agent)
+            model = resolve_model(agent, self.default_model)
+            chain = await self._permission_chain(header)
+            skills_index = await self._skill_index(agent)
+            deps = await _resolve(self.deps_factory(header)) if self.deps_factory is not None else None
+
             if ask_id is not None:
                 if pending is None or pending.event.ask_id != ask_id:
                     raise TantraError(f"ask {ask_id!r} is unknown or already answered in session {sid}")
@@ -342,11 +399,6 @@ class Harness:
                 emitted = Emitted(session_id=sid, depth=header.depth, seq=header.last_seq, event=answered)
                 await self._notify(emitted)
                 yield emitted
-
-            agent = self.agent_for(header.agent)
-            model = resolve_model(agent, self.default_model)
-            chain = await self._permission_chain(header)
-            deps = await _resolve(self.deps_factory(header)) if self.deps_factory is not None else None
 
             header.status = "running"
             header.updated_at = datetime.now(UTC)
@@ -363,7 +415,14 @@ class Harness:
                 deps=deps,
             )
             loop = self._build_loop(
-                header=header, agent=agent, model=model, turn=turn, history=history, holder=holder, chain=chain
+                header=header,
+                agent=agent,
+                model=model,
+                turn=turn,
+                history=history,
+                holder=holder,
+                chain=chain,
+                skills_index=skills_index,
             )
             async with aclosing(loop.run()) as turn_stream:
                 async for emitted in turn_stream:

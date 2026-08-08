@@ -128,6 +128,7 @@ class CompactionApplied(EventBase):
     tokens_before: int
     tokens_after: int
     summary: str
+    floor_turn_id: str | None = None
 
 
 class CancelRequested(EventBase):

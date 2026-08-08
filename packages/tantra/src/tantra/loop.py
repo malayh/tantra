@@ -51,6 +51,7 @@ from tantra.stores.base import Store
 from tantra.tools import Context, Tool
 
 if TYPE_CHECKING:
+    from tantra.compaction import Compactor
     from tantra.memory import Memory
 
 SUBMIT_OUTPUT = "submit_output"
@@ -204,6 +205,7 @@ class TurnLoop:
         spawner: Spawner | None = None,
         skills_index: Sequence[SkillInfo] = (),
         memory: Memory | None = None,
+        compactor: Compactor | None = None,
     ) -> None:
         self.store = store
         self.provider = provider
@@ -222,6 +224,11 @@ class TurnLoop:
         self.spawner = spawner
         self.skills_index = list(skills_index)
         self.memory = memory
+        self.compactor = compactor
+        self.turn.history = self.history
+        self.turn.model = model
+        self.turn.limits = provider.limits(model)
+        self.turn.provider = provider
         self.failed = False
         self.lease_lost = False
         self.suspended: str | None = None
@@ -563,6 +570,14 @@ class TurnLoop:
         for emitted in await self._append(events):
             yield emitted
 
+    async def _failed(self, exc: ProviderError) -> AsyncIterator[Emitted]:
+        self.failed = True
+        failure = TurnFailed(turn_id=self.turn.turn_id, error=str(exc))
+        for emitted in await self._append([failure]):
+            yield emitted
+        for hook in self.hooks:
+            await hook.after_turn(self.turn, failure)
+
     async def _terminal(self, reason: str, output: Any) -> AsyncIterator[Emitted]:
         event = TurnCompleted(turn_id=self.turn.turn_id, stop_reason=reason, output=output)
         for emitted in await self._append([event]):
@@ -708,6 +723,17 @@ class TurnLoop:
             for hook in self.hooks:
                 await hook.before_sample(self.turn)
 
+            if self.compactor is not None:
+                try:
+                    compacted = await self.compactor.compact(self.turn)
+                except ProviderError as exc:
+                    async for emitted in self._failed(exc):
+                        yield emitted
+                    return
+                if compacted:
+                    for emitted in await self._append(compacted):
+                        yield emitted
+
             sample_id = uuid4().hex
             prompt = await resolve_prompt(self.agent.prompt, self.turn)
             req = build_sample_request(
@@ -731,12 +757,8 @@ class TurnLoop:
                         else:
                             yield item
             except ProviderError as exc:
-                self.failed = True
-                failure = TurnFailed(turn_id=self.turn.turn_id, error=str(exc))
-                for emitted in await self._append([failure]):
+                async for emitted in self._failed(exc):
                     yield emitted
-                for hook in self.hooks:
-                    await hook.after_turn(self.turn, failure)
                 return
 
             for emitted in await self._append(self._parts(sample_id, end)):

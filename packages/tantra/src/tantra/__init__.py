@@ -10,6 +10,7 @@ from tantra.ask import (
     FreeText,
     FreeTextResponse,
 )
+from tantra.compaction import CompactionConfig, Compactor, PruneThenSummarize
 from tantra.context import TurnContext
 from tantra.errors import (
     ProviderError,
@@ -19,7 +20,15 @@ from tantra.errors import (
     TantraError,
     TurnIncomplete,
 )
-from tantra.events import Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
+from tantra.events import (
+    CompactionApplied,
+    Lease,
+    SessionEvent,
+    SessionHeader,
+    SessionStatus,
+    Stamped,
+    Usage,
+)
 from tantra.harness import Harness
 from tantra.hooks import Denial, Hook
 from tantra.loop import Emitted, RetryConfig
@@ -50,6 +59,9 @@ __all__ = [
     "BuiltinMemory",
     "Choice",
     "ChoiceResponse",
+    "CompactionApplied",
+    "CompactionConfig",
+    "Compactor",
     "Context",
     "Denial",
     "Embedder",
@@ -73,6 +85,7 @@ __all__ = [
     "Provider",
     "ProviderError",
     "ProviderEvent",
+    "PruneThenSummarize",
     "RetryConfig",
     "Sample",
     "SampleRequest",

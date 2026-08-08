@@ -121,7 +121,7 @@ Two streams, deliberately different.
 | `AskRaised` | `ask_id`, `call_id`, `request: AskRequest` |
 | `AskAnswered` | `ask_id`, `response: AskResponse`, `answered_by` |
 | `SampleCompleted` | `sample_id`, `usage`, `finish_reason` |
-| `CompactionApplied` | `strategy`, `tokens_before`, `tokens_after`, `summary` |
+| `CompactionApplied` | `strategy`, `tokens_before`, `tokens_after`, `summary`, `floor_turn_id` *(added in P7: the append-only log puts this event after the tail it protects, so it must name the oldest kept turn)* |
 | `CancelRequested` | `turn_id` |
 | `TurnCompleted` | `turn_id`, `stop_reason`, `output` |
 | `TurnFailed` | `turn_id`, `error` |
@@ -499,15 +499,24 @@ First genuinely useful phase: non-interactive agents work end to end.
   - Import shape: `stores/fs.py` → `memory.py` → `tools.py`, so `tools.py` now imports `Store` (and `Memory`) under `TYPE_CHECKING` only — a runtime import of `tantra.stores.base` there re-creates a real cycle currently masked by import order.
   - Follow-ups: same-score+same-timestamp ordering differs per backend (MemoryStore insertion order, FS filename sort — no id tie-break); `metadata={"k": None}` matches rows lacking the key; `memory_all` is a full scan per recall (fine now, P8 pushes down).
 
-### Phase 7 — Compaction · deps: P2 · ∥ P4, P5, P6, P8 · —
+### Phase 7 — Compaction · deps: P2 · ∥ P4, P5, P6, P8 · **done**
 - `compaction.py`: `Compactor` protocol, `CompactionConfig`, `PruneThenSummarize`.
 - Stage 1 stubbing with `tail_turns` protection and skill-output exemption; stage 2 structured brief; `CompactionApplied`.
 - **Verify:** a synthetic session with 200k tokens of tool output compacts below `usable`; the last 2 turns are byte-identical afterwards; every `tool_call` in the compacted message list still has a matching result (assert this explicitly — it's the 400-producing failure); a session that is all conversation and no tool output skips stage 1 and goes straight to stage 2.
 - Checklist:
-  - [ ] Compactor protocol + config
-  - [ ] Stage 1 prune
-  - [ ] Stage 2 summarize
-  - [ ] Pair-integrity assertion in tests
+  - [x] Compactor protocol + config
+  - [x] Stage 1 prune
+  - [x] Stage 2 summarize
+  - [x] Pair-integrity assertion in tests
+- Landed notes (P7):
+  - Durability without rewriting: stage 1 persists as **re-emitted `ToolCallCompleted` events** (same `call_id`, stub content); assembly is last-wins per `call_id`, updating the result message in place — "replaces content, never removes a message" literally. Stage 2 emits one `CompactionApplied` whose `floor_turn_id` names the oldest kept turn (additive field on the frozen event; `None` on legacy events falls back to the event's own position). Assembly drops a result whose call was never requested in-window, so a post-floor stub for a pre-floor call can't orphan.
+  - Prune-only outcomes emit **no** `CompactionApplied` (stage 2 alone does, per spec); when stage 2 runs, stage-1 stubs stay in-memory and only shape the summarize request — the prefix is dropped anyway.
+  - `TurnContext` gained `history`/`model`/`limits`/`provider` (defaulted `None`, populated by `TurnLoop`) — the pinned `compact(ctx)` signature gives the compactor nothing else. Hooks therefore see a live alias of the loop's history; mutating it corrupts loop state. `compact()` on a hand-built ctx without these raises bare `AttributeError`.
+  - Token estimate: provider base counts `input + cache_read + cache_write + output` (`input_tokens` alone excludes cache hits — on caching providers compaction would never fire), floored by a chars//4 pass over the assembled view (zero/absent usage must not disable compaction). `tokens_before` is usage-scale, `tokens_after` chars//4-scale — mixed scales, tune with care.
+  - `tail_turns` counts the **in-flight** turn: default 2 protects the current turn plus one completed turn.
+  - Summarize call: not retried, its usage never reaches `SessionHeader.usage`, a `ProviderError` (incl. an empty brief, which raises rather than deleting the prefix) fails the turn via `TurnFailed` — recovery is a fresh `run()`, not `resume()`. A session with fewer turns than `tail_turns`+1 (one monster turn) is un-compactable by design: prune-only, or nothing.
+  - Self-limiting: after a compaction the window holds exactly `tail_turns` turns, so stage 2 cannot re-fire on the next sample. `SKILL_TOOL` moved to `skills.py` so the exemption imports leaf-ward.
+  - Follow-ups: the summarize request itself can exceed the window on a pathological prefix (no chunking); `floor_turn_id` naming an absent turn degrades to the legacy floor silently.
 
 ### Phase 8 — SQLite + Postgres stores · deps: P0 · ∥ P2–P7 · —
 - `stores/sqlite.py` (WAL), `stores/postgres.py` (dedicated `tantra` schema, idempotent versioned `setup()`, JSONB+GIN on metadata, optional pgvector for P6).

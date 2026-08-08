@@ -29,18 +29,17 @@ from tantra.hooks import Hook
 from tantra.loop import DEFAULT_RETRY, ChildOutcome, Emitted, RetryConfig, TurnLoop
 from tantra.permissions import check_permission
 from tantra.providers.base import Provider
-from tantra.skills import SkillInfo, Skills
+from tantra.skills import SKILL_TOOL, SkillInfo, Skills
 from tantra.stores.base import Store
 from tantra.tools import Context, Tool
 
 if TYPE_CHECKING:
+    from tantra.compaction import Compactor
     from tantra.memory import Memory
 
 TYPED_KEYS = frozenset({"type", "anyOf", "allOf", "oneOf", "$ref", "enum", "const"})
 
 CANCEL_ATTEMPTS = 5
-
-SKILL_TOOL = "skill"
 
 
 def _check_schema(label: str, entry: Tool) -> None:
@@ -180,6 +179,7 @@ class Harness:
         max_depth: int = 3,
         skills: Skills | None = None,
         memory: Memory | None = None,
+        compactor: Compactor | None = None,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -191,6 +191,7 @@ class Harness:
         self.hooks = list(hooks)
         self.skills = skills
         self.memory = memory
+        self.compactor = compactor
         self.default_permission = check_permission("harness default_permission", default_permission)
         self.agents = build_name_table(agents)
         self.tools = {name: _tool_table(agent) for name, agent in self.agents.items()}
@@ -280,6 +281,7 @@ class Harness:
             spawner=_ChildRunner(self, header),
             skills_index=skills_index,
             memory=self.memory,
+            compactor=self.compactor,
         )
 
     async def _notify(self, emitted: Emitted) -> None:

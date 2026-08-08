@@ -7,6 +7,7 @@ from typing import Protocol
 
 from tantra.errors import TantraError
 
+SKILL_TOOL = "skill"
 SKILL_FILE = "SKILL.md"
 FENCE = "---"
 BOM = "﻿"

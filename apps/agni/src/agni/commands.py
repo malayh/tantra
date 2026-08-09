@@ -130,9 +130,10 @@ async def skills(repl: Repl, arg: str) -> None:
     index = await repl.harness.skills.index()
     if not index:
         repl.note("no skills found")
-        return
     for info in index:
         repl.line(f"  {info.name}: {info.description}")
+    for path, reason in getattr(repl.harness.skills, "skipped", ()):
+        repl.note(f"  skipped {path}: {reason}")
 
 
 async def help_(repl: Repl, arg: str) -> None:

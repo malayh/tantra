@@ -12,6 +12,10 @@ class MergedSkills:
     def __init__(self, roots: Sequence[str | Path]) -> None:
         self.sources = [FileSystemSkills(root) for root in roots]
 
+    @property
+    def skipped(self) -> list[tuple[Path, str]]:
+        return [entry for source in self.sources for entry in source.skipped]
+
     async def index(self) -> list[SkillInfo]:
         merged: dict[str, SkillInfo] = {}
         for source in self.sources:

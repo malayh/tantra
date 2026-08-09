@@ -48,24 +48,52 @@ def _unquote(value: str) -> str:
     return value
 
 
+def _dedent(block: list[str]) -> list[str]:
+    filled = [line for line in block if line.strip()]
+    if not filled:
+        return []
+    margin = min(len(line) - len(line.lstrip()) for line in filled)
+    return [line[margin:] if line.strip() else "" for line in block]
+
+
+def _fold(marker: str, block: list[str]) -> str:
+    if marker.startswith(">"):
+        return " ".join(line.strip() for line in block if line.strip())
+    return "\n".join(_dedent(block)).strip()
+
+
+def _fields(lines: list[str]) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        if not line or line[0].isspace() or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        marker = value.strip()
+        if marker not in BLOCK_SCALARS:
+            fields[key.rstrip()] = _unquote(marker)
+            continue
+        block: list[str] = []
+        while index < len(lines) and (not lines[index].strip() or lines[index][0].isspace()):
+            block.append(lines[index])
+            index += 1
+        fields[key.rstrip()] = _fold(marker, block)
+    return fields
+
+
 def _parse(path: Path) -> Skill:
     lines = path.read_text(encoding="utf-8").lstrip(BOM).replace("\r\n", "\n").split("\n")
     if not lines or lines[0].strip() != FENCE:
         raise TantraError(f"{path}: skill file must open with a '{FENCE}' frontmatter fence")
-    closing = next((index for index, line in enumerate(lines[1:], 1) if line.strip() == FENCE), None)
+    closing = next((index for index, line in enumerate(lines[1:], 1) if line.rstrip() == FENCE), None)
     if closing is None:
         raise TantraError(f"{path}: frontmatter fence is never closed")
-    fields: dict[str, str] = {}
-    for line in lines[1:closing]:
-        if not line or line[0].isspace() or ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        fields[key.rstrip()] = _unquote(value.strip())
+    fields = _fields(lines[1:closing])
     for key in ("name", "description"):
         if not fields.get(key):
             raise TantraError(f"{path}: frontmatter has no {key!r}")
-        if fields[key] in BLOCK_SCALARS:
-            raise TantraError(f"{path}: frontmatter {key!r} is a YAML block scalar; write it on one line")
     return Skill(name=fields["name"], description=fields["description"], body="\n".join(lines[closing + 1 :]).strip())
 
 
@@ -83,21 +111,32 @@ def _files(directory: Path) -> tuple[str, ...]:
 class FileSystemSkills:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
+        self.skipped: list[tuple[Path, str]] = []
 
     def _scan(self) -> list[tuple[Path, Skill]]:
         if not self.root.is_dir():
             raise TantraError(f"skills root {self.root} is not a directory")
         seen: dict[str, Path] = {}
         entries: list[tuple[Path, Skill]] = []
+        skipped: list[tuple[Path, str]] = []
         for directory in sorted(self.root.iterdir()):
             path = directory / SKILL_FILE
             if not directory.is_dir() or not path.is_file():
                 continue
-            skill = _parse(path)
+            try:
+                skill = _parse(path)
+            except TantraError as exc:
+                skipped.append((path, str(exc).removeprefix(f"{path}: ")))
+                continue
+            except (OSError, ValueError) as exc:
+                skipped.append((path, f"unreadable skill file: {exc}"))
+                continue
             if skill.name in seen:
-                raise TantraError(f"duplicate skill name {skill.name!r}: {seen[skill.name]} and {path}")
+                skipped.append((path, f"duplicate skill name {skill.name!r}: already declared by {seen[skill.name]}"))
+                continue
             seen[skill.name] = path
             entries.append((directory, skill))
+        self.skipped = skipped
         return entries
 
     async def index(self) -> list[SkillInfo]:

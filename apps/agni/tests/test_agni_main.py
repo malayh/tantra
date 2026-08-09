@@ -43,6 +43,22 @@ async def test_serve_opens_the_store_the_memory_root_and_both_skill_roots(sandbo
     assert "how this project cuts a release" in io.text
 
 
+async def test_serve_warns_on_stderr_about_a_skill_it_cannot_parse(
+    sandbox: Path, capsys: pytest.CaptureFixture
+) -> None:
+    broken = sandbox / "project" / "skills" / "half-written"
+    broken.mkdir()
+    (broken / "SKILL.md").write_text("---\nname: half-written\n---\n\nno description\n")
+    config = load_config()
+    io = ScriptedIo(["/exit"])
+
+    assert await serve(config, auto=False, resume=None, io=io.io) == 0
+
+    warned = capsys.readouterr().err
+    assert f"agni: skipping skill {broken / 'SKILL.md'}" in warned
+    assert "no 'description'" in warned
+
+
 def test_the_install_script_is_valid_shell_and_names_both_published_assets() -> None:
     script = Path(__file__).resolve().parents[3] / "install.sh"
 

@@ -57,14 +57,19 @@ async def serve(config: Config, *, auto: bool, resume: str | None, io: Io | None
     memory_store = FileSystemStore(config.memory_root)
     await memory_store.setup()
     roots = skill_roots(Path.home().joinpath(*USER_SKILLS), Path.cwd() / PROJECT_SKILLS)
+    skills = MergedSkills(roots) if roots else None
     harness = build_harness(
         OpenAICompatible(config.endpoint, config.api_key),
         store,
         model=config.model,
         memory=BuiltinMemory(memory_store),
-        skills=MergedSkills(roots) if roots else None,
+        skills=skills,
         auto=auto,
     )
+    if skills is not None:
+        await skills.index()
+        for path, reason in skills.skipped:
+            print(f"agni: skipping skill {path}: {reason}", file=sys.stderr)
     if resume is not None and await store.header(resume) is None:
         print(f"agni: no session {resume}", file=sys.stderr)
         return 1

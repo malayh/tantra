@@ -171,18 +171,102 @@ async def test_quoted_values_crlf_and_nested_keys_all_parse(tmp_path: Path) -> N
         ("---\nname: nameless\n---\n\nBody.\n", "no 'description'"),
         ("---\nname: unclosed\ndescription: never fenced\n\nBody.\n", "never closed"),
         ("name: bare\ndescription: no fence at all\n\nBody.\n", "frontmatter fence"),
-        ("---\nname: folded\ndescription: >\n  wrapped text\n---\n\nBody.\n", "block scalar"),
-        ("---\nname: literal\ndescription: |-\n  wrapped text\n---\n\nBody.\n", "block scalar"),
-        ("---\nname: |\ndescription: a literal name\n---\n\nBody.\n", "block scalar"),
+        ("---\nname: |\ndescription: an empty block scalar\n---\n\nBody.\n", "no 'name'"),
     ],
 )
-async def test_malformed_frontmatter_raises_naming_the_file(tmp_path: Path, text: str, message: str) -> None:
+async def test_malformed_frontmatter_is_skipped_naming_the_file(tmp_path: Path, text: str, message: str) -> None:
     write(tmp_path / "skills" / "broken" / "SKILL.md", text)
+    skills = FileSystemSkills(tmp_path / "skills")
 
-    with pytest.raises(TantraError, match=message) as raised:
-        await FileSystemSkills(tmp_path / "skills").index()
+    assert await skills.index() == []
 
-    assert "SKILL.md" in str(raised.value)
+    [(path, reason)] = skills.skipped
+    assert path == tmp_path / "skills" / "broken" / "SKILL.md"
+    assert message in reason
+
+
+async def test_a_folded_block_scalar_description_becomes_one_spaced_line(tmp_path: Path) -> None:
+    body = "---\nname: folded\ndescription: >\n  wrapped across\n  three indented\n  lines\n---\n\nBody text.\n"
+    write(tmp_path / "skills" / "folded" / "SKILL.md", body)
+
+    loaded = await FileSystemSkills(tmp_path / "skills").load("folded")
+
+    assert loaded.description == "wrapped across three indented lines"
+    assert loaded.body == "Body text."
+
+
+async def test_a_literal_block_scalar_description_keeps_its_newlines(tmp_path: Path) -> None:
+    body = "---\nname: literal\ndescription: |\n  first line\n  second line\n---\n\nBody text.\n"
+    write(tmp_path / "skills" / "literal" / "SKILL.md", body)
+
+    loaded = await FileSystemSkills(tmp_path / "skills").load("literal")
+
+    assert loaded.description == "first line\nsecond line"
+
+
+async def test_an_indented_fence_inside_a_literal_block_stays_in_the_description(tmp_path: Path) -> None:
+    body = "---\nname: fenced\ndescription: |\n  first line\n  ---\n  third line\n---\n\nBody text.\n"
+    write(tmp_path / "skills" / "fenced" / "SKILL.md", body)
+
+    loaded = await FileSystemSkills(tmp_path / "skills").load("fenced")
+
+    assert loaded.description == "first line\n---\nthird line"
+    assert loaded.body == "Body text."
+
+
+@pytest.mark.parametrize("marker", [">", ">-", ">+", "|", "|-", "|+"])
+async def test_every_chomping_variant_parses(tmp_path: Path, marker: str) -> None:
+    body = f"---\nname: chomped\ndescription: {marker}\n  one\n---\n\nBody text.\n"
+    write(tmp_path / "skills" / "chomped" / "SKILL.md", body)
+
+    loaded = await FileSystemSkills(tmp_path / "skills").load("chomped")
+
+    assert loaded.description == "one"
+
+
+async def test_a_caveman_shaped_skill_folds_its_multi_line_description(tmp_path: Path) -> None:
+    body = (
+        "---\n"
+        "name: caveman\n"
+        "description: >\n"
+        "  Ultra-compressed communication mode. Cuts token usage ~75% by speaking\n"
+        "  like caveman while keeping full technical accuracy. Supports intensity\n"
+        "  levels: lite, full (default), ultra.\n"
+        "---\n"
+        "\n"
+        "# Caveman\n"
+    )
+    write(tmp_path / "skills" / "caveman" / "SKILL.md", body)
+
+    loaded = await FileSystemSkills(tmp_path / "skills").load("caveman")
+
+    assert loaded.name == "caveman"
+    assert loaded.description == (
+        "Ultra-compressed communication mode. Cuts token usage ~75% by speaking like caveman while keeping full "
+        "technical accuracy. Supports intensity levels: lite, full (default), ultra."
+    )
+    assert loaded.body == "# Caveman"
+
+
+async def test_a_nested_mapping_beside_a_block_scalar_is_still_ignored(tmp_path: Path) -> None:
+    body = (
+        "---\n"
+        "name: nested\n"
+        "metadata:\n"
+        "  version: 2.0.0\n"
+        "  name: nested-and-ignored\n"
+        "description: >\n"
+        "  folded after the mapping\n"
+        "---\n"
+        "\n"
+        "Body text.\n"
+    )
+    write(tmp_path / "skills" / "nested" / "SKILL.md", body)
+
+    loaded = await FileSystemSkills(tmp_path / "skills").load("nested")
+
+    assert loaded.name == "nested"
+    assert loaded.description == "folded after the mapping"
 
 
 async def test_a_utf8_bom_before_the_fence_is_tolerated(tmp_path: Path) -> None:
@@ -195,11 +279,68 @@ async def test_a_utf8_bom_before_the_fence_is_tolerated(tmp_path: Path) -> None:
     assert loaded.body.startswith("# SEO")
 
 
-async def test_two_directories_declaring_one_name_raise(root: Path) -> None:
+async def test_two_directories_declaring_one_name_keep_the_first_and_skip_the_second(root: Path) -> None:
     write(root / "cold-email-v2" / "SKILL.md", COLD_EMAIL)
+    skills = FileSystemSkills(root)
 
-    with pytest.raises(TantraError, match="duplicate skill name 'cold-email'"):
-        await FileSystemSkills(root).index()
+    listing = await skills.index()
+
+    assert [info.name for info in listing] == ["cold-email", "outreach", "seo"]
+    [(path, reason)] = skills.skipped
+    assert path == root / "cold-email-v2" / "SKILL.md"
+    assert "duplicate skill name 'cold-email'" in reason
+    assert str(root / "cold-email" / "SKILL.md") in reason
+
+
+async def test_a_broken_skill_directory_is_skipped_and_its_siblings_still_index(root: Path) -> None:
+    write(root / "half-written" / "SKILL.md", "---\nname: half-written\n---\n\nBody.\n")
+    write(root / "unfenced" / "SKILL.md", "---\nname: unfenced\ndescription: never fenced\n\nBody.\n")
+    skills = FileSystemSkills(root)
+
+    listing = await skills.index()
+
+    assert [info.name for info in listing] == ["cold-email", "outreach", "seo"]
+    assert [path for path, _ in skills.skipped] == [
+        root / "half-written" / "SKILL.md",
+        root / "unfenced" / "SKILL.md",
+    ]
+    assert "no 'description'" in skills.skipped[0][1]
+    assert "never closed" in skills.skipped[1][1]
+    assert (await skills.load("seo")).name == "seo"
+
+
+async def test_a_skill_file_that_is_not_utf8_is_skipped_not_raised(root: Path) -> None:
+    (root / "binary").mkdir()
+    (root / "binary" / "SKILL.md").write_bytes(b"---\nname: binary\ndescription: caf\xe9\n---\n\nBody.\n")
+    skills = FileSystemSkills(root)
+
+    listing = await skills.index()
+
+    assert [info.name for info in listing] == ["cold-email", "outreach", "seo"]
+    [(path, reason)] = skills.skipped
+    assert path == root / "binary" / "SKILL.md"
+    assert "unreadable skill file" in reason
+
+
+async def test_rescanning_refreshes_the_skipped_list_instead_of_growing_it(root: Path) -> None:
+    write(root / "half-written" / "SKILL.md", "---\nname: half-written\n---\n\nBody.\n")
+    skills = FileSystemSkills(root)
+
+    await skills.index()
+    await skills.index()
+    await skills.load("seo")
+
+    assert [path for path, _ in skills.skipped] == [root / "half-written" / "SKILL.md"]
+
+
+async def test_loading_a_skipped_skill_raises_like_an_unknown_one(root: Path) -> None:
+    write(root / "half-written" / "SKILL.md", "---\nname: half-written\n---\n\nBody.\n")
+    skills = FileSystemSkills(root)
+
+    with pytest.raises(TantraError, match="unknown skill 'half-written'"):
+        await skills.load("half-written")
+
+    assert [path for path, _ in skills.skipped] == [root / "half-written" / "SKILL.md"]
 
 
 async def test_three_skills_add_one_block_of_three_lines_and_under_200_tokens(root: Path) -> None:

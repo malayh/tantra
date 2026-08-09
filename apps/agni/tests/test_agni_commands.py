@@ -16,6 +16,13 @@ def write_skill(root: Path, name: str, description: str, body: str) -> None:
     (directory / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n")
 
 
+def write_broken_skill(root: Path, name: str) -> Path:
+    directory = root / name
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text(f"---\nname: {name}\n---\n\nno description\n")
+    return directory / "SKILL.md"
+
+
 async def test_new_starts_a_fresh_session(tmp_path: Path) -> None:
     repl, io = await make_repl(tmp_path, [])
     first = repl.session_id
@@ -92,6 +99,34 @@ async def test_skills_lists_the_merged_catalogue_with_the_project_shadowing_the_
     assert "the shared review checklist" not in io.text
     assert "how releases are cut" in io.text
     assert (await skills.load("review")).body == "project body"
+
+
+async def test_skills_names_the_files_it_had_to_skip(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    project = tmp_path / "project"
+    write_skill(shared, "review", "the shared review checklist", "shared body")
+    broken = write_broken_skill(project, "half-written")
+    repl, io = await make_repl(tmp_path, [], skills=MergedSkills(skill_roots(shared, project)))
+
+    await repl.handle("/skills")
+
+    assert "review: the shared review checklist" in io.text
+    assert f"skipped {broken}" in io.text
+    assert "no 'description'" in io.text
+
+
+async def test_merged_skills_aggregate_the_skipped_files_of_every_root(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    project = tmp_path / "project"
+    write_skill(shared, "review", "the shared review checklist", "shared body")
+    first = write_broken_skill(shared, "bad-shared")
+    second = write_broken_skill(project, "bad-project")
+    skills = MergedSkills(skill_roots(shared, project))
+
+    listing = await skills.index()
+
+    assert [info.name for info in listing] == ["review"]
+    assert [path for path, _ in skills.skipped] == [first, second]
 
 
 async def test_compact_summarises_a_session_that_outgrew_the_window(tmp_path: Path) -> None:

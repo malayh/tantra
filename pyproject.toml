@@ -36,4 +36,4 @@ known-first-party = ["tantra", "agni"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["packages/tantra/tests"]
+testpaths = ["packages/tantra/tests", "apps/agni/tests"]

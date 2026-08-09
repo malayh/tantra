@@ -5,7 +5,10 @@ description = "Terminal coding agent built on tantra"
 requires-python = ">=3.13"
 license = "Apache-2.0"
 authors = [{ name = "Malay Hazarika", email = "malay.hazarika@gmail.com" }]
-dependencies = ["tantra"]
+dependencies = ["tantra", "prompt_toolkit>=3.0"]
+
+[project.scripts]
+agni = "agni.main:main"
 
 [build-system]
 requires = ["hatchling"]

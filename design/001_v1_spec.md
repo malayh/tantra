@@ -536,30 +536,44 @@ First genuinely useful phase: non-interactive agents work end to end.
   - Tests auto-spin `pgvector/pgvector:pg17` via the docker CLI (session-scoped fixture, free port, `fsync=off`, `max_connections=300`); `TANTRA_POSTGRES_DSN` overrides; docker/psycopg missing → the 20 PG tests skip cleanly, teardown stops the container even on mid-startup failure.
   - Follow-ups: PG `read()` buffers all rows before yielding (no streaming); no vector index (exact scan) and `list()` always sorts; `memory_all` ordering now differs across all four backends; keyword and vector score scales mix unweighted (long queries let the vector pass dominate); the jsonb-containment widening above.
 
-### Phase 9 — Adapters · deps: P3 · ∥ P5–P8 · —
-- `adapters/cli.py` (terminal renderer, prompts on ask), `adapters/ws.py`, `adapters/sse.py`; a typed inbound command envelope (`run` / `resume` / `cancel`) shared by WS and SSE.
-- **Verify:** against a FastAPI `TestClient`, a WS session runs a turn, receives an ask, sends a response, and receives `TurnCompleted`. With a Postgres store and two separate `Harness` instances, instance A starts the turn and instance B resumes it — the pattern the current `WSConnectionManager` dict makes impossible.
+### Phase 9 — Adapters · deps: P3 · ∥ P5–P8 · **deferred**
+- Deferred whole (user call, post-P8): the primitives already carry the transport — `Emitted.model_dump_json()` out, `resume(sid, ask_id, response)` in — so a WS/SSE endpoint is ~25 lines of app code written against the app's own auth/tenancy; shipping one would freeze a public wire protocol for code most servers rewrite. Cross-instance resume stays pinned at library level (test_ask two-harness + P8 PG conformance).
+- Deferred with it: retry attempt marker on `Emitted` (l.411 double-render), `AskAnswered.answered_by` plumbing (l.436), stranded-session/orphaned-child detection helper (l.458), the FastAPI/two-worker adapter tests. P10 builds its own rendering.
 - Checklist:
   - [ ] CLI renderer
   - [ ] WS adapter
   - [ ] SSE adapter
   - [ ] Two-worker resume test
 
-### Phase 10 — `apps/agni` reference harness · deps: P3, P4, P5, P7, P9 · —
-Real and usable, not elaborate. It exists to make gaps in the library show up.
+### Phase 10 — `apps/agni` CLI code editor · deps: P3, P4, P5, P6, P7, P8 · **done**
+Rescoped post-P9-deferral (user call): an opencode-like standalone CLI app. Real and usable, not elaborate; it exists to make gaps in the library show up. agni owns its rendering.
+- Config from env: `OPENAI_API_KEY` (required), `OPENAI_ENDPOINT` (default `https://api.openai.com/v1`), `AGNI_MODELS` (comma-separated, first = default), `AGNI_HOME` (default `~/.agni`).
+- UI: prompt_toolkit input line (history, /command completion) + ANSI streamed print. Commands: `/new`, `/resume`, `/model`, `/compact`, `/skills`, `/help`, `/exit`.
 - Tools: `read`, `write`, `edit`, `glob`, `grep`, `bash`.
-- Agents: `build` (full access) and `explore` (read-only, available as a sub-agent).
-- Permissions: reads allow, writes and bash ask. FS skills from `./skills`. Session resume. Compaction on.
-- `--auto` mode: everything `allow`, no prompts; a `before_tool` bash guard denies destructive commands (`rm -rf`, `git push --force`, …) — the hook-based unattended-guardrail pattern, demonstrated.
-- `main.py` over `adapters/cli.py`, ~30 lines.
-- **Verify:** on a scratch git repo, ask it to add a function to an existing file — it greps, reads, prompts before writing, and produces a correct edit. `^C` mid-turn then re-running with the same session id resumes rather than restarting. A task that fills the context window compacts and continues instead of erroring. In `--auto`, a prompt that leads the model to `rm -rf` gets a denial the model recovers from, with zero human input for the whole turn.
+- Agents: `build` (full access, `explore` as sub-agent) and `explore` (read-only).
+- Permissions: reads allow, write/edit/bash ask. `--auto` mode: everything `allow`, no prompts; a `before_tool` bash guard denies destructive commands (`rm -rf`, `git push --force`, …) — the hook-based unattended-guardrail pattern, demonstrated.
+- Store: `SQLiteStore` at `~/.agni/data/agni.db`. Memory: `BuiltinMemory` on the FS memory seam at `~/.agni/memory` — sessions on SQLite, memories on files, both store interfaces exercised. Skills: `~/.agents/skills` + project `./skills` merged, project wins. Compaction on. `^C` abandons the stream; next input or `/resume` re-drives the incomplete turn.
+- Install: `install.sh` curls a PyInstaller onefile binary from GitHub releases into `~/.agni/bin`; release workflow is manual-only (`workflow_dispatch` with version input), matrix linux x86_64 + macos arm64.
+- **Verify:** on a scratch git repo, ask it to add a function to an existing file — it greps, reads, prompts before writing, and produces a correct edit. `^C` mid-turn then re-running with the same session id resumes rather than restarting. A task that fills the context window compacts and continues instead of erroring. In `--auto`, a prompt that leads the model to `rm -rf` gets a denial the model recovers from, with zero human input for the whole turn. (Tests pin these via FakeProvider; the scratch-repo run with a real key is a manual smoke.)
 - Checklist:
-  - [ ] Six tools
-  - [ ] build + explore agents
-  - [ ] Permission prompts
-  - [ ] `--auto` + bash guard hook
-  - [ ] Session resume
-  - [ ] End-to-end run on a scratch repo
+  - [x] Six tools
+  - [x] build + explore agents
+  - [x] Permission prompts + REPL /commands
+  - [x] `--auto` + bash guard hook
+  - [x] ^C-resume + compaction on
+  - [x] Memory on FS + skills merge
+  - [x] install.sh + manual release workflow
+  - [x] Session resume
+  - [ ] End-to-end run on a scratch repo *(manual smoke with a real key — user-run)*
+- Landed notes (P10):
+  - `--auto` is a second agent class (`AutoBuild`, persisted name still `"build"` so sessions stay portable) — an agent's explicit `ask` rule beats `Harness(default_permission=)`, so flipping the default alone cannot reach "everything allow". `default_permission="allow"` in both modes; every prompt comes from Build's explicit write/edit/bash rules.
+  - `^C` is a cooperative flag, not `task.cancel()`: the pump stops at the next emitted event and closes the generator so `_settle`'s `finally` releases the lease. Cost: a long-running `bash` isn't interrupted until it returns. The flag resets at the top of `handle()` — resetting it inside `turn()` only left `/resume` silently half-advancing the turn (review MUST-FIX, pinned).
+  - `/compact` hand-builds a `TurnContext` and appends the compactor's events itself: holds the session lease for the duration, re-reads `last_seq` right before the append, surfaces `SessionBusy`/`SeqConflict` as printed notes. All `TantraError`s in the handle path print and return to the prompt — previously a second writer on the shared db killed the REPL.
+  - Output caps: read/bash truncate at 64k chars with a visible tail, glob 500 / grep 200 lines. bash runs `start_new_session=True` and kills the process group on timeout. `/model` mutates `harness.default_model` (read per run/resume). `MergedSkills` merges shared+project roots (`FileSystemSkills` is single-root), project wins.
+  - Guard: `rm -r` counts destructive without `-f`. Recorded bypasses (demo pattern per spec, not fixed): `sh -c '…'`, `xargs rm`, `find -delete`, literal `env` prefix, `python -c`. `--auto` has no path guard on write/edit — spec mandates a bash guard only; absolute-path writes go unprompted.
+  - Tantra gaps found (reported, not patched): no public force-compaction API and `tantra.context.resolve_model` unexported (both needed by `/compact`); no public incomplete-turn check and `_settle` writes `status="idle"` on an abandoned turn, so the REPL re-scans the full log per input; a tool raising `BaseException` escapes the loop's `except Exception` and bypasses the awaiting coroutine chain; answering a bubbled child ask takes two calls (`resume(child, …)` then bare `resume(root)`) — nothing pairs them, though unreachable in agni today (explore is all-allow); argument-level permission rules ("bash: allow ls, deny rm") remain inexpressible — exactly the hole the guard hook fills.
+  - Review: 5/5 injected mutations caught (guard verdict, edit uniqueness, settle-before-run, skills ordering, ask-rule fallthrough); `/resume` of a session suspended on an ask re-presents the prompt (probe-verified against a fresh harness over the same db).
+  - 76 agni tests, FakeProvider only, `AGNI_HOME`/`Path.home` monkeypatched — the real `~/.agni`/`~/.agents` are never touched; install.sh gets a `bash -n` + asset-name sanity test; the PyInstaller workflow is not CI-exercised.
 
 ## Open Decisions
 

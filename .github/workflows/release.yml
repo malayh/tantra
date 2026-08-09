@@ -1,0 +1,64 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, without the leading v (e.g. 0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: agni-linux-x86_64
+          - os: macos-latest
+            asset: agni-darwin-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --all-packages
+
+      - name: Build the onefile binary
+        run: |
+          printf 'import sys\nfrom agni.main import main\nsys.exit(main())\n' > entry.py
+          uv run --with pyinstaller pyinstaller \
+            --onefile \
+            --clean \
+            --noconfirm \
+            --name ${{ matrix.asset }} \
+            --paths apps/agni/src \
+            --collect-submodules agni \
+            entry.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+  publish:
+    needs: binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: agni v${{ inputs.version }}
+          files: assets/*

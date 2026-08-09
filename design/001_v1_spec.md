@@ -564,7 +564,7 @@ Rescoped post-P9-deferral (user call): an opencode-like standalone CLI app. Real
   - [x] Memory on FS + skills merge
   - [x] install.sh + manual release workflow
   - [x] Session resume
-  - [ ] End-to-end run on a scratch repo *(manual smoke with a real key — user-run)*
+  - [x] End-to-end run on a scratch repo *(closed by P12's live self-test)*
 - Landed notes (P10):
   - `--auto` is a second agent class (`AutoBuild`, persisted name still `"build"` so sessions stay portable) — an agent's explicit `ask` rule beats `Harness(default_permission=)`, so flipping the default alone cannot reach "everything allow". `default_permission="allow"` in both modes; every prompt comes from Build's explicit write/edit/bash rules.
   - `^C` is a cooperative flag, not `task.cancel()`: the pump stops at the next emitted event and closes the generator so `_settle`'s `finally` releases the lease. Cost: a long-running `bash` isn't interrupted until it returns. The flag resets at the top of `handle()` — resetting it inside `turn()` only left `/resume` silently half-advancing the turn (review MUST-FIX, pinned).
@@ -596,17 +596,25 @@ Adopt real coding-agent prompts for agni; study and adapt, don't copy verbatim.
   - Review: 0 must-fix, 5 should-fix, all applied + mutation-verified — retitle guard was unpinned (masked by swallowed ProviderError), `.strip()` mangled the first porcelain line's status code, bash/read docstrings claimed rendering/batching behavior agni doesn't have, and agni tests ran git subprocesses against the real repo (autouse tmp-cwd `conftest.py` added).
   - Recorded, not fixed: a `TurnFailed` turn still gets a title; title truncation is a mid-word slice without ellipsis; an unterminated `<think>` yields `<think>` as the headline; explore's prompt gets no AUTO_NOTE in `--auto` (read-only, harmless); `TITLE_WIDTH` duplicated in `repl.py`/`commands.py`.
 
-### Phase 12 — Live self-test · deps: P11 · —
+### Phase 12 — Live self-test · deps: P11 · **done**
 Orchestrator-run, not subagent-run: drive the real agni binary against the configured GLM endpoint (glm 5.2). Network is sanctioned for this phase's manual runs only; CI tests stay FakeProvider.
-- Precondition: `OPENAI_API_KEY` is exported (checked, present); `OPENAI_ENDPOINT` and `AGNI_MODELS` must also be exported before the phase starts (checked, currently absent).
+- Precondition: `OPENAI_API_KEY` is exported (checked, present); `OPENAI_ENDPOINT` and `AGNI_MODELS` must also be exported before the phase starts (all three present at run time).
 - Drive agni in tmux (prompt_toolkit needs a real TTY) on scratch git repos: the P10 manual smoke (grep → read → prompt-before-write → correct edit), `^C` mid-turn then resume of the same session, `--auto` destructive-command denial + recovery, a task long enough to compact and continue, memory write then recall in a later session, skills pickup from both roots, each `/command`.
 - Deliverable: findings recorded as landed notes; real defects go through the standard fix round (implementer subagent) and the affected scenario is re-run. Closes P10's "End-to-end run on a scratch repo" checklist item.
 - **Verify:** every scenario above executed against the live model with outcomes recorded honestly, including model-quality observations kept distinct from harness defects.
 - Checklist:
-  - [ ] Smoke scenarios run live
-  - [ ] Findings recorded
-  - [ ] Fix round + re-test
-  - [ ] P10 smoke item closed
+  - [x] Smoke scenarios run live
+  - [x] Findings recorded
+  - [x] Fix round + re-test *(no harness defects found — no fix round needed)*
+  - [x] P10 smoke item closed
+- Landed notes (P12):
+  - Ran against `z-ai/glm-5.2` via the OpenAI-compatible endpoint, tmux via `nix shell` (not installed system-wide), scratch `HOME`/`AGNI_HOME` so the real `~/.agni`/`~/.agents` were never touched (verified by mtime). All seven scenarios passed; every agni stderr log empty. Pane logs kept in the session scratchpad.
+  - Smoke: orient → read both files → prompted before edit → exact one-line fix in `stats.py` → self-verified by running the CLI → `path:line` answer. `^C` during a *pending permission ask* printed the interrupt note; `--resume` re-presented the same ask and the turn completed; the queued user message then correctly ran as its own no-op turn.
+  - Crash recovery (bonus, unplanned): hard-killing the client mid-turn left the lease held — a new `--resume` process got `session … is busy: lease held by another writer` and a live prompt back; after the 60 s TTL it printed `resuming the interrupted turn`, completed the orphaned turn, then ran the new input. Exactly the designed lease + settle path, live.
+  - `--auto`: guard denied `rm -rf` with its hook message, zero permission prompts all run; the model recovered via `find -delete` + `rmdir` — live confirmation of a bypass P10's notes already record (guard is a demo pattern per spec).
+  - Compaction: `/compact` no-ops until history exceeds `usable` (≈104k tok here) — it is "compact if needed", not "compact now"; surprising UX but per design. Crossing the threshold mid-turn fired the prune tier live (`[pruned: read output, 61044 chars omitted]` stub rendered in-stream) and the turn continued to a correct answer; post-prune the session still recalled pre-compaction facts. The summarize tier was not reachable live (needs ~99k tok of *non-prunable* content); it stays FakeProvider-verified from P11. GLM gets `FALLBACK_LIMITS` (128k/4k) — agni never populates the provider's per-model limits map.
+  - Memory/skills/commands: `memory_write` → FS record → `memory_recall` in a fresh session returned the fact; `/skills` listed both roots and the agent loaded `release-notes` via the `skill` tool and followed its conventions; `/help`, `/model` (switched to the second configured model and completed a turn on it), `/new`, `/resume` (all four sessions listed with live-generated titles), `/compact`, `/exit` all behaved. Titles are generated by whichever model is default when the first turn ends.
+  - Model-quality observations (not harness defects): GLM orients with `bash ls` instead of glob/grep despite the prompt's specialized-tools preference; it pushed back on redundant full-file re-reads and proposed `grep` instead (the output-efficiency guidance working); it once typo'd a path mid-command (`tanstra`) and self-corrected within the same command line.
 
 ### Phase 13 — Terminal-Bench harness check · deps: P11, P12 · —
 A health check that the harness works end-to-end unattended — not a leaderboard entry.

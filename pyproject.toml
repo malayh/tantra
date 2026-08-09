@@ -21,6 +21,10 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "psycopg[binary]>=3.2",
+    "curl-cffi>=0.15",
+    "trafilatura>=2.0",
+    "pypdf>=6",
+    "python-docx>=1.1",
 ]
 
 [tool.ruff]

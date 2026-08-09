@@ -138,14 +138,15 @@ P5's concept/core-library pages depend only on P0 (they document v1 surface); it
 - After a phase lands, add only detail that would surprise the next reader — a load-bearing constant, a behavior that isn't what the name suggests. Skip anything the code says plainly.
 - Problems found but not fixed go to Open Decisions or a Follow-up note. Never fixed inline unrecorded.
 
-### Phase 0 — Contract + scaffolding · deps: none · blocks all · —
+### Phase 0 — Contract + scaffolding · deps: none · blocks all · ✅ DONE
 - `packages/tantra/pyproject.toml`: add `[project.optional-dependencies]` `web = ["curl-cffi>=0.15", "trafilatura>=2.0"]`, `doc = ["pypdf>=6", "python-docx>=1.1"]`; add the same to the root dev group.
 - Create `tantra/extratools/__init__.py` (empty), `web/__init__.py` + `search.py` + `fetch.py`, `shell.py`, `doc.py` with frozen factory signatures raising `NotImplementedError`, and the ImportError-with-extra-hint guards for missing deps.
 - **Verify:** `uv sync --all-packages` succeeds; `from tantra.extratools.web import web_search, web_fetch`, `from tantra.extratools.shell import bash, ShellGuard`, `from tantra.extratools.doc import read_doc` all import; a test proves the ImportError message names the right extra when deps are absent.
 - Checklist:
-  - [ ] extras + dev deps declared
-  - [ ] module skeletons with frozen signatures
-  - [ ] import-guard tests
+  - [x] extras + dev deps declared
+  - [x] module skeletons with frozen signatures
+  - [x] import-guard tests
+- Landed notes: guards use `importlib.util.find_spec` (try-import is F401-red and the repo has no noqa pragmas); P2–P4 replace them with real imports. `search.py` has no guard of its own — gated transitively via `web/__init__.py` importing `fetch`; keep that ordering.
 
 ### Phase 1 — shell: bash + ShellGuard + Escalation · deps: P0 · ∥ P2, P3 · —
 - `tantra/extratools/shell.py`: `bash` factory (agni port, fixed timeout, `permission="ask"`), `ShellGuard` with recursive shlex parsing and the default deny rules.

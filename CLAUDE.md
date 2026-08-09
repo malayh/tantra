@@ -57,3 +57,28 @@ These guidelines are working if: fewer unnecessary changes in diffs, fewer rewri
 ## Genearl guidelines
 - DONOT WRITE COMMENTS. NO COMMENTS AT ALL.
 - While writing plans or specs files or responding to users  brevity is the key. Don't be verbose. Write in short bullet points where ever possible.
+
+## Orchestrating implementation
+
+Roles:
+- The main session runs Fable 5. It orchestrates only: plans, spawns subagents, verifies, commits. It does not write implementation code itself.
+- Implementation and review run in general-purpose subagents with `model: "opus"` (cheaper). Never use `fork` — forks inherit Fable.
+
+For each phase in the spec (`design/001_v1_spec.md`):
+1. Enter plan mode. Plan the phase from the spec: files, approach, verify criteria. Exit plan mode for approval.
+2. Spawn a general-purpose subagent (`model: "opus"`, synchronous) to implement:
+   - Prompt must include: spec path, phase number, the approved plan, and "follow the spec's Conventions section".
+   - Subagent implements, runs `just lint` + `just test`, reports what passed.
+3. Spawn a second general-purpose subagent (`model: "opus"`, synchronous) to review:
+   - Prompt: review the phase diff against the spec's deliverables and Verify criteria; report defects with file:line.
+4. If the review finds real defects, send them back to the implementer subagent (SendMessage) or spawn a fix subagent. Re-review only if changes were large.
+5. Orchestrator verifies: run the phase's Verify criteria from the spec, plus `just lint` + `just test`.
+6. Update the spec: status marker, checklist ticks, deviations struck with reasons.
+7. Run compact
+8. Commit the phase.
+
+Rules:
+- Subagents start with zero context — the prompt and the spec must carry everything.
+- One phase at a time unless the spec's dependency graph says parallel; parallel phases use worktree isolation.
+- Never mark a phase done with failing tests. Report failures honestly.
+

@@ -575,6 +575,42 @@ Rescoped post-P9-deferral (user call): an opencode-like standalone CLI app. Real
   - Review: 5/5 injected mutations caught (guard verdict, edit uniqueness, settle-before-run, skills ordering, ask-rule fallthrough); `/resume` of a session suspended on an ask re-presents the prompt (probe-verified against a fresh harness over the same db).
   - 76 agni tests, FakeProvider only, `AGNI_HOME`/`Path.home` monkeypatched — the real `~/.agni`/`~/.agents` are never touched; install.sh gets a `bash -n` + asset-name sanity test; the PyInstaller workflow is not CI-exercised.
 
+### Phase 11 — Prompts · deps: P10 · —
+Adopt real coding-agent prompts for agni; study and adapt, don't copy verbatim.
+- Sources: opencode (github.com/sst/opencode — prompt files under `packages/opencode/src/session/prompt/`); Grok Build local clone `../grok-build` — `crates/codegen/xai-grok-agent/templates/prompt.md` + `subagent_prompt.md` + `apply_patch_prompt.md`, `crates/codegen/xai-grok-agent/src/prompt/subagent_prompts.rs`, `crates/common/xai-grok-compaction/src/prompt.rs`.
+- `build` + `explore` system prompts: identity, workflow (explore → plan → edit → verify), tone/brevity, safety, and a dynamic environment block (cwd, platform, date, git branch + status) — `Agent` holds no I/O, so agni computes the block at startup and bakes it into the agent class it constructs.
+- Six tool docstrings rewritten opencode-style (when to use, when not to, constraints, examples) — the docstring rides the tool schema; it is what the model actually reads.
+- Compaction prompt: **sanctioned tantra change** — `PruneThenSummarize` grows a constructor param for the summarization prompt (default preserves current behavior); agni passes an adapted one.
+- Session titles: after a session's first turn, agni fires one cheap provider sample with a title prompt and persists via `put_header`; `/resume` lists titles.
+- **Verify:** FakeProvider-captured `SampleRequest` shows the env block and workflow sections in the system prompt; each tool description states when not to use it; a first turn produces a persisted title that `/resume` displays; the compaction test observes the injected prompt; system-prompt token overhead measured and recorded in landed notes.
+- Checklist:
+  - [ ] build + explore system prompts
+  - [ ] Tool descriptions
+  - [ ] Compaction prompt param (tantra) + agni prompt
+  - [ ] Title generation
+
+### Phase 12 — Live self-test · deps: P11 · —
+Orchestrator-run, not subagent-run: drive the real agni binary against the configured GLM endpoint (glm 5.2). Network is sanctioned for this phase's manual runs only; CI tests stay FakeProvider.
+- Precondition: `OPENAI_API_KEY` is exported (checked, present); `OPENAI_ENDPOINT` and `AGNI_MODELS` must also be exported before the phase starts (checked, currently absent).
+- Drive agni in tmux (prompt_toolkit needs a real TTY) on scratch git repos: the P10 manual smoke (grep → read → prompt-before-write → correct edit), `^C` mid-turn then resume of the same session, `--auto` destructive-command denial + recovery, a task long enough to compact and continue, memory write then recall in a later session, skills pickup from both roots, each `/command`.
+- Deliverable: findings recorded as landed notes; real defects go through the standard fix round (implementer subagent) and the affected scenario is re-run. Closes P10's "End-to-end run on a scratch repo" checklist item.
+- **Verify:** every scenario above executed against the live model with outcomes recorded honestly, including model-quality observations kept distinct from harness defects.
+- Checklist:
+  - [ ] Smoke scenarios run live
+  - [ ] Findings recorded
+  - [ ] Fix round + re-test
+  - [ ] P10 smoke item closed
+
+### Phase 13 — Terminal-Bench harness check · deps: P11, P12 · —
+A health check that the harness works end-to-end unattended — not a leaderboard entry.
+- terminal-bench (laude-institute/terminal-bench): implement an agent adapter that installs agni inside the task container and runs it in `--auto` with the GLM model. Bench code lives in `bench/`, not shipped with the package.
+- Run a small subset (~10–20 terminal-bench-core tasks) locally under docker; record pass rate plus a failure taxonomy — harness bug vs model limitation vs task-environment issue — in landed notes. Harness bugs feed a fix round.
+- **Verify:** the adapter completes the subset end-to-end with zero human input; every failure is triaged into the taxonomy; the trivial tier of tasks passes.
+- Checklist:
+  - [ ] Adapter
+  - [ ] Subset run
+  - [ ] Triage + landed notes
+
 ## Open Decisions
 
 - **Event timestamps.** The event table has no per-event timestamp and P0 added none. Adding one later is a log-format change; decide before anything depends on replay ordering by time. (Raised in P0 review.)

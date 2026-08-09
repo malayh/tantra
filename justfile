@@ -7,6 +7,9 @@ sync:
 test *args:
     uv run pytest {{args}}
 
+stress *args:
+    uv run pytest stress {{args}}
+
 lint:
     uv run ruff check .
     uv run ruff format --check .

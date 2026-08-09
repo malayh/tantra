@@ -402,6 +402,56 @@ async def test_a_prune_only_compaction_lowers_the_estimate_it_reports_on() -> No
     assert after - 100 <= estimate_tokens(window, summary) <= after
 
 
+async def test_a_second_prune_never_restubs_a_call_whose_stub_sits_in_the_tail() -> None:
+    history = session(result_chars=160_000, text_chars=4_000)
+    first = await PruneThenSummarize().compact(context_for(history, TinyProvider([])))
+    assert [event.call_id for event in stubs_in(first)] == ["c5", "c4", "c3"]
+
+    history += first
+    history += [
+        SampleStarted(turn_id="now", sample_id="now-s1", model=MODEL),
+        TextPart(sample_id="now-s1", text="w" * 180_000),
+        SampleCompleted(sample_id="now-s1"),
+    ]
+    provider = TinyProvider([])
+
+    second = await PruneThenSummarize().compact(context_for(history, provider))
+
+    assert applied_in(second) == []
+    assert provider.requests == []
+    assert [event.call_id for event in stubs_in(second)] == ["c2"]
+    pruned = [event.call_id for event in stubs_in(history + second) if str(event.result).startswith("[pruned:")]
+    assert sorted(pruned) == ["c2", "c3", "c4", "c5"]
+    messages = build_messages(history + second)
+    contents = {message.call_id: message.content for message in messages if isinstance(message, ToolResultMessage)}
+    assert contents["c1"] == "r" * 160_000
+    assert contents["c2"] == f"[pruned: search output, {160_000} chars omitted]"
+
+
+async def test_a_prune_with_nothing_left_to_reclaim_summarizes_on_that_same_call() -> None:
+    history = session(result_chars=160_000, text_chars=45_000)
+    first = await PruneThenSummarize().compact(context_for(history, TinyProvider([])))
+    assert sorted(event.call_id for event in stubs_in(first)) == ["c1", "c2", "c3", "c4", "c5"]
+
+    history += first
+    history += [
+        SampleStarted(turn_id="now", sample_id="now-s1", model=MODEL),
+        TextPart(sample_id="now-s1", text="w" * 250_000),
+        SampleCompleted(sample_id="now-s1"),
+    ]
+    provider = TinyProvider([Sample(text=BRIEF)])
+
+    compacted = await PruneThenSummarize().compact(context_for(history, provider))
+
+    assert stubs_in(compacted) == []
+    assert len(applied_in(compacted)) == 1
+    assert applied_in(compacted)[0].floor_turn_id == TAIL_TURN
+    assert len(provider.requests) == 1
+    summary, window = compaction_window(history + compacted)
+    assert summary == BRIEF
+    assert estimate_tokens(window, summary) < USABLE
+
+
 async def test_an_empty_brief_raises_rather_than_deleting_the_prefix() -> None:
     history = session(result_chars=160_000, text_chars=100_000)
 

@@ -134,7 +134,7 @@ class PruneThenSummarize:
         names = {event.call_id: event.name for event in window if isinstance(event, ToolCallRequested)}
         boundary = _tail_start(window, self.config.tail_turns)
         prefix, tail = window[:boundary], window[boundary:]
-        stubs, gained = self._prune(prefix, names, before, target)
+        stubs, gained = self._prune(window, prefix, names, before, target)
 
         floor = next((event.turn_id for event in tail if isinstance(event, TurnStarted)), None)
         if not prefix or floor is None or before - gained <= target:
@@ -153,13 +153,14 @@ class PruneThenSummarize:
 
     def _prune(
         self,
+        window: Sequence[SessionEvent],
         prefix: Sequence[SessionEvent],
         names: dict[str, str],
         before: int,
         target: int,
     ) -> tuple[list[SessionEvent], int]:
         latest: dict[str, ToolCallCompleted] = {}
-        for event in prefix:
+        for event in window:
             if isinstance(event, ToolCallCompleted):
                 latest[event.call_id] = event
 

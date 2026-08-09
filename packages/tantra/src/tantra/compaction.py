@@ -112,9 +112,16 @@ def _tail_start(events: Sequence[SessionEvent], tail_turns: int) -> int:
 
 
 class PruneThenSummarize:
-    def __init__(self, config: CompactionConfig = DEFAULT_COMPACTION, model: str | None = None) -> None:
+    def __init__(
+        self,
+        config: CompactionConfig = DEFAULT_COMPACTION,
+        model: str | None = None,
+        *,
+        instruction: str = SUMMARIZE_INSTRUCTION,
+    ) -> None:
         self.config = config
         self.model = model
+        self.instruction = instruction
 
     async def compact(self, ctx: TurnContext) -> list[SessionEvent]:
         usable = self.config.usable(ctx.limits)
@@ -185,7 +192,7 @@ class PruneThenSummarize:
     async def _brief(self, ctx: TurnContext, summary: str, prefix: Sequence[SessionEvent]) -> str:
         req = SampleRequest(
             model=self.model or ctx.model,
-            messages=[*assemble_messages(summary, prefix), UserMessage(content=SUMMARIZE_INSTRUCTION)],
+            messages=[*assemble_messages(summary, prefix), UserMessage(content=self.instruction)],
         )
         text = ""
         async for event in ctx.provider.stream(req):

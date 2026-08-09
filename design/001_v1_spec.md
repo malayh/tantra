@@ -575,7 +575,7 @@ Rescoped post-P9-deferral (user call): an opencode-like standalone CLI app. Real
   - Review: 5/5 injected mutations caught (guard verdict, edit uniqueness, settle-before-run, skills ordering, ask-rule fallthrough); `/resume` of a session suspended on an ask re-presents the prompt (probe-verified against a fresh harness over the same db).
   - 76 agni tests, FakeProvider only, `AGNI_HOME`/`Path.home` monkeypatched — the real `~/.agni`/`~/.agents` are never touched; install.sh gets a `bash -n` + asset-name sanity test; the PyInstaller workflow is not CI-exercised.
 
-### Phase 11 — Prompts · deps: P10 · —
+### Phase 11 — Prompts · deps: P10 · **done**
 Adopt real coding-agent prompts for agni; study and adapt, don't copy verbatim.
 - Sources: opencode (github.com/sst/opencode — prompt files under `packages/opencode/src/session/prompt/`); Grok Build local clone `../grok-build` — `crates/codegen/xai-grok-agent/templates/prompt.md` + `subagent_prompt.md` + `apply_patch_prompt.md`, `crates/codegen/xai-grok-agent/src/prompt/subagent_prompts.rs`, `crates/common/xai-grok-compaction/src/prompt.rs`.
 - `build` + `explore` system prompts: identity, workflow (explore → plan → edit → verify), tone/brevity, safety, and a dynamic environment block (cwd, platform, date, git branch + status) — `Agent` holds no I/O, so agni computes the block at startup and bakes it into the agent class it constructs.
@@ -584,10 +584,17 @@ Adopt real coding-agent prompts for agni; study and adapt, don't copy verbatim.
 - Session titles: after a session's first turn, agni fires one cheap provider sample with a title prompt and persists via `put_header`; `/resume` lists titles.
 - **Verify:** FakeProvider-captured `SampleRequest` shows the env block and workflow sections in the system prompt; each tool description states when not to use it; a first turn produces a persisted title that `/resume` displays; the compaction test observes the injected prompt; system-prompt token overhead measured and recorded in landed notes.
 - Checklist:
-  - [ ] build + explore system prompts
-  - [ ] Tool descriptions
-  - [ ] Compaction prompt param (tantra) + agni prompt
-  - [ ] Title generation
+  - [x] build + explore system prompts
+  - [x] Tool descriptions
+  - [x] Compaction prompt param (tantra) + agni prompt
+  - [x] Title generation
+- Landed notes (P11):
+  - Token overhead (len/4): BUILD_PROMPT ≈979 + `<env>` ≈120 → build system prompt ≈1100 tok (+AUTO_NOTE ≈102 in `--auto`); explore+env ≈434; six tool descriptions + explore delegate ≈1441; total static per-sample overhead for build ≈2540 tok. TITLE_PROMPT ≈235, COMPACTION_INSTRUCTION ≈228.
+  - New module `agni/prompts.py`; `build_agent(auto)` → `build_agents(env, auto)`; env-baked agent classes built with `type(...)` and `__doc__` copied explicitly (docstrings don't inherit — the explore delegate description would ship empty).
+  - `environment_block` runs in `build_harness` (the single construction site): `<env>` with cwd, platform, date, git branch (unborn-branch + detached fallbacks) + `--porcelain` status capped at 2000 chars; non-repo short-circuits after one subprocess; no exception escapes.
+  - Titles: fired in `Repl.turn` after the stream drains, only when `header.title is None` and not interrupted; one-shot `provider.stream`, `<think>` spans stripped, first non-empty line, 50-char cap, `put_header`; every exception swallowed. FakeProvider raises before recording unscripted requests, so no existing test's request indices shifted.
+  - Review: 0 must-fix, 5 should-fix, all applied + mutation-verified — retitle guard was unpinned (masked by swallowed ProviderError), `.strip()` mangled the first porcelain line's status code, bash/read docstrings claimed rendering/batching behavior agni doesn't have, and agni tests ran git subprocesses against the real repo (autouse tmp-cwd `conftest.py` added).
+  - Recorded, not fixed: a `TurnFailed` turn still gets a title; title truncation is a mid-word slice without ellipsis; an unterminated `<think>` yields `<think>` as the headline; explore's prompt gets no AUTO_NOTE in `--auto` (read-only, harmless); `TITLE_WIDTH` duplicated in `repl.py`/`commands.py`.
 
 ### Phase 12 — Live self-test · deps: P11 · —
 Orchestrator-run, not subagent-run: drive the real agni binary against the configured GLM endpoint (glm 5.2). Network is sanctioned for this phase's manual runs only; CI tests stay FakeProvider.

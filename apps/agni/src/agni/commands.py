@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from agni.repl import Repl
 
 RECENT = 15
+TITLE_WIDTH = 50
 
 HELP = (
     ("/new", "start a fresh session"),
@@ -54,7 +55,11 @@ async def resume(repl: Repl, arg: str) -> None:
 
 
 def _describe(header: SessionHeader) -> str:
-    return f"{header.id[:8]}  {header.agent:<8} {header.updated_at:%Y-%m-%d %H:%M}  {header.status}"
+    row = f"{header.id[:8]}  {header.agent:<8} {header.updated_at:%Y-%m-%d %H:%M}  {header.status}"
+    if not header.title:
+        return row
+    title = header.title if len(header.title) <= TITLE_WIDTH else header.title[: TITLE_WIDTH - 1] + "…"
+    return f"{row}  {title}"
 
 
 async def model(repl: Repl, arg: str) -> None:

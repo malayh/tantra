@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import signal
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from agni.commands import COMMAND_NAMES, dispatch
+from agni.prompts import TITLE_PROMPT
 from tantra import (
     Approval,
     ApprovalResponse,
@@ -34,7 +36,7 @@ from tantra.events import (
     TurnFailed,
     TurnStarted,
 )
-from tantra.providers.base import TextDelta
+from tantra.providers.base import SampleRequest, StreamEnd, SystemBlock, TextDelta, UserMessage
 
 RESET = "\x1b[0m"
 DIM = "\x1b[2m"
@@ -46,6 +48,8 @@ PROMPT = "› "
 BANNER = "agni — type to talk, /help for commands, ctrl-d to leave"
 ARGS_WIDTH = 120
 RESULT_WIDTH = 160
+TITLE_WIDTH = 50
+THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 @dataclass
@@ -65,6 +69,14 @@ def _args(args: dict[str, Any]) -> str:
 
 def _result(result: Any) -> str:
     return _clip(result if isinstance(result, str) else json.dumps(result, default=str), RESULT_WIDTH)
+
+
+def _headline(text: str) -> str:
+    for line in THINK.sub("", text).splitlines():
+        stripped = line.strip().strip("\"'")
+        if stripped:
+            return stripped[:TITLE_WIDTH]
+    return ""
 
 
 class Repl:
@@ -114,6 +126,33 @@ class Repl:
         if self._interrupted:
             return
         await self.follow(self.harness.run(self.session_id, text))
+        await self.title(text)
+
+    async def title(self, text: str) -> None:
+        if self._interrupted:
+            return
+        try:
+            header = await self.harness.store.header(self.session_id)
+            if header is None or header.title is not None:
+                return
+            request = SampleRequest(
+                model=self.harness.default_model or "",
+                system=[SystemBlock(text=TITLE_PROMPT)],
+                messages=[UserMessage(content=f"Generate a title for this conversation:\n{text}")],
+            )
+            answer = ""
+            async with aclosing(self.harness.provider.stream(request)) as events:
+                async for event in events:
+                    if isinstance(event, StreamEnd):
+                        answer = event.text
+            headline = _headline(answer)
+            if not headline:
+                return
+            header = await self.harness.store.header(self.session_id)
+            header.title = headline
+            await self.harness.store.put_header(header)
+        except Exception:
+            return
 
     @contextmanager
     def _catch_interrupt(self) -> Iterator[None]:

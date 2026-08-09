@@ -41,6 +41,19 @@ async def test_resume_lists_recent_sessions_and_re_enters_the_chosen_one(tmp_pat
     assert "build" in io.text
 
 
+async def test_resume_shows_the_title_of_a_session_that_has_one(tmp_path: Path) -> None:
+    repl, io = await make_repl(
+        tmp_path,
+        [Sample(text="the parser lives in src/parse.py"), Sample(text="Parser location")],
+        replies=["1"],
+    )
+
+    await repl.handle("where is the parser?")
+    await repl.handle("/resume")
+
+    assert "Parser location" in io.text
+
+
 async def test_resume_ignores_a_choice_that_is_not_on_the_list(tmp_path: Path) -> None:
     repl, io = await make_repl(tmp_path, [], replies=["9"])
     first = repl.session_id

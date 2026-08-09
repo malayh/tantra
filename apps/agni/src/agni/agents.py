@@ -1,25 +1,8 @@
 from __future__ import annotations
 
+from agni.prompts import AUTO_NOTE, BUILD_PROMPT, EXPLORE_PROMPT
 from agni.tools import bash, edit, glob, grep, read, write
 from tantra import Agent, memory_recall, memory_write
-
-EXPLORE_PROMPT = """You are the explore agent: you investigate a codebase and report what you found.
-
-You can only read. Use grep and glob to locate the relevant files, read the ones that matter, and
-answer with the paths, the line numbers and the short excerpts that support your answer. Say when
-something is not there rather than guessing at it."""
-
-BUILD_PROMPT = """You are agni, a terminal coding agent working in the user's current directory.
-
-Read before you write. Locate code with grep and glob, read the file you are about to change, and
-change it with edit rather than rewriting the file whole. Delegate wide searches to the explore
-sub-agent so the details stay out of this conversation. Run the project's own tests or linters
-with bash when you have finished a change.
-
-Writes, edits and shell commands are shown to the user for approval, so make each one small enough
-to read. Keep replies short: say what you changed and where. Save a durable preference or decision
-with memory_write when the user states one, and check memory_recall when a task depends on how this
-project likes things done."""
 
 READ_RULES = {
     "read": "allow",
@@ -36,7 +19,20 @@ AUTO_RULES = {"write": "allow", "edit": "allow", "bash": "allow"}
 
 
 class Explore(Agent):
-    """Search the codebase read-only and report the files, lines and excerpts that answer a question."""
+    """Delegate a read-only investigation of this codebase to a sub-agent and get a written report back.
+
+    Usage:
+    - Put one self-contained question in `task`. The sub-agent starts with no memory of this conversation, so
+      spell out the names, paths and constraints it needs.
+    - Use it for open-ended searching that would take several rounds of `grep` and `glob` — "where is
+      authentication enforced", "what calls this function", "how does the migration system work". The searching
+      burns the sub-agent's context, not yours; only the report comes back.
+    - Do not use it when you already know the file: call `read`. Do not use it for a single pattern you could
+      match yourself: call `grep`.
+    - It cannot write, edit or run commands, so never delegate a change to it.
+    - It answers in prose with paths, line numbers and short excerpts, not with file contents. Read the files it
+      names before you edit them.
+    """
 
     name = "explore"
     prompt = EXPLORE_PROMPT
@@ -57,5 +53,13 @@ class AutoBuild(Build):
     permissions = {**READ_RULES, **AUTO_RULES}
 
 
-def build_agent(auto: bool) -> type[Agent]:
-    return AutoBuild if auto else Build
+def build_agents(env: str, auto: bool) -> list[type[Agent]]:
+    explore = type(
+        "Explore",
+        (Explore,),
+        {"name": "explore", "__doc__": Explore.__doc__, "prompt": f"{EXPLORE_PROMPT}\n\n{env}"},
+    )
+    base = AutoBuild if auto else Build
+    body = f"{BUILD_PROMPT}\n\n{AUTO_NOTE}" if auto else BUILD_PROMPT
+    build = type("Build", (base,), {"name": "build", "prompt": f"{body}\n\n{env}", "subagents": [explore]})
+    return [build, explore]

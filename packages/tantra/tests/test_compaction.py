@@ -469,6 +469,20 @@ async def test_a_configured_model_overrides_the_turn_model_for_the_brief() -> No
     assert provider.requests[0].model == "fake/cheap"
 
 
+async def test_an_injected_instruction_replaces_the_default_as_the_trailing_user_message() -> None:
+    history = session(result_chars=160_000, text_chars=100_000)
+    provider = TinyProvider([Sample(text=BRIEF)])
+    instruction = "Summarise the work above in three bullet points."
+
+    await PruneThenSummarize(instruction=instruction).compact(context_for(history, provider))
+
+    messages = provider.requests[0].messages
+    assert messages[-1].content == instruction
+    assert isinstance(messages[-1], UserMessage)
+    assert SUMMARIZE_INSTRUCTION not in [getattr(message, "content", None) for message in messages]
+    assert PruneThenSummarize().instruction == SUMMARIZE_INSTRUCTION
+
+
 async def test_a_legacy_compaction_event_floors_the_window_at_its_own_position() -> None:
     events: list[SessionEvent] = [SessionCreated(agent="analyst")]
     events += chat_turn("t1", input="question 1", text="long answer")

@@ -5,9 +5,10 @@ import asyncio
 import sys
 from pathlib import Path
 
-from agni.agents import Explore, build_agent
+from agni.agents import build_agents
 from agni.config import Config, ConfigError, load_config
 from agni.guard import BashGuard
+from agni.prompts import COMPACTION_INSTRUCTION, environment_block
 from agni.repl import Io, Repl, terminal_io
 from agni.skills import MergedSkills, skill_roots
 from tantra import (
@@ -40,11 +41,11 @@ def build_harness(
     return Harness(
         provider,
         store,
-        [build_agent(auto), Explore],
+        build_agents(environment_block(Path.cwd()), auto),
         default_model=model,
         skills=skills,
         memory=memory,
-        compactor=PruneThenSummarize(CompactionConfig()),
+        compactor=PruneThenSummarize(CompactionConfig(), instruction=COMPACTION_INSTRUCTION),
         hooks=[BashGuard()] if auto else [],
         default_permission="allow",
     )

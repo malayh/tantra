@@ -55,21 +55,34 @@ def _walk(root: Path) -> list[Path]:
 
 @tool
 async def read(path: str) -> str:
-    """Return the text of one file, truncated if it is very large.
+    """Read one file from disk and return its text.
 
-    `path` is relative to the working directory unless it starts with `/` or `~`. Read a file
-    before editing it: `edit` needs the exact text it is replacing. A truncated read says so on
-    its last line — grep for the part you need rather than editing against a cut-off file.
+    Usage:
+    - `path` is taken relative to the working directory unless it starts with `/` or `~`.
+    - Read a file before you edit it: `edit` matches the exact bytes this returned.
+    - Output is capped at 64000 characters; beyond that the last line reads
+      `[truncated: N chars omitted]`. Never edit against a truncated read — narrow the target
+      down with `grep` first.
+    - Do not use this to find something inside a large file, and do not use it to list a
+      directory. `grep` searches contents, `glob` searches names.
+    - It returns the whole file, so there is nothing to page through: one call per file.
+    - A file that is not valid utf-8 comes back as an error rather than as noise.
     """
     return _cap(_text(_target(path)))
 
 
 @tool
 async def write(path: str, content: str) -> str:
-    """Create a file or overwrite it whole with `content`.
+    """Create a file, or overwrite an existing one end to end with `content`.
 
-    Missing parent directories are created. Use `edit` to change part of a file that already
-    exists — writing it whole loses anything you did not include.
+    Usage:
+    - Missing parent directories are created for you. Returns the character count and the path.
+    - Do not use this on a file that already exists when only part of it needs to change — use
+      `edit`. A whole-file write drops everything you did not include, including code you never
+      read.
+    - Read a file before overwriting it. Only a file you are creating needs no read first.
+    - Never create documentation, README or summary files on your own initiative. Write them
+      only when the user asks for them.
     """
     target = _target(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -79,11 +92,19 @@ async def write(path: str, content: str) -> str:
 
 @tool
 async def edit(path: str, old: str, new: str) -> str:
-    """Replace one exact occurrence of `old` with `new` in a file.
+    """Replace one exact occurrence of `old` with `new` inside a file.
 
-    `old` must appear exactly once, matched byte for byte including indentation, so include
-    enough surrounding lines to make it unique. Nothing is written when the match is missing or
-    ambiguous — read the file and retry with a longer `old`.
+    Usage:
+    - `old` must match byte for byte, indentation and line breaks included, and must appear
+      exactly once in the file.
+    - Nothing is written when `old` is absent, and nothing is written when it appears more than
+      once — the error says how many times it matched. Retry with a longer `old` carrying more
+      surrounding lines until it is unique.
+    - Read the file first. Editing against remembered or truncated text is how the match fails.
+    - Pass an empty `new` to delete the matched passage.
+    - Do not use this to create a file or to rewrite one end to end — that is `write`.
+    - One call changes one place. Call it again for the next change rather than stretching `old`
+      across unrelated code.
     """
     target = _target(path)
     content = _text(target)
@@ -100,8 +121,16 @@ async def edit(path: str, old: str, new: str) -> str:
 async def glob(pattern: str, path: str = ".") -> list[str]:
     """List files whose paths match a glob pattern, e.g. `**/*.py` or `src/**/test_*.py`.
 
-    `path` is the directory to search from, defaulting to the working directory. Returns paths
-    relative to the working directory, sorted, and says so when the list was truncated.
+    Usage:
+    - `path` is the directory to search from and defaults to the working directory. Results come
+      back relative to the working directory, sorted.
+    - Use this to find files by name. Do not use it to find files by what is inside them — that
+      is `grep` — and do not use it to read one file you can already name.
+    - Capped at 500 matches, followed by a `[truncated: N more matches]` line. A truncated list
+      means the pattern was too broad: narrow it instead of paging through.
+    - `.git`, `.venv`, `node_modules`, `__pycache__`, `dist` and `build` are skipped.
+    - For an open-ended hunt that will take several rounds of `glob` and `grep`, delegate to the
+      `explore` sub-agent and keep the dead ends out of this conversation.
     """
     root = _target(path)
     if not root.is_dir():
@@ -118,11 +147,19 @@ async def glob(pattern: str, path: str = ".") -> list[str]:
 
 @tool
 async def grep(pattern: str, path: str = ".", include: str = "*") -> list[str]:
-    """Search file contents for a regular expression and return `file:line: text` matches.
+    """Search file contents for a regular expression and return `file:line: text` for each match.
 
-    `path` is a file or a directory to search under, `include` a glob filtering which file names
-    are searched (`*.py`, `Makefile`). Binary and non-utf-8 files are skipped, as are `.git`,
-    `node_modules` and other build directories.
+    Usage:
+    - `pattern` is a Python regular expression matched line by line. `path` is a file or a
+      directory to search under; `include` is a glob over file names (`*.py`, `Makefile`).
+    - Use this to find where something is defined or used. Do not use it to find files by name —
+      that is `glob` — and read the file it names when you need the match in context.
+    - Capped at 200 matches, followed by a `[truncated at 200 matches]` line. Treat that as a
+      signal to tighten `pattern` or `include`, not to run the same search again.
+    - Binary and non-utf-8 files are skipped, as are `.git`, `.venv`, `node_modules`,
+      `__pycache__`, `dist` and `build`.
+    - For a search that has to try many candidate names and directories, delegate to the
+      `explore` sub-agent instead.
     """
     try:
         expression = re.compile(pattern)
@@ -154,10 +191,23 @@ async def grep(pattern: str, path: str = ".", include: str = "*") -> list[str]:
 async def bash(command: str, ctx: Context, timeout: float = BASH_TIMEOUT) -> str:
     """Run a shell command in the working directory and return its combined output.
 
-    stdout and stderr come back interleaved, with the exit status appended when it is not zero and
-    a truncation note when the output is very large. The command and anything it spawned are
-    killed after `timeout` seconds. Prefer the file tools for reading and editing; use this for
-    builds, tests, git and anything else the other tools cannot do.
+    Usage:
+    - IMPORTANT: this tool is for terminal operations — builds, tests, linters, git, package
+      managers, docker. Do NOT use it for file operations: reading, writing, editing, searching
+      and finding files each have a dedicated tool that is safer for the job — an edit that
+      refuses an ambiguous target, output truncated at a labelled boundary, a real error rather
+      than a shell exit code.
+    - Never use `echo` or `printf` to talk to the user. Anything you want read goes in your reply.
+    - stdout and stderr come back interleaved. A non-zero exit appends `[exit status N]`, and
+      output over 64000 characters is cut with a `[truncated: N chars omitted]` note.
+    - The command runs in its own process group and is killed with everything it spawned after
+      `timeout` seconds, 120 by default. Raise `timeout` for a slow test suite rather than
+      splitting the run into pieces.
+    - There is no interactive terminal. Pass non-interactive flags (`--yes`, `--no-pager`) and
+      never start something that waits for input or never returns, such as a dev server in the
+      foreground.
+    - Commit only when the user has explicitly asked. Never push, force-push, `reset --hard` or
+      delete a branch on your own initiative.
     """
     await ctx.emit(f"$ {command}")
     process = await asyncio.create_subprocess_shell(

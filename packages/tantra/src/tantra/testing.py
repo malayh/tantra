@@ -42,7 +42,10 @@ async def store_conformance(store_factory: StoreFactory) -> None:
 
     The lease-contention check races real threads and shortens the interpreter's thread switch
     interval while it runs, so that a backend whose critical section is unguarded actually loses.
+
+    `setup()` is called twice on purpose: it must be idempotent.
     """
+    await store_factory().setup()
     await store_factory().setup()
     await _check_create_and_header(store_factory)
     await _check_create_rejects_a_duplicate(store_factory)

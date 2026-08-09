@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,6 +14,8 @@ from tantra.providers.base import Embedder
 from tantra.tools import Context, tool
 
 KEYWORD = "keyword"
+VECTOR = "vector"
+CANDIDATE_FLOOR = 20
 ROW_METHODS = ("memory_put", "memory_get", "memory_all")
 NO_MEMORY = "no memory configured: this harness was built without Harness(memory=...)"
 
@@ -109,7 +112,31 @@ def _embed_text(row: MemoryRecord) -> str:
 
 
 def _vector(values: Any) -> list[float]:
-    return [float(value) for value in values]
+    vector = [float(value) for value in values]
+    if not all(math.isfinite(value) for value in vector):
+        raise ValueError("embedding holds non-finite values")
+    return vector
+
+
+@dataclass(frozen=True)
+class _Filter:
+    kind: str | None
+    tags: set[str] | None
+    entity: str | None
+    metadata: dict[str, Any] | None
+
+    def passes(self, row: MemoryRecord) -> bool:
+        if row.deleted or row.superseded_by is not None:
+            return False
+        if self.kind is not None and row.kind.casefold() != self.kind:
+            return False
+        if self.tags and not self.tags <= {tag.casefold() for tag in row.tags}:
+            return False
+        if self.entity is not None and self.entity not in {name.casefold() for name in row.entities}:
+            return False
+        if self.metadata and any(row.metadata.get(key) != value for key, value in self.metadata.items()):
+            return False
+        return True
 
 
 class BuiltinMemory:
@@ -159,26 +186,47 @@ class BuiltinMemory:
         wanted = _tokens(q)
         if not wanted or k <= 0:
             return []
-        want_kind = kind.casefold() if kind is not None else None
-        want_tags = {tag.casefold() for tag in tags} if tags else None
-        want_entity = entity.casefold() if entity is not None else None
-        hits: list[MemoryHit] = []
+        rule = _Filter(
+            kind=kind.casefold() if kind is not None else None,
+            tags={tag.casefold() for tag in tags} if tags else None,
+            entity=entity.casefold() if entity is not None else None,
+            metadata=metadata,
+        )
+        best: dict[str, MemoryHit] = {}
+        for hit in await self._keyword(wanted, rule) + await self._vector_pass(q, k, rule):
+            current = best.get(hit.memory.id)
+            if current is None or hit.score > current.score:
+                best[hit.memory.id] = hit
+        hits = sorted(best.values(), key=lambda hit: (hit.score, hit.memory.created_at), reverse=True)
+        return hits[:k]
+
+    async def _keyword(self, wanted: set[str], rule: _Filter) -> list[MemoryHit]:
+        hits = []
         for row in await self.store.memory_all():
-            if row.deleted or row.superseded_by is not None:
-                continue
-            if want_kind is not None and row.kind.casefold() != want_kind:
-                continue
-            if want_tags and not want_tags <= {tag.casefold() for tag in row.tags}:
-                continue
-            if want_entity is not None and want_entity not in {name.casefold() for name in row.entities}:
-                continue
-            if metadata and any(row.metadata.get(key) != value for key, value in metadata.items()):
+            if not rule.passes(row):
                 continue
             score = len(wanted & _row_tokens(row)) / len(wanted)
             if score > 0:
                 hits.append(MemoryHit(memory=row, score=score, mode=KEYWORD))
-        hits.sort(key=lambda hit: (hit.score, hit.memory.created_at), reverse=True)
-        return hits[:k]
+        return hits
+
+    async def _vector_pass(self, q: str, k: int, rule: _Filter) -> list[MemoryHit]:
+        search = getattr(self.store, "memory_search", None)
+        if self.embedder is None or search is None:
+            return []
+        try:
+            vector = _vector((await self.embedder.embed([q]))[0])
+        except Exception:
+            return []
+        found = await search(vector, max(4 * k, CANDIDATE_FLOOR))
+        if found is None:
+            return []
+        hits = []
+        for row, distance in found:
+            score = 1.0 - distance
+            if rule.passes(row) and score > 0:
+                hits.append(MemoryHit(memory=row, score=score, mode=VECTOR))
+        return hits
 
     async def supersede(self, old_id: str, new: MemoryWrite) -> str:
         old = await self.store.memory_get(old_id)

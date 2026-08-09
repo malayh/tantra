@@ -482,7 +482,7 @@ First genuinely useful phase: non-interactive agents work end to end.
 - Hybrid recall: keyword always; vector where the backend supports it (Postgres/pgvector), degrading to keyword-only elsewhere — **explicitly, with the degradation visible in `MemoryHit`**, not silently.
 - `memory_recall` / `memory_write` tools.
 - Embeddings via the `Embedder` protocol, best-effort: a failed embed never fails the write (kalki's `_embed_best_effort` pattern), with a `backfill` entrypoint to repair.
-- **Verify:** write 3 memories, `recall` ranks the matching one first on ~~SQLite (keyword) and on Postgres (hybrid)~~ MemoryStore and FileSystemStore — **SQLite/Postgres land in P8**; `supersede` removes the old row from recall while `get` still returns it; a write with the embedding provider unreachable still commits and is repaired by `backfill`.
+- **Verify:** write 3 memories, `recall` ranks the matching one first on ~~SQLite (keyword) and on Postgres (hybrid)~~ MemoryStore and FileSystemStore — **SQLite/Postgres land in P8** *(landed: P8 verified SQLite keyword-only and Postgres hybrid with per-hit modes)*; `supersede` removes the old row from recall while `get` still returns it; a write with the embedding provider unreachable still commits and is repaired by `backfill`.
 - Checklist:
   - [x] Memory protocol
   - [x] BuiltinMemory + schema
@@ -518,14 +518,23 @@ First genuinely useful phase: non-interactive agents work end to end.
   - Self-limiting: after a compaction the window holds exactly `tail_turns` turns, so stage 2 cannot re-fire on the next sample. `SKILL_TOOL` moved to `skills.py` so the exemption imports leaf-ward.
   - Follow-ups: the summarize request itself can exceed the window on a pathological prefix (no chunking); `floor_turn_id` naming an absent turn degrades to the legacy floor silently.
 
-### Phase 8 — SQLite + Postgres stores · deps: P0 · ∥ P2–P7 · —
+### Phase 8 — SQLite + Postgres stores · deps: P0 · ∥ P2–P7 · **done**
 - `stores/sqlite.py` (WAL), `stores/postgres.py` (dedicated `tantra` schema, idempotent versioned `setup()`, JSONB+GIN on metadata, optional pgvector for P6).
 - **Verify:** the P0 conformance suite passes unchanged against both. Two processes against one Postgres store: only one acquires the lease; the loser's `append` with a stale `expect_seq` raises rather than corrupting. `setup()` run twice is a no-op.
 - Checklist:
-  - [ ] SQLiteStore
-  - [ ] PostgresStore + versioned setup
-  - [ ] pgvector support
-  - [ ] Conformance green on all four backends
+  - [x] SQLiteStore
+  - [x] PostgresStore + versioned setup
+  - [x] pgvector support
+  - [x] Conformance green on all four backends
+- Landed notes (P8):
+  - Driver: psycopg 3 as the optional extra `tantra[postgres]`; importing `tantra` without it works, constructing `PostgresStore` raises `TantraError`. SQLite is stdlib `sqlite3`, one connection per op, writes under `BEGIN IMMEDIATE` with `busy_timeout=30s`. Postgres holds one lazy `AsyncConnection` per instance behind an `asyncio.Lock` (never created in `__init__` — conformance factories run in loop-less threads); a dead connection is replaced on the next call, so a failover costs one visible error. `close()` exists but sits outside the frozen `Store` protocol.
+  - Rows persist as full pydantic JSON (`jsonb`/`TEXT`); `last_seq` and `lease` are store-owned columns overriding the JSON on read. Lease acquire is one atomic conditional `UPDATE … RETURNING` (PG) / `BEGIN IMMEDIATE` (SQLite); expiry always compares the **Python** clock, passed as a bind param. Undecodable event/memory rows raise `CorruptLog`; a corrupt *header* raises bare `ValidationError` (fs.py precedent).
+  - `setup()` (PG) is versioned via `<schema>.schema_version` under `pg_advisory_xact_lock` keyed on the schema name — concurrent setups on a fresh schema all succeed (mutation-pinned). pgvector rides **outside** the version chain as a best-effort `CREATE EXTENSION` + `ADD COLUMN embedding vector`; absence degrades `memory_search` to `None` → keyword-only recall. **`setup()` is mandatory for both new backends** — nothing in `Harness` calls it (footgun; Memory/FS work without it).
+  - Hybrid recall landed in `BuiltinMemory` (the P6-owed half): vector pass when embedder + `memory_search` duck-exist; over-fetch `max(4k, 20)`; score `1 − cosine distance`, `score > 0`; shared `_Filter` applied to both passes (mutation-pinned); merge dedupes by id keeping the higher score — **ties resolve to keyword**. `memory_search` pushes `deleted`/`superseded_by` into SQL — the review's one MUST-FIX: dead rows kept their embeddings and could consume the whole candidate window, permanently hiding live rows behind `LIMIT`. Non-finite embeddings now raise in `_vector()` → write-time embed-failed (`embedding=None`), backfill raises before persisting (previously a raw `InvalidTextRepresentation` from PG).
+  - `list()` pushdown (PG only; SQLite loads all + `select_headers`): `metadata @> jsonb` **widens** matching to recursive containment (nested dicts/arrays match on PG, not in Python; `{"k": None}` inverts: matches key-missing rows in Python, nothing on PG); ordering and cursor use `COLLATE "C"` to match Python code-point order (mutation-pinned on a locale DB — the pin's power depends on the test container's `en_US.utf8`); unknown `before` id → no cursor filter (mutation-pinned); negative `limit` → `[]` on PG vs drop-last in Python.
+  - "Two processes" Verify rides the conformance suite's separate-instances-as-processes stand-in: 8-thread lease contention and stale-`expect_seq` green against PG; racing appends without `FOR UPDATE` would surface raw `UniqueViolation` (mutation-pinned). `store_conformance` now calls `setup()` twice (the one sanctioned testing.py change).
+  - Tests auto-spin `pgvector/pgvector:pg17` via the docker CLI (session-scoped fixture, free port, `fsync=off`, `max_connections=300`); `TANTRA_POSTGRES_DSN` overrides; docker/psycopg missing → the 20 PG tests skip cleanly, teardown stops the container even on mid-startup failure.
+  - Follow-ups: PG `read()` buffers all rows before yielding (no streaming); no vector index (exact scan) and `list()` always sorts; `memory_all` ordering now differs across all four backends; keyword and vector score scales mix unweighted (long queries let the vector pass dominate); the jsonb-containment widening above.
 
 ### Phase 9 — Adapters · deps: P3 · ∥ P5–P8 · —
 - `adapters/cli.py` (terminal renderer, prompts on ask), `adapters/ws.py`, `adapters/sse.py`; a typed inbound command envelope (`run` / `resume` / `cancel`) shared by WS and SSE.

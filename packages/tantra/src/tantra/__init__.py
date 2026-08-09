@@ -48,6 +48,8 @@ from tantra.skills import FileSystemSkills, Skill, SkillInfo, Skills
 from tantra.stores.base import Store
 from tantra.stores.fs import FileSystemStore
 from tantra.stores.memory import MemoryStore
+from tantra.stores.postgres import PostgresStore
+from tantra.stores.sqlite import SQLiteStore
 from tantra.tools import Context, Tool, tool
 
 __all__ = [
@@ -82,11 +84,13 @@ __all__ = [
     "ModelLimits",
     "OpenAICompatible",
     "OpenAICompatibleEmbedder",
+    "PostgresStore",
     "Provider",
     "ProviderError",
     "ProviderEvent",
     "PruneThenSummarize",
     "RetryConfig",
+    "SQLiteStore",
     "Sample",
     "SampleRequest",
     "SeqConflict",

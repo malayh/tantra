@@ -77,7 +77,7 @@ def drop_schema(dsn: str, schema: str) -> None:
 
 def _start_postgres() -> tuple[str, str]:
     if not HAS_PSYCOPG:
-        pytest.skip("psycopg is not installed: install tantra[postgres]")
+        pytest.skip("psycopg is not installed: install tantra-harness[postgres]")
     container = ""
     try:
         port = _free_port()

@@ -21,7 +21,7 @@ try:
 except ImportError:
     HAS_PSYCOPG = False
 
-MISSING_PSYCOPG = "PostgresStore needs psycopg: install tantra[postgres]"
+MISSING_PSYCOPG = "PostgresStore needs psycopg: install tantra-harness[postgres]"
 
 MIGRATIONS: tuple[tuple[str, ...], ...] = (
     (

@@ -13,7 +13,7 @@ package = false
 members = ["packages/tantra", "apps/agni"]
 
 [tool.uv.sources]
-tantra = { workspace = true }
+tantra-harness = { workspace = true }
 
 [dependency-groups]
 dev = [

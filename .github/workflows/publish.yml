@@ -1,0 +1,35 @@
+name: publish
+
+on:
+  push:
+    tags:
+      - "tantra-v*"
+  workflow_dispatch:
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(grep -m1 '^version = ' packages/tantra/pyproject.toml | sed 's/^version = "\(.*\)"$/\1/')
+          tag=${GITHUB_REF_NAME#tantra-v}
+          if [ "$version" != "$tag" ]; then
+            echo "tag $GITHUB_REF_NAME expects version $tag but packages/tantra/pyproject.toml declares $version"
+            exit 1
+          fi
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Build sdist and wheel
+        run: uv build --package tantra-harness
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

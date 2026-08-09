@@ -229,17 +229,22 @@ P5's concept/core-library pages depend only on P0 (they document v1 surface); it
   - [ ] sharp edges page
   - [ ] deploy workflow live, site reachable
 
-### Phase 6 — release: tantra-harness on PyPI · deps: P1–P5 · —
+### Phase 6 — release: tantra-harness on PyPI · ~~deps: P1–P5~~ **changed:** built before P5 (user pulled release ahead so webapp work can start in parallel; README docs links 404 until P5) · CODE DONE — live publish pending (manual)
 - `packages/tantra/pyproject.toml`: `name = "tantra-harness"`, `version = "0.1.0"`; hatch wheel target still `src/tantra`; minimal `README.md` (what it is, install matrix incl. extras, the import-name-collision note vs PyPI `tantra`, link to the docs site); `src/tantra/py.typed` + hatch inclusion.
 - `apps/agni/pyproject.toml`: depend on `tantra-harness>=0.1`; update `[tool.uv.sources]` here and at root to key `tantra-harness`.
-- `.github/workflows/publish.yml`: on tag `v*` (or manual), `uv build` sdist+wheel, publish via PyPI trusted publishing (`pypa/gh-action-pypi-publish`). Account + trusted-publisher setup is manual — user does it.
+- `.github/workflows/publish.yml`: ~~on tag `v*` (or manual)~~ **changed in P6.** on tag `tantra-v*` (or manual) — `release.yml` already mints `v*` tags for agni binaries; a shared namespace would fire a PyPI publish on every binary release. `uv build` sdist+wheel, publish via PyPI trusted publishing (`pypa/gh-action-pypi-publish`). Account + trusted-publisher setup is manual — user does it.
 - **Verify:** `uv build` produces `tantra_harness-0.1.0` artifacts; in a scratch venv, `pip install dist/tantra_harness-*.whl[web,doc]` then importing all five factories works; after the real upload, `pip install tantra-harness[web]` from PyPI succeeds.
 - Checklist:
-  - [ ] rename + version + README + py.typed
-  - [ ] agni dep + uv sources fixed
-  - [ ] publish workflow
+  - [x] rename + version + README + py.typed
+  - [x] agni dep + uv sources fixed
+  - [x] publish workflow
   - [ ] trusted publisher configured (manual, with user)
   - [ ] first release tagged and live
+- Landed notes:
+  - `stores/postgres.py` `MISSING_PSYCOPG` still said `install tantra[postgres]` — the exact collision the README warns about; fixed to `tantra-harness[postgres]` (review blocker; PyPI versions are immutable, so it had to land before 0.1.0).
+  - `LICENSE` copied into `packages/tantra/` + `license-files = ["LICENSE"]` — hatchling's default glob never reaches the repo root, so the wheel shipped Apache-2.0 metadata with no license text.
+  - `publish.yml` guards tag↔version (`tantra-v0.2.0` on a 0.1.0 pyproject fails the run, skipped on dispatch) and sets `contents: read` explicitly — naming any permission zeroes the rest, which breaks checkout the day the repo goes private.
+  - README API snippet executed verbatim against `FakeProvider`/`MemoryStore` — not invented; `[project.urls]` added so the PyPI page links repo + docs.
 
 ## Open Decisions
 - **agni adoption** — agni's `bash` duplicates `tantra.extratools.shell.bash`; migrating also means adding `web_*` to agni and teaching `release.yml` PyInstaller about optional submodules (`--collect-submodules`/`--hidden-import`, else they're silently absent from the binary). Own spec.

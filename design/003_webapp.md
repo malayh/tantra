@@ -30,7 +30,7 @@
 ```
 apps/sarathi/
 ├── backend/            uv workspace member "sarathi", src layout (src/sarathi/)
-│   ├── pyproject.toml  deps: tantra[postgres,web,doc], fastapi, uvicorn, sqlalchemy,
+│   ├── pyproject.toml  deps: tantra-harness[postgres,web,doc], fastapi, uvicorn, sqlalchemy,
 │   │                   psycopg[binary], alembic, pydantic-settings, pyjwt, passlib,
 │   │                   python-multipart; dev: pytest, pytest-asyncio, httpx, aiosqlite
 │   ├── alembic.ini, migrations/

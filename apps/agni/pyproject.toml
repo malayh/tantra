@@ -5,7 +5,7 @@ description = "Terminal coding agent built on tantra"
 requires-python = ">=3.13"
 license = "Apache-2.0"
 authors = [{ name = "Malay Hazarika", email = "malay.hazarika@gmail.com" }]
-dependencies = ["tantra", "prompt_toolkit>=3.0"]
+dependencies = ["tantra-harness>=0.1", "prompt_toolkit>=3.0"]
 
 [project.scripts]
 agni = "agni.main:main"
@@ -18,4 +18,4 @@ build-backend = "hatchling.build"
 packages = ["src/agni"]
 
 [tool.uv.sources]
-tantra = { workspace = true }
+tantra-harness = { workspace = true }

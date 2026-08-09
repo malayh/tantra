@@ -1,11 +1,17 @@
 [project]
-name = "tantra"
-version = "0.0.0"
+name = "tantra-harness"
+version = "0.1.0"
 description = "Agent harness framework — the turn loop as a library"
+readme = "README.md"
 requires-python = ">=3.13"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Malay Hazarika", email = "malay.hazarika@gmail.com" }]
 dependencies = ["pydantic>=2.9", "httpx>=0.27", "openai>=2.0"]
+
+[project.urls]
+Homepage = "https://github.com/malayh/tantra"
+Documentation = "https://malayh.github.io/tantra/docs/"
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2"]

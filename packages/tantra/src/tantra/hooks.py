@@ -15,6 +15,11 @@ class Denial:
     reason: str
 
 
+@dataclass(frozen=True)
+class Escalation:
+    reason: str
+
+
 class Hook:
     """Lifecycle callbacks on the turn loop. Subclass and override only what you need."""
 
@@ -24,10 +29,16 @@ class Hook:
     async def before_sample(self, turn: TurnContext) -> None:
         """Called before every model call, including retried turns resumed in another process."""
 
-    async def before_tool(self, call: ToolCallRequested, turn: TurnContext) -> ToolCallRequested | Denial | None:
+    async def before_tool(
+        self, call: ToolCallRequested, turn: TurnContext
+    ) -> ToolCallRequested | Denial | Escalation | None:
         """Gate a tool call: `None` passes it through, a `ToolCallRequested` replaces the executed
         arguments (the log keeps what the model asked for), and `Denial` turns it into an error
         result the model can adapt to without ever invoking the tool.
+
+        `Escalation` forces the permission verdict to at least `ask`, so the call goes through the
+        normal approval suspend/resume flow with the reason shown to the human. It does not stop the
+        rest of the chain: a later `Denial` still wins, and the first escalation's reason is used.
         """
 
     async def after_tool(self, call: ToolCallRequested, result: Any, is_error: bool, turn: TurnContext) -> Any:

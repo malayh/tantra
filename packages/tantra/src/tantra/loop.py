@@ -35,7 +35,7 @@ from tantra.events import (
     TurnStarted,
     Usage,
 )
-from tantra.hooks import Denial, Hook
+from tantra.hooks import Denial, Escalation, Hook
 from tantra.permissions import decide, strictest
 from tantra.providers.base import (
     Provider,
@@ -624,11 +624,15 @@ class TurnLoop:
                 continue
             effective = call
             denial: Denial | None = None
+            escalation: Escalation | None = None
             for hook in self.hooks:
                 outcome = await hook.before_tool(effective, self.turn)
                 if isinstance(outcome, Denial):
                     denial = outcome
                     break
+                if isinstance(outcome, Escalation):
+                    escalation = escalation or outcome
+                    continue
                 if outcome is not None:
                     effective = outcome
             if denial is not None:
@@ -636,15 +640,20 @@ class TurnLoop:
                     yield emitted
                 continue
             verdict = self._verdict(call.name, tool.permission)
+            if escalation is not None:
+                verdict = strictest(verdict, "ask")
             if verdict == "deny":
                 denied = f"denied by permissions: {call.name}"
                 for emitted in await self._completed(call.call_id, denied, is_error=True):
                     yield emitted
                 continue
             if verdict == "ask":
+                body = json.dumps(effective.args, default=str)
+                if escalation is not None:
+                    body = f"{escalation.reason}\n\n{body}"
                 request = Approval(
                     title=f"Run {call.name}?",
-                    body=json.dumps(effective.args, default=str),
+                    body=body,
                     extra={"permission": call.name},
                 )
                 response, raised = await self._ask(call.call_id, request)

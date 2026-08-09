@@ -95,7 +95,7 @@ Kalki's `page.py` is the template; every listed weakness gets fixed:
   - `python|node|perl|ruby -c/-e "<code>"` → scan the code string against the deny rules (best-effort substring scan; can't parse arbitrary languages)
 - **Default deny rules** (destructive-irreversible only, kept deliberately short): recursive `rm` targeting `/`, `~`, or a path outside CWD; `dd` writing to `/dev/*`; `mkfs*`; `shutdown|reboot|halt|poweroff`; fork bomb; `sudo`/`doas`; recursive `chmod`/`chown` on `/`. `deny_extra` appends user patterns.
 - On trip: `on_trip="deny"` → return `Denial(reason=...)` → model sees `denied by hook: <reason>` and adapts. `on_trip="ask"` → return `Escalation(reason=...)`.
-- **Core change (this spec's only edit to existing tantra code):** add `Escalation` to `hooks.py`; `loop.py` `before_tool` handling treats it as a `"ask"` permission decision — same `AskRequested`/suspend/resume machinery, no new event types. Documented loudly as guardrail-not-sandbox: a determined model or a novel wrapper still gets through.
+- **Core change (this spec's only edit to existing tantra code):** add `Escalation` to `hooks.py`; `loop.py` `before_tool` handling treats it as a `"ask"` permission decision — same `AskRaised`/suspend/resume machinery (~~`AskRequested`~~ **corrected in P1** — no such symbol exists), no new event types. Documented loudly as guardrail-not-sandbox: a determined model or a novel wrapper still gets through.
 
 ## doc
 
@@ -148,15 +148,21 @@ P5's concept/core-library pages depend only on P0 (they document v1 surface); it
   - [x] import-guard tests
 - Landed notes: guards use `importlib.util.find_spec` (try-import is F401-red and the repo has no noqa pragmas); P2–P4 replace them with real imports. `search.py` has no guard of its own — gated transitively via `web/__init__.py` importing `fetch`; keep that ordering.
 
-### Phase 1 — shell: bash + ShellGuard + Escalation · deps: P0 · ∥ P2, P3 · —
+### Phase 1 — shell: bash + ShellGuard + Escalation · deps: P0 · ∥ P2, P3 · ✅ DONE
 - `tantra/extratools/shell.py`: `bash` factory (agni port, fixed timeout, `permission="ask"`), `ShellGuard` with recursive shlex parsing and the default deny rules.
 - `hooks.py`: `Escalation` dataclass; `loop.py`: `before_tool` returning `Escalation` routes into the ask flow.
 - Tests: each default deny rule trips; each documented agni bypass (`sh -c`, `xargs rm`, `find -delete`, `env` prefix, `python -c`) trips; benign commands (`ls`, `git status`, pipes, `&&` chains) pass; `deny_extra` works; `on_trip="deny"` yields `denied by hook:` result via FakeProvider turn; `on_trip="ask"` suspends and resumes through the existing ask machinery on a fresh harness.
-- **Verify:** a FakeProvider turn calling `bash` with `sh -c "rm -rf /"` completes with an error result containing the guard's reason, and the same command with `on_trip="ask"` produces an `AskRequested` that a resumed harness can answer.
+- **Verify:** a FakeProvider turn calling `bash` with `sh -c "rm -rf /"` completes with an error result containing the guard's reason, and the same command with `on_trip="ask"` produces an `AskRaised` that a resumed harness can answer.
 - Checklist:
-  - [ ] bash tool + tests
-  - [ ] ShellGuard parser + deny rules + bypass tests
-  - [ ] Escalation in hooks.py + loop routing + suspend/resume test
+  - [x] bash tool + tests
+  - [x] ShellGuard parser + deny rules + bypass tests
+  - [x] Escalation in hooks.py + loop routing + suspend/resume test
+- Landed notes:
+  - Escalation is a **verdict merge**, not a second ask: `loop.py` records the first `Escalation` (chain keeps running; a later `Denial` wins), then applies `strictest(verdict, "ask")` — one `AskRaised` total even when the tool itself is `permission="ask"`. Reason is prepended to the `Approval` body; `extra={"permission": name}` kept (resume type-check depends on it).
+  - Tokenizer is `shlex.shlex(punctuation_chars=True, posix=True)` with `commenters=""` — plain `shlex.split` never emits `;`/`|`/`&&` as tokens (`ls;rm -rf /` parses as one word), and the default `#` commenter truncates fail-open.
+  - Guard fails closed: unparseable commands, recursive-rm targets containing `$`/backtick (so `rm -rf ./build/$STAGE` is denied — known false-positive class), and anything piped/redirected into a bare shell all trip.
+  - `deny_extra` = substring match on the raw command and recursed code strings.
+  - Known accepted gaps (guardrail-not-sandbox): `case` bodies unsegmented; `eval` payload re-joined losing quoting (fails closed, confusing reason); verdicts are CWD-dependent (`Path.cwd()` at check time).
 
 ### Phase 2 — web_search · deps: P0 · ∥ P1, P3 · —
 - `tantra/extratools/web/search.py`: Brave call, retry/backoff, snippet cleaning, count clamping, `http_client` seam.

@@ -4,8 +4,10 @@ from typing import Any
 
 from tantra.adapters.collect import collect
 from tantra.agent import Agent
+from tantra.ask import Approval
 from tantra.context import TurnContext
 from tantra.events import (
+    AskRaised,
     SampleStarted,
     SessionEvent,
     ToolCallCompleted,
@@ -15,7 +17,7 @@ from tantra.events import (
     TurnFailed,
 )
 from tantra.harness import Harness
-from tantra.hooks import Denial, Hook
+from tantra.hooks import Denial, Escalation, Hook
 from tantra.loop import Emitted
 from tantra.providers.base import TextDelta, ToolCall
 from tantra.providers.fake import FakeProvider, Sample
@@ -231,3 +233,76 @@ async def test_hooks_run_in_order_and_the_first_denial_wins() -> None:
     assert order == ["first"]
     assert not invoked
     assert picks(events, ToolCallCompleted)[0].result == "denied by hook: nope"
+
+
+async def test_an_escalation_raises_the_verdict_of_an_allowed_tool_to_an_ask() -> None:
+    invoked: list[str] = []
+
+    @tool(permission="allow")
+    async def deploy(target: str) -> str:
+        """Deploy."""
+        invoked.append(target)
+        return "deployed"
+
+    class Ops(Agent):
+        tools = [deploy]
+
+    class Escalator(Hook):
+        async def before_tool(self, call: ToolCallRequested, turn: TurnContext) -> Escalation:
+            return Escalation("production deploys need a human")
+
+    harness, store, sid = await build(
+        [Sample(tool_calls=[ToolCall(id="c1", name="deploy", args='{"target": "prod"}')])],
+        [Escalator()],
+        agent=Ops,
+    )
+
+    events = await collect(harness.run(sid, "ship it"))
+
+    raised = picks(events, AskRaised)[0]
+    assert isinstance(raised.request, Approval)
+    assert raised.request.extra == {"permission": "deploy"}
+    assert raised.request.body.startswith("production deploys need a human\n\n")
+    assert '"target": "prod"' in raised.request.body
+    assert not invoked
+    assert not picks(events, ToolCallStarted)
+    assert (await store.header(sid)).status == "awaiting_input"
+
+
+async def test_a_later_denial_beats_an_earlier_escalation() -> None:
+    seen: list[str] = []
+
+    @tool(permission="allow")
+    async def deploy(target: str) -> str:
+        """Deploy."""
+        seen.append(target)
+        return "deployed"
+
+    class Ops2(Agent):
+        tools = [deploy]
+
+    class Escalator(Hook):
+        async def before_tool(self, call: ToolCallRequested, turn: TurnContext) -> Escalation:
+            seen.append("escalated")
+            return Escalation("needs a human")
+
+    class Blocker(Hook):
+        async def before_tool(self, call: ToolCallRequested, turn: TurnContext) -> Denial:
+            seen.append("denied")
+            return Denial("deploys are frozen")
+
+    harness, store, sid = await build(
+        [
+            Sample(tool_calls=[ToolCall(id="c1", name="deploy", args='{"target": "prod"}')]),
+            Sample(text="understood"),
+        ],
+        [Escalator(), Blocker()],
+        agent=Ops2,
+    )
+
+    events = await collect(harness.run(sid, "ship it"))
+
+    assert seen == ["escalated", "denied"]
+    assert not picks(events, AskRaised)
+    assert picks(events, ToolCallCompleted)[0].result == "denied by hook: deploys are frozen"
+    assert picks(events, TurnCompleted)[0].stop_reason == "completed"

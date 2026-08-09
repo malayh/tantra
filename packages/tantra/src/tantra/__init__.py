@@ -30,7 +30,7 @@ from tantra.events import (
     Usage,
 )
 from tantra.harness import Harness
-from tantra.hooks import Denial, Hook
+from tantra.hooks import Denial, Escalation, Hook
 from tantra.loop import Emitted, RetryConfig
 from tantra.memory import (
     BuiltinMemory,
@@ -68,6 +68,7 @@ __all__ = [
     "Denial",
     "Embedder",
     "Emitted",
+    "Escalation",
     "FakeProvider",
     "FileSystemSkills",
     "FileSystemStore",

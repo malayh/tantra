@@ -164,27 +164,38 @@ P5's concept/core-library pages depend only on P0 (they document v1 surface); it
   - `deny_extra` = substring match on the raw command and recursed code strings.
   - Known accepted gaps (guardrail-not-sandbox): `case` bodies unsegmented; `eval` payload re-joined losing quoting (fails closed, confusing reason); verdicts are CWD-dependent (`Path.cwd()` at check time).
 
-### Phase 2 — web_search · deps: P0 · ∥ P1, P3 · —
+### Phase 2 — web_search · deps: P0 · ∥ P1, P3 · ✅ DONE
 - `tantra/extratools/web/search.py`: Brave call, retry/backoff, snippet cleaning, count clamping, `http_client` seam.
 - Tests via `MockTransport`: result shape; skip-no-url; 429-with-Retry-After retries then succeeds; transport error retries; attempts exhausted → self-describing error string; snippet with escaped tags comes out clean; `count=0` clamped.
 - **Verify:** with a MockTransport returning a canned Brave payload, `await web_search(api_key="k", http_client=client).invoke({"query": "x"}, ctx)` returns `[{"title": ..., "url": ..., "snippet": ...}]`; no test opens a socket.
 - Checklist:
-  - [ ] search impl
-  - [ ] retry/backoff tests
-  - [ ] cleaning + clamping tests
+  - [x] search impl
+  - [x] retry/backoff tests
+  - [x] cleaning + clamping tests
+- Landed notes:
+  - Retry helper is `_request`, not `_get` — avoids colliding with the fetch seam name.
+  - Non-retryable statuses get class-specific coaching: 401/403 "key rejected, rewording won't help"; 400/422 "query rejected, shorten it"; else generic. A non-JSON 200 body (or a 3xx — httpx doesn't follow redirects, and <400 skips the status raise) raises a self-describing "unparseable response (HTTP N)" instead of `JSONDecodeError`.
+  - Payload drift tolerated: non-dict hits skipped, non-str titles coerced via `str()` — raw parser exceptions never reach the model.
 
-### Phase 3 — web_fetch · deps: P0 · ∥ P1, P2 · —
+### Phase 3 — web_fetch · deps: P0 · ∥ P1, P2 · ✅ DONE
 - `tantra/extratools/web/fetch.py`: `_get` (curl_cffi, manual redirects, SSRF checks, streaming cap), content-type dispatch, trafilatura-on-bytes in `to_thread`, output formatting + truncation, doc-extra dispatch stub (try-import `tantra.extratools.doc`, else the install-hint error).
 - Tests monkeypatch `_get`: HTML → extracted text with title + final URL; JSON/text passthrough; oversize body → cap error; redirect chain resolves final URL; redirect to `169.254.x.x`/`127.0.0.1` denied when guard on, allowed when off; non-http scheme denied; empty extraction → coaching error; PDF bytes without `[doc]` → install-hint error; truncation marker at `max_chars`.
 - **Verify:** with `_get` monkeypatched to serve a real saved HTML file's bytes, the tool returns readable article text under the cap; with it serving `%PDF-` bytes and `tantra.extratools.doc` unimportable, the result names `tantra-harness[doc]`.
 - Checklist:
-  - [ ] _get: redirects + SSRF + streaming cap
-  - [ ] dispatch + extraction + formatting
-  - [ ] full error-path test matrix
+  - [x] _get: redirects + SSRF + streaming cap
+  - [x] dispatch + extraction + formatting
+  - [x] full error-path test matrix
+- Landed notes:
+  - Seam gained params: `_get(url, timeout, ssrf_guard)` — factory args must flow through. Second seam `_session(timeout)` returns the configured `AsyncSession`; `_get`-level tests fake it, tool-level tests monkeypatch `_get`.
+  - Body read happens **inside** the 3-attempt loop: mid-stream connection drops retry (review blocker — they previously escaped as raw `IncompleteRead`), and status/connect/mid-stream failures share ONE attempt budget. The size-cap error is `RuntimeError`, not `RequestException`, so it never burns retries. Responses close via `finally` on every path.
+  - Scheme check runs even with `ssrf_guard=False`; only the address checks are skipped.
+  - `%PDF-` magic bytes beat a lying content-type header; empty content-type says "no content type"; 401 gets an auth hint, only 403/429 get the bot-wall hint.
+  - `Content-Type` is read after `aclose()` — load-bearing on curl_cffi keeping headers alive post-close (verified live).
 
 ### Phase 4 — doc · deps: P3 · —
 - `tantra/extratools/doc.py`: `extract_pdf`, `extract_docx`, `read_doc` tool; wire `web_fetch`'s dispatch to the real extractors.
 - Tests: tiny checked-in `.pdf`/`.docx` fixtures under `packages/tantra/tests/fixtures/`; suffix dispatch; unsupported suffix error; cap; `web_fetch` + monkeypatched `_get` serving PDF bytes now returns extracted text.
+- Note: P3's install-hint path currently fires via "cannot import name" (symbols absent), not missing deps — when adding `extract_pdf`/`extract_docx`, keep a real missing-extra test (skip-with-hint pattern).
 - **Verify:** `read_doc` on the fixture PDF returns its known sentence; the P3 install-hint test flips to an extraction test when `[doc]` is installed.
 - Checklist:
   - [ ] extractors + read_doc
@@ -229,6 +240,7 @@ P5's concept/core-library pages depend only on P0 (they document v1 surface); it
 - **More search providers** — `searxng_search`/`tavily_search` factories when someone wants them; introduce a shared protocol only at the second impl.
 - **`[web-js]` extra** — playwright fallback for JS-rendered pages, if empty-extraction errors prove frequent in practice.
 - **Cross-process Brave rate limiting** — backoff-only is fine at 1 rps free tier; a real limiter needs shared state and isn't worth it until a paid tier / multi-worker deployment exists.
+- **SSRF guard accepted gaps (P3 review)** — CGNAT `100.64.0.0/10` and NAT64 `64:ff9b::/96` are not blocked (outside the frozen loopback/private/link-local list; Python's `is_private` says False); DNS-rebinding TOCTOU (guard resolves, curl re-resolves — fixing needs `CURLOPT_RESOLVE` pinning). Revisit only if the guard's promise gets documented as stronger than "best-effort".
 
 ## Risks
 - **Guard bypass** — a model routed around agni's guard live (v1 spec P12). Hardening closes known routes, not the category. Mitigation: `permission="ask"` decorator default, loud guardrail-not-sandbox docs, `deny_extra` for site-specific rules.

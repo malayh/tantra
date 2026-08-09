@@ -192,15 +192,21 @@ P5's concept/core-library pages depend only on P0 (they document v1 surface); it
   - `%PDF-` magic bytes beat a lying content-type header; empty content-type says "no content type"; 401 gets an auth hint, only 403/429 get the bot-wall hint.
   - `Content-Type` is read after `aclose()` — load-bearing on curl_cffi keeping headers alive post-close (verified live).
 
-### Phase 4 — doc · deps: P3 · —
+### Phase 4 — doc · deps: P3 · ✅ DONE
 - `tantra/extratools/doc.py`: `extract_pdf`, `extract_docx`, `read_doc` tool; wire `web_fetch`'s dispatch to the real extractors.
 - Tests: tiny checked-in `.pdf`/`.docx` fixtures under `packages/tantra/tests/fixtures/`; suffix dispatch; unsupported suffix error; cap; `web_fetch` + monkeypatched `_get` serving PDF bytes now returns extracted text.
-- Note: P3's install-hint path currently fires via "cannot import name" (symbols absent), not missing deps — when adding `extract_pdf`/`extract_docx`, keep a real missing-extra test (skip-with-hint pattern).
+- Note: P3's install-hint path currently fires via "cannot import name" (symbols absent), not missing deps — when adding `extract_pdf`/`extract_docx`, keep a real missing-extra test (~~skip-with-hint pattern~~ **changed in P4.** skip-with-hint would permanently skip in dev where extras are always installed; tests instead evict `tantra.extratools.doc` from `sys.modules` and poison `pypdf`/`docx`, forcing the real ImportError path — mutation-verified load-bearing).
 - **Verify:** `read_doc` on the fixture PDF returns its known sentence; the P3 install-hint test flips to an extraction test when `[doc]` is installed.
 - Checklist:
-  - [ ] extractors + read_doc
-  - [ ] fetch dispatch integration test
-  - [ ] fixtures committed
+  - [x] extractors + read_doc
+  - [x] fetch dispatch integration test
+  - [x] fixtures committed
+- Landed notes:
+  - `_pdf`/`_docx` in fetch.py wrap extractor `RuntimeError`s so model-facing errors name the final URL and end "try another source" — bare extractor messages carried filesystem-flavored advice.
+  - `read_doc`'s stat + read + extract all run in ONE `to_thread` (`file.read_bytes()` on the loop stalled it 161ms on a 200MB file); `OSError` on read is wrapped self-describing.
+  - Extractors use `except Exception` deliberately: pypdf/python-docx throw `KeyError`, `BadZipFile`, `PackageNotFoundError` etc. on corrupt input — none are `RuntimeError` subclasses.
+  - `.gitattributes` pins `*.pdf`/`*.docx` binary — sample.pdf otherwise commits as text and CRLF conversion silently breaks its xref offsets (pypdf auto-recovers with a warning, hiding the corruption).
+  - sample.docx is 36KB — python-docx's floor for a valid package (sample.pdf is 639 bytes); not bloat.
 
 ### Phase 5 — docs site · deps: P1–P4 · —
 - Repo layout: `docs/` (markdown + `mkdocs.yml`), `landing/` (`index.html` + assets, self-contained, no build step). `mkdocs-material` added to the root dev group; `just docs` recipe runs `mkdocs serve`.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import sys
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
@@ -10,7 +12,12 @@ from tantra.extratools.web import fetch
 from tantra.extratools.web.fetch import web_fetch
 from tantra.tools import Context
 
-ARTICLE = Path(__file__).parent / "fixtures" / "article.html"
+FIXTURES = Path(__file__).parent / "fixtures"
+ARTICLE = FIXTURES / "article.html"
+SAMPLE_PDF = FIXTURES / "sample.pdf"
+SAMPLE_DOCX = FIXTURES / "sample.docx"
+PDF_SENTENCE = "The lighthouse keeper counted forty-one gulls before breakfast."
+DOCX_SENTENCE = "Marginalia in the ledger mentions a missing brass telescope."
 PAGE = "https://example.test/transport/night-train-return"
 PUBLIC = "https://93.184.216.34/start"
 
@@ -153,10 +160,35 @@ async def test_plain_text_passes_through_undisturbed(monkeypatch: pytest.MonkeyP
     assert result.endswith("line one\nline two\n")
 
 
-async def test_pdf_magic_bytes_beat_a_lying_content_type_and_name_the_doc_extra(
+async def test_pdf_magic_bytes_beat_a_lying_content_type_and_the_text_is_extracted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    serve(monkeypatch, "application/octet-stream", b"%PDF-1.7\n%stuff")
+    serve(monkeypatch, "application/octet-stream", SAMPLE_PDF.read_bytes())
+
+    result = await web_fetch().invoke({"url": PAGE}, make_ctx())
+
+    assert result.splitlines()[1] == PAGE
+    assert PDF_SENTENCE in result
+
+
+async def test_a_docx_is_extracted_to_its_paragraph_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    serve(
+        monkeypatch,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        SAMPLE_DOCX.read_bytes(),
+    )
+
+    result = await web_fetch().invoke({"url": PAGE}, make_ctx())
+
+    assert result.splitlines()[1] == PAGE
+    assert DOCX_SENTENCE in result
+
+
+async def test_a_pdf_with_the_doc_extra_missing_names_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    importlib.import_module("tantra.extratools.doc")
+    monkeypatch.delitem(sys.modules, "tantra.extratools.doc")
+    monkeypatch.setitem(sys.modules, "pypdf", None)
+    serve(monkeypatch, "application/pdf", b"%PDF-1.7\n%stuff")
 
     with pytest.raises(RuntimeError) as info:
         await web_fetch().invoke({"url": PAGE}, make_ctx())
@@ -165,14 +197,34 @@ async def test_pdf_magic_bytes_beat_a_lying_content_type_and_name_the_doc_extra(
     assert "tantra-harness[doc]" in str(info.value)
 
 
-async def test_a_docx_names_the_type_and_the_doc_extra(monkeypatch: pytest.MonkeyPatch) -> None:
-    serve(monkeypatch, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", b"PK\x03\x04stuff")
+async def test_a_docx_with_the_doc_extra_missing_names_the_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    importlib.import_module("tantra.extratools.doc")
+    monkeypatch.delitem(sys.modules, "tantra.extratools.doc")
+    monkeypatch.setitem(sys.modules, "docx", None)
+    serve(
+        monkeypatch,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        b"PK\x03\x04 not really a docx",
+    )
 
     with pytest.raises(RuntimeError) as info:
         await web_fetch().invoke({"url": PAGE}, make_ctx())
 
     assert "Word document" in str(info.value)
     assert "tantra-harness[doc]" in str(info.value)
+
+
+async def test_a_corrupt_downloaded_pdf_names_the_url_and_not_just_the_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    serve(monkeypatch, "application/pdf", b"%PDF-1.7 garbage")
+
+    with pytest.raises(RuntimeError) as info:
+        await web_fetch().invoke({"url": PAGE}, make_ctx())
+
+    assert f"web_fetch downloaded {PAGE}" in str(info.value)
+    assert "PDF" in str(info.value)
+    assert str(info.value).endswith("try another source")
 
 
 async def test_an_unreadable_content_type_is_named_in_the_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -197,14 +249,13 @@ async def test_a_response_with_no_content_type_says_so_rather_than_naming_an_emp
     assert "try another source" in str(info.value)
 
 
-async def test_a_naked_pdf_body_still_routes_to_pdf_without_a_content_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    serve(monkeypatch, "", b"%PDF-1.7\n%stuff")
+async def test_a_naked_pdf_body_is_still_extracted_without_a_content_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    serve(monkeypatch, "", SAMPLE_PDF.read_bytes())
 
-    with pytest.raises(RuntimeError) as info:
-        await web_fetch().invoke({"url": PAGE}, make_ctx())
+    result = await web_fetch().invoke({"url": PAGE}, make_ctx())
 
-    assert "PDF" in str(info.value)
-    assert "tantra-harness[doc]" in str(info.value)
+    assert result.splitlines()[1] == PAGE
+    assert PDF_SENTENCE in result
 
 
 async def test_a_page_with_no_extractable_text_coaches_the_model(monkeypatch: pytest.MonkeyPatch) -> None:

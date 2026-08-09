@@ -257,7 +257,10 @@ async def _pdf(final_url: str, body: bytes) -> str:
         from tantra.extratools.doc import extract_pdf
     except ImportError as exc:
         raise RuntimeError(_missing_doc_extra(final_url, "PDF")) from exc
-    return await asyncio.to_thread(extract_pdf, body)
+    try:
+        return await asyncio.to_thread(extract_pdf, body)
+    except RuntimeError as exc:
+        raise RuntimeError(_doc_failure(final_url, "PDF", exc)) from exc
 
 
 async def _docx(final_url: str, body: bytes) -> str:
@@ -265,7 +268,10 @@ async def _docx(final_url: str, body: bytes) -> str:
         from tantra.extratools.doc import extract_docx
     except ImportError as exc:
         raise RuntimeError(_missing_doc_extra(final_url, "Word document")) from exc
-    return await asyncio.to_thread(extract_docx, body)
+    try:
+        return await asyncio.to_thread(extract_docx, body)
+    except RuntimeError as exc:
+        raise RuntimeError(_doc_failure(final_url, "Word document", exc)) from exc
 
 
 def _missing_doc_extra(final_url: str, kind: str) -> str:
@@ -273,6 +279,10 @@ def _missing_doc_extra(final_url: str, kind: str) -> str:
         f"web_fetch downloaded {final_url}, which is a {kind}, but the {kind} extractors are not installed — "
         "tell the user to run `pip install tantra-harness[doc]` and try again, or find an HTML source instead"
     )
+
+
+def _doc_failure(final_url: str, kind: str, exc: Exception) -> str:
+    return f"web_fetch downloaded {final_url} as a {kind} but could not read it: {exc} — try another source"
 
 
 def _empty(final_url: str) -> str:

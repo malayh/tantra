@@ -39,7 +39,8 @@ apps/sarathi/
 │   │   ├── main.py     app factory, lifespan (store.setup, engine, upload dir), routers
 │   │   ├── config.py   pydantic-settings: DATABASE_URL, SECRET_KEY, OPENAI_BASE_URL,
 │   │   │               OPENAI_API_KEY, SARATHI_MODELS (csv, first=default),
-│   │   │               BRAVE_API_KEY, EMBEDDING_MODEL (optional), UPLOAD_DIR
+│   │   │               BRAVE_API_KEY, EMBEDDING_MODEL (optional), UPLOAD_DIR,
+│   │   │               CORS_ORIGINS (added in P0)
 │   │   ├── db.py       async engine (postgresql+psycopg), Base, get_db, DbDep alias
 │   │   ├── models.py   User(id, email, password_hash, created_at)
 │   │   ├── schemas.py  request/response + WS frame models
@@ -51,7 +52,7 @@ apps/sarathi/
 │   │   ├── titles.py   one-shot title generation (agni repl.py:131 pattern)
 │   │   └── api/        auth.py, sessions.py, memory.py, uploads.py, ws.py, meta.py
 │   └── tests/
-├── ui/                 Next.js 15, App Router, TS, Tailwind v4, shadcn (new-york)
+├── ui/                 Next.js 15, App Router, TS, Tailwind v4, ~~shadcn (new-york)~~ shadcn (radix-nova) **Changed in P0.** CLI v4.16 dropped named styles; radix-nova preset (Radix + Lucide + Geist) is the successor
 │   ├── orval.config.js input: ./openapi.json (committed)
 │   ├── src/app/{login,signup}/, src/app/chat/, src/lib/apiClient.ts, src/generated/
 │   └── Justfile, Dockerfile (standalone, next-runtime-env)
@@ -60,7 +61,7 @@ apps/sarathi/
 └── .env.example        every env var, no secrets committed
 ```
 
-- Root `pyproject.toml`: add `"apps/sarathi/backend"` to `[tool.uv.workspace] members`; `sarathi` dev group not needed (its extras already in root dev group).
+- Root `pyproject.toml`: add `"apps/sarathi/backend"` to `[tool.uv.workspace] members`; ~~`sarathi` dev group not needed (its extras already in root dev group)~~ **Changed in P0.** sarathi carries its own dev group (aiosqlite/httpx are not in the root dev group).
 - Backend Dockerfile builds from **repo root context** (needs the workspace `tantra` package): `uv sync --frozen --package sarathi`, CMD `uvicorn sarathi.main:app --host 0.0.0.0 --port 8000` (one worker).
 
 ## Harness wiring
@@ -156,7 +157,7 @@ Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7. P3/P4/P5 look indep
 - After a phase lands, add only detail that would surprise the next reader — a load-bearing constant, a behavior that isn't what the name suggests, an ordering that matters.
 - Problems found but not fixed go to Open Decisions or a Follow-up note with enough detail to act on later.
 
-### Phase 0 — Scaffolding + frozen contracts · deps: none · blocks all · —
+### Phase 0 — Scaffolding + frozen contracts · deps: none · blocks all · ✅ done 2026-08-10
 - Workspace member `apps/sarathi/backend` (src layout, deps, justfile targets incl. `export-openapi`); root `pyproject.toml` members updated.
 - `config.py`, `db.py`, empty routers mounted, `/api/health`, `POST /api/meta/ws-types` dummy carrying full WS frame + tantra event union schemas.
 - All WS frame models in `schemas.py` — this freezes the wire contract.
@@ -164,10 +165,15 @@ Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7. P3/P4/P5 look indep
 - Compose skeleton: db + migrate (no-op) + backend + ui boot and pass healthchecks. `.env.example`.
 - **Verify:** `docker compose up` → ui at :3000, `/api/health` ok; `just export-openapi && yarn typegen` produces TS types for every WS frame and tantra event type; root `just test` green.
 - Checklist:
-  - [ ] workspace member + justfile
-  - [ ] WS frame schemas + dummy endpoint
-  - [ ] ui scaffold + typegen loop
-  - [ ] compose skeleton + .env.example
+  - [x] workspace member + justfile
+  - [x] WS frame schemas + dummy endpoint
+  - [x] ui scaffold + typegen loop
+  - [x] compose skeleton + .env.example
+- P0 notes:
+  - `CORS_ORIGINS` env var (csv, default `http://localhost:3000`) added — ui on :3000 calls backend on :8000 cross-origin.
+  - `SECRET_KEY`/`OPENAI_BASE_URL`/`OPENAI_API_KEY`/`SARATHI_MODELS` are required (no defaults); `just export-openapi` and `tests/conftest.py` inject dummies.
+  - Sarathi tests are NOT in root pytest `testpaths` — backend `just test` is the gate; root `just test` proves only tantra/agni.
+  - `ClientFrame` uses `pydantic.Discriminator("type")` (a `Field(discriminator=...)` in `Annotated` makes FastAPI infer a query param).
 
 ### Phase 1 — Auth · deps: P0 · —
 - `models.User` + alembic migration; signup/login/me endpoints; `CurrentUser`/`CurrentUserWS` deps.

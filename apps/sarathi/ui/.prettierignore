@@ -1,0 +1,5 @@
+src/generated/
+node_modules/
+.next/
+openapi.json
+yarn.lock

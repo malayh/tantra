@@ -1,0 +1,14 @@
+default:
+    @just --list
+
+dev:
+    yarn dev
+
+build:
+    yarn build
+
+lint:
+    yarn lint
+
+typegen:
+    yarn typegen

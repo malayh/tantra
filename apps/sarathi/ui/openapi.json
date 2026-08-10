@@ -1,0 +1,1341 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "sarathi",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Health",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/meta/ws-types": {
+      "post": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Ws Types",
+        "operationId": "ws_types",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/UserMessageFrame"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AskResponseFrame"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CancelFrame"
+                  }
+                ],
+                "title": "Frame",
+                "discriminator": {
+                  "propertyName": "type",
+                  "mapping": {
+                    "user_message": "#/components/schemas/UserMessageFrame",
+                    "ask_response": "#/components/schemas/AskResponseFrame",
+                    "cancel": "#/components/schemas/CancelFrame"
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ReplayDoneFrame"
+                    },
+                    {
+                      "$ref": "#/components/schemas/BusyFrame"
+                    },
+                    {
+                      "$ref": "#/components/schemas/TitleUpdatedFrame"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ServerErrorFrame"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Emitted"
+                    }
+                  ],
+                  "title": "Response Ws Types"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Approval": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "approval",
+            "title": "Kind",
+            "default": "approval"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body",
+            "default": ""
+          },
+          "extra": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extra"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "title": "Approval"
+      },
+      "ApprovalResponse": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "approval",
+            "title": "Kind",
+            "default": "approval"
+          },
+          "allow": {
+            "type": "boolean",
+            "title": "Allow"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "allow"
+        ],
+        "title": "ApprovalResponse"
+      },
+      "AskAnswered": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "ask_answered",
+            "title": "Type",
+            "default": "ask_answered"
+          },
+          "ask_id": {
+            "type": "string",
+            "title": "Ask Id"
+          },
+          "response": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalResponse"
+              },
+              {
+                "$ref": "#/components/schemas/ChoiceResponse"
+              },
+              {
+                "$ref": "#/components/schemas/FreeTextResponse"
+              }
+            ],
+            "title": "Response",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "approval": "#/components/schemas/ApprovalResponse",
+                "choice": "#/components/schemas/ChoiceResponse",
+                "free_text": "#/components/schemas/FreeTextResponse"
+              }
+            }
+          },
+          "answered_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answered By"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ask_id",
+          "response"
+        ],
+        "title": "AskAnswered"
+      },
+      "AskRaised": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "ask_raised",
+            "title": "Type",
+            "default": "ask_raised"
+          },
+          "ask_id": {
+            "type": "string",
+            "title": "Ask Id"
+          },
+          "call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Call Id"
+          },
+          "request": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Approval"
+              },
+              {
+                "$ref": "#/components/schemas/Choice"
+              },
+              {
+                "$ref": "#/components/schemas/FreeText"
+              }
+            ],
+            "title": "Request",
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "approval": "#/components/schemas/Approval",
+                "choice": "#/components/schemas/Choice",
+                "free_text": "#/components/schemas/FreeText"
+              }
+            }
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ask_id",
+          "request"
+        ],
+        "title": "AskRaised"
+      },
+      "AskResponseFrame": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "ask_response",
+            "title": "Type",
+            "default": "ask_response"
+          },
+          "ask_id": {
+            "type": "string",
+            "title": "Ask Id"
+          },
+          "response": {
+            "type": "string",
+            "title": "Response"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ask_id",
+          "response"
+        ],
+        "title": "AskResponseFrame"
+      },
+      "Attachment": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "name"
+        ],
+        "title": "Attachment"
+      },
+      "BusyFrame": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "busy",
+            "title": "Type",
+            "default": "busy"
+          },
+          "retry_in": {
+            "type": "number",
+            "title": "Retry In"
+          }
+        },
+        "type": "object",
+        "required": [
+          "retry_in"
+        ],
+        "title": "BusyFrame"
+      },
+      "CancelFrame": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "cancel",
+            "title": "Type",
+            "default": "cancel"
+          }
+        },
+        "type": "object",
+        "title": "CancelFrame"
+      },
+      "CancelRequested": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "cancel_requested",
+            "title": "Type",
+            "default": "cancel_requested"
+          },
+          "turn_id": {
+            "type": "string",
+            "title": "Turn Id"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "turn_id"
+        ],
+        "title": "CancelRequested"
+      },
+      "ChildSessionSpawned": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "child_session_spawned",
+            "title": "Type",
+            "default": "child_session_spawned"
+          },
+          "call_id": {
+            "type": "string",
+            "title": "Call Id"
+          },
+          "child_session_id": {
+            "type": "string",
+            "title": "Child Session Id"
+          },
+          "agent": {
+            "type": "string",
+            "title": "Agent"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "call_id",
+          "child_session_id",
+          "agent"
+        ],
+        "title": "ChildSessionSpawned"
+      },
+      "Choice": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "choice",
+            "title": "Kind",
+            "default": "choice"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Options"
+          },
+          "extra": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extra"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "title": "Choice"
+      },
+      "ChoiceResponse": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "choice",
+            "title": "Kind",
+            "default": "choice"
+          },
+          "selected": {
+            "type": "string",
+            "title": "Selected"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "selected"
+        ],
+        "title": "ChoiceResponse"
+      },
+      "CompactionApplied": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "compaction_applied",
+            "title": "Type",
+            "default": "compaction_applied"
+          },
+          "strategy": {
+            "type": "string",
+            "title": "Strategy"
+          },
+          "tokens_before": {
+            "type": "integer",
+            "title": "Tokens Before"
+          },
+          "tokens_after": {
+            "type": "integer",
+            "title": "Tokens After"
+          },
+          "summary": {
+            "type": "string",
+            "title": "Summary"
+          },
+          "floor_turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Floor Turn Id"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "strategy",
+          "tokens_before",
+          "tokens_after",
+          "summary"
+        ],
+        "title": "CompactionApplied"
+      },
+      "Emitted": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "depth": {
+            "type": "integer",
+            "title": "Depth",
+            "default": 0
+          },
+          "seq": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seq"
+          },
+          "event": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SessionCreated"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TurnStarted"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SampleStarted"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TextPart"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ReasoningPart"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ToolCallRequested"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ToolCallStarted"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ToolProgress"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ToolCallCompleted"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ChildSessionSpawned"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AskRaised"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AskAnswered"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SampleCompleted"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CompactionApplied"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CancelRequested"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TurnCompleted"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TurnFailed"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "type",
+                  "mapping": {
+                    "ask_answered": "#/components/schemas/AskAnswered",
+                    "ask_raised": "#/components/schemas/AskRaised",
+                    "cancel_requested": "#/components/schemas/CancelRequested",
+                    "child_session_spawned": "#/components/schemas/ChildSessionSpawned",
+                    "compaction_applied": "#/components/schemas/CompactionApplied",
+                    "reasoning_part": "#/components/schemas/ReasoningPart",
+                    "sample_completed": "#/components/schemas/SampleCompleted",
+                    "sample_started": "#/components/schemas/SampleStarted",
+                    "session_created": "#/components/schemas/SessionCreated",
+                    "text_part": "#/components/schemas/TextPart",
+                    "tool_call_completed": "#/components/schemas/ToolCallCompleted",
+                    "tool_call_requested": "#/components/schemas/ToolCallRequested",
+                    "tool_call_started": "#/components/schemas/ToolCallStarted",
+                    "tool_progress": "#/components/schemas/ToolProgress",
+                    "turn_completed": "#/components/schemas/TurnCompleted",
+                    "turn_failed": "#/components/schemas/TurnFailed",
+                    "turn_started": "#/components/schemas/TurnStarted"
+                  }
+                }
+              },
+              {
+                "$ref": "#/components/schemas/TextDelta"
+              },
+              {
+                "$ref": "#/components/schemas/ReasoningDelta"
+              },
+              {
+                "$ref": "#/components/schemas/ToolCallDelta"
+              }
+            ],
+            "title": "Event"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "session_id",
+          "event"
+        ],
+        "title": "Emitted"
+      },
+      "FreeText": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "free_text",
+            "title": "Kind",
+            "default": "free_text"
+          },
+          "prompt": {
+            "type": "string",
+            "title": "Prompt"
+          },
+          "extra": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extra"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "prompt"
+        ],
+        "title": "FreeText"
+      },
+      "FreeTextResponse": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "free_text",
+            "title": "Kind",
+            "default": "free_text"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "FreeTextResponse"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ReasoningDelta": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "reasoning_delta",
+            "title": "Type",
+            "default": "reasoning_delta"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "ReasoningDelta"
+      },
+      "ReasoningPart": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "reasoning_part",
+            "title": "Type",
+            "default": "reasoning_part"
+          },
+          "sample_id": {
+            "type": "string",
+            "title": "Sample Id"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "signature": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signature"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "sample_id",
+          "text"
+        ],
+        "title": "ReasoningPart"
+      },
+      "ReplayDoneFrame": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "replay_done",
+            "title": "Type",
+            "default": "replay_done"
+          }
+        },
+        "type": "object",
+        "title": "ReplayDoneFrame"
+      },
+      "SampleCompleted": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "sample_completed",
+            "title": "Type",
+            "default": "sample_completed"
+          },
+          "sample_id": {
+            "type": "string",
+            "title": "Sample Id"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage"
+          },
+          "finish_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finish Reason"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "sample_id"
+        ],
+        "title": "SampleCompleted"
+      },
+      "SampleStarted": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "sample_started",
+            "title": "Type",
+            "default": "sample_started"
+          },
+          "turn_id": {
+            "type": "string",
+            "title": "Turn Id"
+          },
+          "sample_id": {
+            "type": "string",
+            "title": "Sample Id"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "turn_id",
+          "sample_id",
+          "model"
+        ],
+        "title": "SampleStarted"
+      },
+      "ServerErrorFrame": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "server_error",
+            "title": "Type",
+            "default": "server_error"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "title": "ServerErrorFrame"
+      },
+      "SessionCreated": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "session_created",
+            "title": "Type",
+            "default": "session_created"
+          },
+          "agent": {
+            "type": "string",
+            "title": "Agent"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "depth": {
+            "type": "integer",
+            "title": "Depth",
+            "default": 0
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "agent"
+        ],
+        "title": "SessionCreated"
+      },
+      "TextDelta": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "text_delta",
+            "title": "Type",
+            "default": "text_delta"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "TextDelta"
+      },
+      "TextPart": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "text_part",
+            "title": "Type",
+            "default": "text_part"
+          },
+          "sample_id": {
+            "type": "string",
+            "title": "Sample Id"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "sample_id",
+          "text"
+        ],
+        "title": "TextPart"
+      },
+      "TitleUpdatedFrame": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "title_updated",
+            "title": "Type",
+            "default": "title_updated"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          }
+        },
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "title": "TitleUpdatedFrame"
+      },
+      "ToolCallCompleted": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "tool_call_completed",
+            "title": "Type",
+            "default": "tool_call_completed"
+          },
+          "call_id": {
+            "type": "string",
+            "title": "Call Id"
+          },
+          "result": {
+            "title": "Result"
+          },
+          "is_error": {
+            "type": "boolean",
+            "title": "Is Error",
+            "default": false
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "call_id"
+        ],
+        "title": "ToolCallCompleted"
+      },
+      "ToolCallDelta": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "tool_call_delta",
+            "title": "Type",
+            "default": "tool_call_delta"
+          },
+          "index": {
+            "type": "integer",
+            "title": "Index"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "args_fragment": {
+            "type": "string",
+            "title": "Args Fragment",
+            "default": ""
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "index"
+        ],
+        "title": "ToolCallDelta"
+      },
+      "ToolCallRequested": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "tool_call_requested",
+            "title": "Type",
+            "default": "tool_call_requested"
+          },
+          "sample_id": {
+            "type": "string",
+            "title": "Sample Id"
+          },
+          "call_id": {
+            "type": "string",
+            "title": "Call Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "args": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Args"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "sample_id",
+          "call_id",
+          "name"
+        ],
+        "title": "ToolCallRequested"
+      },
+      "ToolCallStarted": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "tool_call_started",
+            "title": "Type",
+            "default": "tool_call_started"
+          },
+          "call_id": {
+            "type": "string",
+            "title": "Call Id"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "call_id"
+        ],
+        "title": "ToolCallStarted"
+      },
+      "ToolProgress": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "tool_progress",
+            "title": "Type",
+            "default": "tool_progress"
+          },
+          "call_id": {
+            "type": "string",
+            "title": "Call Id"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "call_id",
+          "message"
+        ],
+        "title": "ToolProgress"
+      },
+      "TurnCompleted": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "turn_completed",
+            "title": "Type",
+            "default": "turn_completed"
+          },
+          "turn_id": {
+            "type": "string",
+            "title": "Turn Id"
+          },
+          "stop_reason": {
+            "type": "string",
+            "title": "Stop Reason"
+          },
+          "output": {
+            "title": "Output"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "turn_id",
+          "stop_reason"
+        ],
+        "title": "TurnCompleted"
+      },
+      "TurnFailed": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "turn_failed",
+            "title": "Type",
+            "default": "turn_failed"
+          },
+          "turn_id": {
+            "type": "string",
+            "title": "Turn Id"
+          },
+          "error": {
+            "type": "string",
+            "title": "Error"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "turn_id",
+          "error"
+        ],
+        "title": "TurnFailed"
+      },
+      "TurnStarted": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "turn_started",
+            "title": "Type",
+            "default": "turn_started"
+          },
+          "turn_id": {
+            "type": "string",
+            "title": "Turn Id"
+          },
+          "input": {
+            "type": "string",
+            "title": "Input"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "turn_id",
+          "input"
+        ],
+        "title": "TurnStarted"
+      },
+      "Usage": {
+        "properties": {
+          "input_tokens": {
+            "type": "integer",
+            "title": "Input Tokens",
+            "default": 0
+          },
+          "output_tokens": {
+            "type": "integer",
+            "title": "Output Tokens",
+            "default": 0
+          },
+          "cache_read_tokens": {
+            "type": "integer",
+            "title": "Cache Read Tokens",
+            "default": 0
+          },
+          "cache_write_tokens": {
+            "type": "integer",
+            "title": "Cache Write Tokens",
+            "default": 0
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "Usage"
+      },
+      "UserMessageFrame": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "user_message",
+            "title": "Type",
+            "default": "user_message"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/Attachment"
+            },
+            "type": "array",
+            "title": "Attachments"
+          }
+        },
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "title": "UserMessageFrame"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

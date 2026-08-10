@@ -1,0 +1,25 @@
+default:
+    @just --list
+
+runserver:
+    uv run uvicorn sarathi.main:app --reload --port 8000
+
+test *args:
+    uv run pytest {{args}}
+
+lint:
+    uv run ruff check .
+    uv run ruff format --check .
+
+fmt:
+    uv run ruff format .
+
+migrate:
+    uv run alembic upgrade head
+
+makemigrations msg:
+    uv run alembic revision --autogenerate -m "{{msg}}"
+
+export-openapi:
+    SECRET_KEY=openapi OPENAI_BASE_URL=http://provider.invalid/v1 OPENAI_API_KEY=openapi SARATHI_MODELS=openapi \
+        uv run python -c "import json, pathlib; from sarathi.main import app; pathlib.Path('../ui/openapi.json').write_text(json.dumps(app.openapi(), indent=2) + '\n')"

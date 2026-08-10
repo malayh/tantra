@@ -10,7 +10,7 @@ authors = [{ name = "Malay Hazarika", email = "malay.hazarika@gmail.com" }]
 package = false
 
 [tool.uv.workspace]
-members = ["packages/tantra", "apps/agni"]
+members = ["packages/tantra", "apps/agni", "apps/sarathi/backend"]
 
 [tool.uv.sources]
 tantra-harness = { workspace = true }
@@ -37,7 +37,7 @@ extend-exclude = ["*.md"]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["tantra", "agni"]
+known-first-party = ["tantra", "agni", "sarathi"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

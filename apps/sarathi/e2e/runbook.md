@@ -9,7 +9,7 @@ Manual-but-agent-driven end-to-end pass over the compose stack. Executed by Clau
   - `SARATHI_MODELS` — csv, **at least two** real cheap models (first = default). Scenario 9 needs two.
   - `BRAVE_API_KEY` — required; without it `web_search` is silently dropped and scenarios 3/5/8 cannot pass.
   - `SECRET_KEY`, `NEXTAUTH_SECRET` — any non-empty strings.
-- `docker compose up -d --build` from `apps/sarathi/`.
+- `docker compose up -d --build` from `apps/sarathi/`. After editing `.env`, recreate with `docker compose up -d backend` — `docker compose restart` keeps the old env.
 - `docker compose ps` → `db` healthy, `backend` healthy, `ui` healthy, `migrate` exited 0.
 - UI: <http://localhost:3000> · API: <http://localhost:8000> (`GET /api/health` → ok).
 - Thoughts (scenario 2) only appear if the endpoint emits reasoning deltas. Not a bug in the app — SKIP with the model named.

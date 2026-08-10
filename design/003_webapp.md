@@ -142,7 +142,7 @@ apps/sarathi/
 
 ## Implementation phases
 
-Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7. P3/P4/P5 look independent on paper but all touch `api/ws.py`, `agent.py`, and the transcript reducer — sequential in practice; do not parallelize them.
+Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8. P3/P4/P5 look independent on paper but all touch `api/ws.py`, `agent.py`, and the transcript reducer — sequential in practice; do not parallelize them.
 
 ### Conventions (all phases)
 - Backend: ruff line-length 120, py313, `select = ["E","F","I","UP","B"]`, no `noqa`; **no comments**; docstrings only on tools (they are model-facing descriptions, opencode-style) and public protocols. pytest `asyncio_mode = "auto"`; no network in tests (`FakeProvider`/cassettes); `MemoryStore` + aiosqlite app DB in tests.
@@ -301,6 +301,27 @@ Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7. P3/P4/P5 look indep
   - S8 FAIL (both attempts, DB-verified): stop cancels only the root — `harness.cancel`'s `expect_seq` retry (5×, no backoff) always loses against the actively-appending child log, `SeqConflict` swallowed per-target in `api/ws.py`; child runs to `completed`, root ends `cancelled` only when the spawn tool returns. New `docs/issues.md` entry; fix belongs in tantra core (blind append for `CancelRequested`).
   - Other PASS highlights: thoughts stream + collapse on glm-5.2; PDF grounding recovered all page-2/3 facts + page-1 from history without a second `read_doc`; durable ask survived `docker compose restart backend` with exactly one card; user-B isolation clean (3 empty recalls); model switch proven via `sample_started.model`; mid-turn reload replayed completed items only and re-sampled to a coherent finish.
   - Minor deviations logged in the report: sidebar `New chat` click intermittently doesn't navigate from a session page; theme verified via DOM/localStorage because the tester's Chrome runs Dark Reader (repaints the app dark regardless of app theme).
+
+### Phase 8 — tantra fixes + release · deps: P7 · —
+The `packages/tantra` freeze is lifted for this phase only. Fix the `docs/issues.md` backlog in tantra core, ship `tantra-harness` 0.2.0, prove the cancel fixes with the runbook. Publishing to PyPI is manual — pause and ask the user when the release commit is ready.
+
+Cancel cluster (caused the S8 FAIL; runbook-verifiable):
+1. `cancel` seq-race: append `CancelRequested` **without** `expect_seq` — it's a flag, needs no seq consistency (`harness.py:441-459`). Kills the livelock against busy logs.
+2. Tree cancel: `cancel(sid, recursive=True)` walking `ChildSessionSpawned`; sarathi `api/ws.py` drops its hand-rolled walk for one call.
+3. Final-sample drop: re-check `state.cancelled` before `_terminal("completed")` in the no-tool-calls branch (`loop.py:773-782`).
+4. Boundary-only observation stays (documented behavior, not fixed) — but with 1–3 landed, stop latency = current step only.
+
+Remaining `docs/issues.md` entries (unit-test-verifiable only; triage with user in plan mode — fix, defer, or wontfix each):
+- `_Filter` `None`-wildcard fail-open; `memory_*` absent from Store protocol + unfiltered `memory_all`; cross-tenant shipped memory tools; `delete`/`supersede` ownership+idempotency; bare `resume()` re-emitting `AskRaised` with original seq; replay child `depth: 0`; `ToolCallStarted` skipped on error paths; `put_header` last-writer-wins (needs CAS/`patch_metadata`); `reasoning_content` delta field (fold sarathi's `ReasoningCompat` into the provider).
+
+Deliverables: fixes + unit tests in `packages/tantra`; `docs/issues.md` entries struck/annotated; sarathi updated to drop app-side workarounds that the lib now covers (recursive cancel; possibly `ReasoningCompat`); version bump to 0.2.0 + changelog; compose image rebuild (stack builds from workspace source — runbook re-test does NOT wait on PyPI).
+- **Verify:** tantra + sarathi test suites green; S8 re-run PASSes live (child log shows `cancel_requested`, child `stop_reason="cancelled"`, stop-to-idle bounded by the in-flight step); no regressions in a spot-check of S2/S5/S6; user confirms publish done.
+- Checklist:
+  - [ ] cancel cluster fixed + unit tests
+  - [ ] remaining issues triaged with user; agreed fixes landed
+  - [ ] sarathi workarounds removed where superseded
+  - [ ] 0.2.0 bump + changelog; user published (manual)
+  - [ ] compose rebuild + S8 runbook re-run PASS
 
 ## Open Decisions
 - **Background sweep daemon** — reconnect-driven resume suffices for the demo; revisit if abandoned turns holding `running` status confuse the sidebar. Resolve by observing runbook runs.

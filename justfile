@@ -16,3 +16,6 @@ lint:
 
 fmt:
     uv run ruff format .
+
+docs:
+    uv run mkdocs serve

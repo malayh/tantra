@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tantra — the agent turn loop as a library</title>
+    <meta
+      name="description"
+      content="tantra is a Python agent harness: the turn loop as a library, with durable re-entrant turns, pluggable tools, hooks, skills and memory."
+    />
+    <style>
+      :root {
+        --bg: #0a0b0d;
+        --panel: #101216;
+        --panel-2: #0d0f12;
+        --line: #1e2228;
+        --line-soft: #171a1f;
+        --fg: #dfe3e8;
+        --fg-dim: #949ba5;
+        --fg-faint: #6b727c;
+        --accent: #f2a65a;
+        --accent-dim: #b97a3e;
+        --kw: #c191ff;
+        --str: #9ed37a;
+        --typ: #6fc9e8;
+        --fn: #f2a65a;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+        --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        -webkit-text-size-adjust: 100%;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: var(--sans);
+        font-size: 16px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background: radial-gradient(900px 420px at 15% -10%, rgba(242, 166, 90, 0.09), transparent 70%);
+        z-index: 0;
+      }
+
+      .wrap {
+        position: relative;
+        z-index: 1;
+        width: 100%;
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      header {
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        height: 64px;
+      }
+
+      .mark {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-family: var(--mono);
+        font-size: 15px;
+        letter-spacing: 0.02em;
+        text-decoration: none;
+      }
+
+      .mark svg {
+        display: block;
+      }
+
+      .mark b {
+        font-weight: 600;
+      }
+
+      .bar nav {
+        display: flex;
+        align-items: center;
+        gap: 22px;
+        font-size: 14px;
+      }
+
+      .bar nav a {
+        color: var(--fg-dim);
+        text-decoration: none;
+        transition: color 0.15s ease;
+      }
+
+      .bar nav a:hover {
+        color: var(--fg);
+      }
+
+      .hero {
+        padding: 88px 0 24px;
+      }
+
+      .eyebrow {
+        font-family: var(--mono);
+        font-size: 12px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--accent-dim);
+        margin: 0 0 22px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(1.85rem, 6vw, 3.4rem);
+        line-height: 1.08;
+        letter-spacing: -0.03em;
+        font-weight: 600;
+      }
+
+      h1 em {
+        font-style: normal;
+        color: var(--accent);
+      }
+
+      .lede {
+        margin: 22px 0 0;
+        max-width: 60ch;
+        font-size: clamp(1rem, 2.4vw, 1.15rem);
+        color: var(--fg-dim);
+      }
+
+      .cta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        margin-top: 34px;
+      }
+
+      .install {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 10px 10px 14px;
+        font-family: var(--mono);
+        font-size: 14px;
+      }
+
+      .install .sigil {
+        color: var(--fg-faint);
+        user-select: none;
+      }
+
+      .install code {
+        white-space: nowrap;
+        overflow-x: auto;
+        color: var(--fg);
+      }
+
+      button.copy {
+        appearance: none;
+        border: 1px solid var(--line);
+        background: var(--panel-2);
+        color: var(--fg-dim);
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        padding: 5px 9px;
+        border-radius: 5px;
+        cursor: pointer;
+        transition: color 0.15s ease, border-color 0.15s ease;
+      }
+
+      button.copy:hover {
+        color: var(--fg);
+        border-color: #2c323a;
+      }
+
+      button.copy[data-done="1"] {
+        color: var(--accent);
+        border-color: var(--accent-dim);
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 11px 18px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 500;
+        text-decoration: none;
+        border: 1px solid transparent;
+        transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+      }
+
+      .btn.primary {
+        background: var(--accent);
+        color: #17120c;
+      }
+
+      .btn.primary:hover {
+        background: #ffbb76;
+      }
+
+      .btn.ghost {
+        border-color: var(--line);
+        color: var(--fg-dim);
+      }
+
+      .btn.ghost:hover {
+        border-color: #2c323a;
+        color: var(--fg);
+      }
+
+      .code {
+        margin: 56px 0 0;
+        background: var(--panel-2);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        overflow: hidden;
+      }
+
+      .code .chrome {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px 10px 16px;
+        border-bottom: 1px solid var(--line-soft);
+        background: var(--panel);
+      }
+
+      .code .chrome span {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--fg-faint);
+      }
+
+      .code pre {
+        margin: 0;
+        padding: 22px 20px 26px;
+        overflow-x: auto;
+        font-family: var(--mono);
+        font-size: 13.5px;
+        line-height: 1.72;
+        color: var(--fg);
+        tab-size: 4;
+      }
+
+      .k {
+        color: var(--kw);
+      }
+
+      .s {
+        color: var(--str);
+      }
+
+      .t {
+        color: var(--typ);
+      }
+
+      .f {
+        color: var(--fn);
+      }
+
+      .note {
+        margin: 16px 2px 0;
+        font-size: 13.5px;
+        color: var(--fg-faint);
+      }
+
+      .note code {
+        font-family: var(--mono);
+        color: var(--fg-dim);
+      }
+
+      section.pitch {
+        padding: 96px 0 0;
+      }
+
+      h2.sect {
+        margin: 0 0 30px;
+        font-family: var(--mono);
+        font-size: 12px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--fg-faint);
+        font-weight: 500;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1px;
+        background: var(--line-soft);
+        border: 1px solid var(--line-soft);
+        border-radius: 12px;
+        overflow: hidden;
+      }
+
+      .card {
+        background: var(--bg);
+        padding: 28px 26px 30px;
+      }
+
+      .card h3 {
+        margin: 0 0 10px;
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+
+      .card h3::before {
+        content: "";
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        margin-right: 10px;
+        border-radius: 2px;
+        background: var(--accent);
+        vertical-align: middle;
+        opacity: 0.85;
+      }
+
+      .card p {
+        margin: 0;
+        font-size: 14.5px;
+        color: var(--fg-dim);
+      }
+
+      .card code {
+        font-family: var(--mono);
+        font-size: 12.8px;
+        color: var(--fg);
+        background: var(--panel);
+        border: 1px solid var(--line-soft);
+        border-radius: 4px;
+        padding: 1px 5px;
+      }
+
+      .card.wide {
+        grid-column: 1 / -1;
+      }
+
+      footer {
+        margin-top: 104px;
+        border-top: 1px solid var(--line-soft);
+      }
+
+      .foot {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 28px 0 44px;
+        font-family: var(--mono);
+        font-size: 12.5px;
+        color: var(--fg-faint);
+      }
+
+      .foot nav {
+        display: flex;
+        gap: 20px;
+      }
+
+      .foot a {
+        color: var(--fg-faint);
+        text-decoration: none;
+      }
+
+      .foot a:hover {
+        color: var(--fg-dim);
+      }
+
+      @media (max-width: 760px) {
+        .wrap {
+          padding: 0 18px;
+        }
+
+        .hero {
+          padding-top: 56px;
+        }
+
+        .code {
+          margin-top: 40px;
+          border-radius: 10px;
+        }
+
+        .code pre {
+          font-size: 12.5px;
+          padding: 18px 16px 22px;
+        }
+
+        section.pitch {
+          padding-top: 68px;
+        }
+
+        .grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .install,
+        .btn {
+          width: 100%;
+        }
+
+        .btn {
+          justify-content: center;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="wrap bar">
+        <a class="mark" href="./">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+            <rect x="0.75" y="0.75" width="16.5" height="16.5" rx="4.25" stroke="#f2a65a" stroke-opacity="0.5" stroke-width="1.5" />
+            <circle cx="9" cy="9" r="3" fill="#f2a65a" />
+          </svg>
+          <b>tantra</b>
+        </a>
+        <nav>
+          <a href="https://malayh.github.io/tantra/docs/">Docs</a>
+          <a href="https://github.com/malayh/tantra">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <div class="wrap hero">
+        <p class="eyebrow">Python agent harness</p>
+        <h1>The agent turn loop,<br />as a <em>library</em>.</h1>
+        <p class="lede">
+          tantra owns the loop — sampling, tool dispatch, permissions, approval and suspend/resume, subagents,
+          compaction, persistence — so your agent stays a declaration instead of a framework.
+        </p>
+
+        <div class="cta">
+          <div class="install">
+            <span class="sigil">$</span>
+            <code id="install-cmd">pip install tantra-harness</code>
+            <button class="copy" type="button" data-copy="install-cmd">Copy</button>
+          </div>
+          <a class="btn primary" href="https://malayh.github.io/tantra/docs/">Read the docs</a>
+          <a class="btn ghost" href="https://github.com/malayh/tantra">GitHub</a>
+        </div>
+
+        <div class="code">
+          <div class="chrome">
+            <span>researcher.py</span>
+            <button class="copy" type="button" data-copy="sample">Copy</button>
+          </div>
+          <pre id="sample"><span class="k">import</span> asyncio
+
+<span class="k">from</span> tantra <span class="k">import</span> <span class="t">Agent</span>, <span class="t">Harness</span>, <span class="t">OpenAICompatible</span>, <span class="t">SQLiteStore</span>
+<span class="k">from</span> tantra.extratools.doc <span class="k">import</span> read_doc
+<span class="k">from</span> tantra.extratools.shell <span class="k">import</span> <span class="t">ShellGuard</span>, bash
+<span class="k">from</span> tantra.extratools.web <span class="k">import</span> web_fetch, web_search
+<span class="k">from</span> tantra.providers.base <span class="k">import</span> <span class="t">TextDelta</span>
+
+
+<span class="k">class</span> <span class="t">Researcher</span>(<span class="t">Agent</span>):
+    model = <span class="s">"gpt-5"</span>
+    prompt = <span class="s">"You answer questions using the web, local documents and the shell."</span>
+    tools = [<span class="f">bash</span>(), <span class="f">web_search</span>(api_key=BRAVE_API_KEY), <span class="f">web_fetch</span>(), <span class="f">read_doc</span>()]
+    permissions = {<span class="s">"bash"</span>: <span class="s">"allow"</span>}
+
+
+<span class="k">async</span> <span class="k">def</span> <span class="f">main</span>() -&gt; <span class="k">None</span>:
+    store = <span class="t">SQLiteStore</span>(<span class="s">"sessions.db"</span>)
+    <span class="k">await</span> store.<span class="f">setup</span>()
+    harness = <span class="t">Harness</span>(
+        <span class="t">OpenAICompatible</span>(<span class="s">"https://api.openai.com/v1"</span>, OPENAI_API_KEY),
+        store,
+        [<span class="t">Researcher</span>],
+        hooks=[<span class="t">ShellGuard</span>()],
+    )
+    session = <span class="k">await</span> harness.<span class="f">create_session</span>(<span class="t">Researcher</span>)
+    <span class="k">async for</span> emitted <span class="k">in</span> harness.<span class="f">run</span>(session.id, <span class="s">"What changed in Python 3.13?"</span>):
+        <span class="k">if</span> <span class="f">isinstance</span>(emitted.event, <span class="t">TextDelta</span>):
+            <span class="f">print</span>(emitted.event.text, end=<span class="s">""</span>, flush=<span class="k">True</span>)
+
+
+asyncio.<span class="f">run</span>(<span class="f">main</span>())</pre>
+        </div>
+        <p class="note">
+          <code>harness.run(...)</code> is an async iterator of <code>Emitted</code>. The turn only advances while the
+          stream is consumed.
+        </p>
+      </div>
+
+      <section class="pitch wrap">
+        <h2 class="sect">Why</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>The loop is the library</h3>
+            <p>
+              The harness runs the turn. Tools, hooks, skills and memory plug into it. You write an
+              <code>Agent</code> — values and function references — not an orchestration layer.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Durable, re-entrant turns</h3>
+            <p>
+              A turn can suspend on a question and resume in another process. Agents hold no live I/O, so a resume
+              looks the agent up by name from the persisted session header.
+            </p>
+          </div>
+          <div class="card">
+            <h3>One engine, many drivers</h3>
+            <p>
+              A CLI, an HTTP server and a background worker share one <code>Harness</code>. The loop never learns
+              which one it is running under.
+            </p>
+          </div>
+          <div class="card">
+            <h3>Declarative, FastAPI-style</h3>
+            <p>
+              Tools are built by factories — <code>web_search(api_key=...)</code> — in your own module. Keys are
+              per-agent and a misconfiguration fails at construction, not mid-turn. The library never reads the
+              environment.
+            </p>
+          </div>
+          <div class="card wide">
+            <h3>Tools ship as extras</h3>
+            <p>
+              The base install is <code>pydantic</code>, <code>httpx</code>, <code>openai</code> — plus stdlib
+              <code>bash</code> and <code>ShellGuard</code>. <code>[web]</code> adds <code>web_search</code> and
+              <code>web_fetch</code>; <code>[doc]</code> adds <code>read_doc</code>; <code>[postgres]</code> adds the
+              driver <code>PostgresStore</code> needs. Nothing you did not ask for is imported.
+            </p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap foot">
+        <span>Apache-2.0</span>
+        <nav>
+          <a href="https://malayh.github.io/tantra/docs/">Docs</a>
+          <a href="https://github.com/malayh/tantra">GitHub</a>
+        </nav>
+      </div>
+    </footer>
+
+    <script>
+      document.querySelectorAll("button.copy").forEach(function (button) {
+        button.addEventListener("click", function () {
+          var source = document.getElementById(button.dataset.copy);
+          if (!source) return;
+          navigator.clipboard.writeText(source.textContent).then(function () {
+            button.textContent = "Copied";
+            button.dataset.done = "1";
+            setTimeout(function () {
+              button.textContent = "Copy";
+              delete button.dataset.done;
+            }, 1600);
+          }).catch(function () {
+            button.textContent = "Copy failed";
+            setTimeout(function () {
+              button.textContent = "Copy";
+            }, 1600);
+          });
+        });
+      });
+    </script>
+  </body>
+</html>

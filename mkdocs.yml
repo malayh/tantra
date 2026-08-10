@@ -1,0 +1,84 @@
+site_name: tantra
+site_description: The agent turn loop as a library.
+site_url: https://malayh.github.io/tantra/docs/
+repo_url: https://github.com/malayh/tantra
+repo_name: malayh/tantra
+copyright: Apache-2.0
+
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - toc.follow
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - tables
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Install: getting-started/install.md
+      - Quickstart: getting-started/quickstart.md
+  - Concepts:
+      - The turn loop: concepts/turn-loop.md
+      - Agent, Session, Harness: concepts/architecture.md
+      - Durability & resume: concepts/durability.md
+  - Guides:
+      - Defining tools: guides/tools.md
+      - Shell & ShellGuard: guides/shell.md
+      - Web search: guides/web-search.md
+      - Web fetch: guides/web-fetch.md
+      - Reading documents: guides/read-doc.md
+      - Permissions & hooks: guides/permissions-hooks.md
+      - Skills: guides/skills.md
+      - Memory: guides/memory.md
+      - Subagents & fan-out: guides/subagents.md
+      - Storage backends: guides/storage.md
+      - Providers: guides/providers.md
+      - Compaction: guides/compaction.md
+  - Reference:
+      - Agent: reference/agent.md
+      - Harness: reference/harness.md
+      - Loop & events flow: reference/loop.md
+      - Tools: reference/tools.md
+      - Context: reference/context.md
+      - Events: reference/events.md
+      - Ask: reference/ask.md
+      - Hooks: reference/hooks.md
+      - Permissions: reference/permissions.md
+      - Compaction: reference/compaction.md
+      - Memory: reference/memory.md
+      - Skills: reference/skills.md
+      - Errors: reference/errors.md
+      - Providers: reference/providers.md
+      - Stores: reference/stores.md
+      - Extra tools: reference/extratools.md
+  - Sharp edges: sharp-edges.md

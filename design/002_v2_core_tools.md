@@ -106,7 +106,7 @@ Kalki's `page.py` is the template; every listed weakness gets fixed:
 ## Sharp edges
 - **Only `str(exc)` reaches the model** (`loop.py:511`) and `is_error` is dropped on the wire (`openai_compat.py:36`) — the error string is the entire error contract. Every raise in these tools must be self-describing and actionable by the model.
 - **`@tool` output is uncallable** — tests exercise tools via `await tool.invoke({...}, ctx)`, never direct calls.
-- **`ctx` injection is by annotation** (`tools.py:94`): `ctx: Context` exactly; `ctx: Context | None` leaks into the model-facing schema as a broken param.
+- **`ctx` injection is by annotation** (`tools.py:94`): `ctx: Context` exactly; ~~`ctx: Context | None` leaks into the model-facing schema as a broken param~~ **corrected in P5 (docs review, verified by execution).** `ctx: Context | None` raises `PydanticSchemaGenerationError` at `@tool` decoration (import) time — the union isn't stripped and pydantic can't schema `Context`. Only *unannotated* `ctx` survives decoration and is rejected at `Harness` construction.
 - **Import-cycle landmine:** `tools.py` imports `Store`/`Memory` under `TYPE_CHECKING` only. `extratools` modules must not runtime-import from `tantra.stores`/`tantra.memory` — none of these need to.
 - **Reserved tool names** `skill` and `submit_output` — ours don't collide; keep it that way.
 - **Extras are all installed in dev** (psycopg precedent: also in the dev group), so the missing-extra path never runs in `just test` by accident — it needs the explicit ImportError-message tests in each phase.
@@ -208,8 +208,8 @@ P5's concept/core-library pages depend only on P0 (they document v1 surface); it
   - `.gitattributes` pins `*.pdf`/`*.docx` binary — sample.pdf otherwise commits as text and CRLF conversion silently breaks its xref offsets (pypdf auto-recovers with a warning, hiding the corruption).
   - sample.docx is 36KB — python-docx's floor for a valid package (sample.pdf is 639 bytes); not bloat.
 
-### Phase 5 — docs site · deps: P1–P4 · —
-- Repo layout: `docs/` (markdown + `mkdocs.yml`), `landing/` (`index.html` + assets, self-contained, no build step). `mkdocs-material` added to the root dev group; `just docs` recipe runs `mkdocs serve`.
+### Phase 5 — docs site · deps: P1–P4 · CODE DONE — deploy verification pending
+- Repo layout: `docs/` (markdown + ~~`mkdocs.yml`~~ **changed in P5.** `mkdocs.yml` at repo root — mkdocs requires `docs_dir` ≠ the config file's dir), `landing/` (`index.html` + assets, self-contained, no build step). `mkdocs-material` added to the root dev group; `just docs` recipe runs `mkdocs serve`.
 - `mkdocs.yml`: Material theme, `site_url: https://malayh.github.io/tantra/docs/`, `--strict` builds (broken internal links fail CI).
 - Landing page: what tantra is (harness framework — the turn loop as a library), the pitch (durable/re-entrant turns, one engine many drivers, FastAPI-style posture), install command, a real code sample (Agent + tools + Harness), links to docs and GitHub. Designed, not a theme default — this is the "look nice" requirement.
 - Docs nav (each page hand-written, sourced from `design/001_v1_spec.md` and this spec — the spec's landed notes are the only existing documentation):
@@ -221,13 +221,21 @@ P5's concept/core-library pages depend only on P0 (they document v1 surface); it
 - `.github/workflows/docs.yml`: on push to `main` — `mkdocs build --strict --site-dir out/docs`, copy `landing/` into `out/`, deploy `out/` to GitHub Pages.
 - **Verify:** `mkdocs build --strict` passes; deployed site serves the landing at `malayh.github.io/tantra/` and docs at `/tantra/docs/`; every code sample in the docs is lifted from a working test or example, not written freehand.
 - Checklist:
-  - [ ] mkdocs scaffold + `just docs` + dev dep
-  - [ ] landing page designed and self-contained
-  - [ ] getting started + concepts pages
-  - [ ] guides (core + one per new tool)
-  - [ ] reference pages
-  - [ ] sharp edges page
+  - [x] mkdocs scaffold + `just docs` + dev dep
+  - [x] landing page designed and self-contained
+  - [x] getting started + concepts pages
+  - [x] guides (core + one per new tool)
+  - [x] reference pages
+  - [x] sharp edges page
   - [ ] deploy workflow live, site reachable
+- Landed notes:
+  - Reference is per-module (16 pages, user decision); guides carry the prose, `reference/extratools.md` carries only signatures.
+  - Every runnable sample was executed (11 scratch scripts) and each documented output block is the captured stdout; review re-executed all of them independently.
+  - Review killed two false spec-inherited claims before ship: 001 L301's "in-flight tool gets an asyncio cancellation" (nothing cancels the running task — `state.cancelled` is only read between calls, `loop.py:602`) and "missing `StreamEnd` is retryable" (no `retryable`/`status_code` → `is_retryable` False → straight to `TurnFailed`).
+  - `from tantra.extratools.web import web_search` needs `[web]` even though `search.py` only uses httpx — `web/__init__.py` imports `fetch` first. Documented as-is.
+  - 001 L249's `load_prompt(path)` was never implemented — docs document `str` | callable prompts only.
+  - `uv sync --locked` at workspace root prunes an `--all-packages` venv locally (fine in CI, which only needs the root dev group); re-run `uv sync --all-packages` after.
+  - Pages enabled via `gh api -X POST repos/malayh/tantra/pages -f build_type=workflow`; landing served at `/tantra/`, docs at `/tantra/docs/` from one artifact (`out/` = landing + `out/docs`).
 
 ### Phase 6 — release: tantra-harness on PyPI · ~~deps: P1–P5~~ **changed:** built before P5 (user pulled release ahead so webapp work can start in parallel; README docs links 404 until P5) · CODE DONE — live publish pending (manual)
 - `packages/tantra/pyproject.toml`: `name = "tantra-harness"`, `version = "0.1.0"`; hatch wheel target still `src/tantra`; minimal `README.md` (what it is, install matrix incl. extras, the import-name-collision note vs PyPI `tantra`, link to the docs site); `src/tantra/py.typed` + hatch inclusion.

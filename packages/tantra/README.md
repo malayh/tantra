@@ -15,9 +15,9 @@ The agent turn loop as a library. Install name `tantra-harness`, import name `ta
 | Command | Adds |
 |---|---|
 | `pip install tantra-harness` | core + `tantra.extratools.shell` (`bash`, `ShellGuard`) |
-| `pip install tantra-harness[web]` | `web_search` (Brave) + `web_fetch` |
-| `pip install tantra-harness[doc]` | `read_doc` for PDF / docx |
-| `pip install tantra-harness[postgres]` | the psycopg driver `PostgresStore` needs to run (it imports without the extra) |
+| `pip install "tantra-harness[web]"` | `web_search` (Brave) + `web_fetch` |
+| `pip install "tantra-harness[doc]"` | `read_doc` for PDF / docx |
+| `pip install "tantra-harness[postgres]"` | the psycopg driver that `PostgresStore` needs at use time; the class itself imports without it |
 | `pip install "tantra-harness[web,doc]"` | combine freely |
 
 **Import-name collision.** The unrelated PyPI project `tantra` also installs an `import tantra`. Installing both into one environment clobbers the import silently. Do not co-install them.

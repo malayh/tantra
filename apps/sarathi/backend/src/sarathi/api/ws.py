@@ -77,6 +77,15 @@ class Connection:
                 if isinstance(emitted.event, ChildSessionSpawned):
                     await self.replay(emitted.event.child_session_id)
 
+    async def descendants(self, sid: str) -> list[str]:
+        found: list[str] = []
+        async for stamped in self.harness.store.read(sid):
+            if isinstance(stamped.event, ChildSessionSpawned):
+                child = stamped.event.child_session_id
+                found.extend(await self.descendants(child))
+                found.append(child)
+        return found
+
     async def incomplete(self, sid: str) -> bool:
         last: Any = None
         async for stamped in self.harness.store.read(sid):
@@ -110,10 +119,11 @@ class Connection:
             except ValidationError:
                 continue
             if isinstance(frame, CancelFrame):
-                try:
-                    await self.harness.cancel(self.sid)
-                except TantraError as exc:
-                    await self.send(ServerErrorFrame(message=str(exc)))
+                for target in [*await self.descendants(self.sid), self.sid]:
+                    try:
+                        await self.harness.cancel(target)
+                    except TantraError as exc:
+                        await self.send(ServerErrorFrame(message=str(exc)))
                 continue
             await self.queue.put(frame)
 

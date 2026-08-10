@@ -75,6 +75,7 @@ class Researcher(Agent):
     prompt = (
         "You are a research subagent. Work the task with web_search and web_fetch: search, judge the hits, "
         "read the most promising pages, and follow up when a source is thin. "
+        "Only fetch a URL that came from a web_search result or from the task itself — never guess or build one. "
         "Report concrete findings with the URLs you actually read, and say plainly what you could not confirm."
     )
     tools = []
@@ -86,6 +87,7 @@ class Sarathi(Agent):
         "Answer clearly and concisely, and use markdown when it helps. "
         "You can search the web with web_search, read a page with web_fetch, and read an attached PDF or Word "
         "file with read_doc(path) using the path from an [attachment: name path=...] marker in the user's message. "
+        "Only fetch a URL that came from a web_search result or that the user gave you — never guess or build one. "
         "Save durable facts the user tells you about themselves with memory_write, and look them up "
         "again with memory_recall when they would change your answer. "
         "Hand deep or wide research to the researcher subagent and synthesise what it reports."

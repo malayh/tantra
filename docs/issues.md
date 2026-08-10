@@ -51,6 +51,24 @@ Warts and suspected bugs in tantra core, hit while building `apps/sarathi`. Cand
 - Repro: `MemoryStore` + `FakeProvider`, patch `metadata["model"]` on `TurnStarted` → header after the turn shows the old value.
 - Workaround: sarathi disables the model picker while a turn is running and writes titles only after the turn generator is fully drained (post-`_settle`), re-reading the header immediately before the write. A library fix would be an `expect` token on `put_header` or a narrow `patch_metadata` op.
 
+## `harness.cancel` is single-session; no way to cancel a session tree
+
+- `cancel(sid)` appends `CancelRequested` to that one log (`harness.py:441-459`); a running child loop only checks its own log, and the parent is blocked inside the subagent tool call — so cancelling the root does nothing until the child's whole turn finishes.
+- Stop/cancel UX is broken for any app using subagents unless the app re-implements tree discovery.
+- Workaround: sarathi walks `ChildSessionSpawned` events recursively and cancels descendants deepest-first, then the root (`api/ws.py`). A `cancel(sid, recursive=True)` on the harness would remove the app-side walk.
+
+## Cancel is only observed at store boundaries
+
+- The loop checks `state.cancelled` before each sample (`loop.py:726`) and before each tool call (`loop.py:602`); an in-flight sample stream or tool call runs to completion first.
+- A stop press during a long generation or a slow tool (e.g. web_fetch) appears ignored for the remainder of that step; nothing cooperatively interrupts the provider stream or tool coroutine.
+- No workaround at the app level; latency is bounded by the current step. A library fix would poll for cancel during streaming or cancel the sample/tool task.
+
+## Cancel landing on a turn's final sample is silently dropped
+
+- After a sample, `_append(self._parts(...))` absorbs a concurrent `CancelRequested` (setting `state.cancelled`) to resolve its `SeqConflict`, but the no-tool-calls branch goes straight to `_terminal("completed", None)` without re-checking the flag (`loop.py:773-782`).
+- A cancel that arrives mid-sample when that sample turns out to be the last one yields `stop_reason="completed"` — the cancel is recorded in the log yet has no effect.
+- Repro: gate FakeProvider mid-sample on a text-only sample, append cancel, release. Workaround: none app-side; sarathi's test scripts the cancelled sample with a trailing tool call so the loop reaches `_after_batch`, which does check. Fix is a one-line `state.cancelled` guard before that `_terminal("completed")`.
+
 ## Provider reads only the `reasoning` delta field
 
 - `openai_compat.py:129` reads `delta.reasoning`; endpoints emitting `reasoning_content` (DeepSeek-style) stream no thoughts.

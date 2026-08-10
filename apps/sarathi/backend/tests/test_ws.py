@@ -476,6 +476,49 @@ async def test_cancel_mid_sample_ends_the_turn_cancelled_without_running_the_chi
     assert all(frame["session_id"] == sid for frame in turn)
 
 
+async def test_cancel_mid_child_sample_ends_the_child_and_the_parent_cancelled(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend(
+        [
+            Sample(tool_calls=[ToolCall(id="d1", name="researcher", args='{"task": "look"}')]),
+            Sample(text="child findings", tool_calls=[ToolCall(id="c1", name="nonexistent", args="{}")]),
+            Sample(text="Cancelled Research"),
+        ]
+    )
+    token = await signup()
+    sid = await new_session(token)
+    provider.gate.clear()
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("research it"))
+        streaming = await _until(ws, "text_delta")
+        spawned = next(frame for frame in streaming if _kind(frame) == "child_session_spawned")
+        child_sid = spawned["event"]["child_session_id"]
+        assert streaming[-1]["session_id"] == child_sid
+
+        await _send(ws, {"type": "cancel"})
+        await _cancel_recorded(store, child_sid)
+        await _cancel_recorded(store, sid)
+        provider.gate.set()
+        turn = await _turn(ws, sid)
+
+    child = [frame for frame in turn if frame["session_id"] == child_sid and _kind(frame) == "turn_completed"]
+    assert [frame["event"]["stop_reason"] for frame in child] == ["cancelled"]
+    assert turn[-1]["event"]["stop_reason"] == "cancelled"
+
+    delegate = next(
+        frame for frame in turn if _kind(frame) == "tool_call_completed" and frame["event"]["call_id"] == "d1"
+    )
+    assert delegate["event"]["is_error"] is True
+    assert "cancelled" in delegate["event"]["result"]
+
+
 async def test_attachment_outside_the_user_directory_is_refused(
     socket: Socket,
     provider: SharedProvider,

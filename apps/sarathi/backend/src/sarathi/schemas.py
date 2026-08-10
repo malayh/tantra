@@ -5,6 +5,25 @@ from pydantic import BaseModel, Discriminator, Field
 from tantra import Emitted
 
 
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+
+
+class UserOut(BaseModel):
+    id: int
+    email: str
+
+
 class Attachment(BaseModel):
     path: str
     name: str

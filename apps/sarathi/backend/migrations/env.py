@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlalchemy.pool import NullPool
 
 from sarathi.config import get_settings
-from sarathi.db import Base
+from sarathi.models import Base
 
 config = context.config
 config.set_main_option("sqlalchemy.url", get_settings().DATABASE_URL.replace("%", "%%"))

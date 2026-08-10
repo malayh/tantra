@@ -175,15 +175,21 @@ Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7. P3/P4/P5 look indep
   - Sarathi tests are NOT in root pytest `testpaths` — backend `just test` is the gate; root `just test` proves only tantra/agni.
   - `ClientFrame` uses `pydantic.Discriminator("type")` (a `Field(discriminator=...)` in `Annotated` makes FastAPI infer a query param).
 
-### Phase 1 — Auth · deps: P0 · —
+### Phase 1 — Auth · deps: P0 · ✅ done 2026-08-10
 - `models.User` + alembic migration; signup/login/me endpoints; `CurrentUser`/`CurrentUserWS` deps.
 - ui: NextAuth credentials, `/login` + `/signup` pages, `middleware.ts` guard, axios interceptor + token cache.
 - **Verify:** in-browser signup → login → `/chat` shell; logged-out `/chat` redirects; pytest covers wrong-password, duplicate-email, expired-token via ASGI transport.
 - Checklist:
-  - [ ] users table + migration
-  - [ ] auth endpoints + JWT deps
-  - [ ] login/signup UI + middleware
-  - [ ] auth tests
+  - [x] users table + migration
+  - [x] auth endpoints + JWT deps
+  - [x] login/signup UI + middleware
+  - [x] auth tests
+- P1 notes:
+  - Env vars added: `NEXTAUTH_SECRET` (required, compose `:?` guard), `NEXTAUTH_URL`, `API_URL_INTERNAL` (NextAuth `authorize()` runs server-side in the ui container where `localhost:8000` is unreachable; compose sets `http://backend:8000`).
+  - `CurrentUser` uses `HTTPBearer` (not `OAuth2PasswordBearer`) — login is a JSON body, not an OAuth2 form.
+  - Duplicate signup handled by `IntegrityError → 409` on the unique index (no SELECT pre-check; concurrent-safe).
+  - Bare-metal `yarn dev` needs `NEXTAUTH_SECRET` in `ui/.env.local` (Next doesn't read `apps/sarathi/.env`); without it `withAuth` redirects to a Configuration error page, not `/login`. Compose path unaffected.
+  - No logout UI yet — P2 sidebar user menu owns it; `clearToken()` is exported and already called on login/signup account switch.
 
 ### Phase 2 — Core chat loop · deps: P1 · —
 - `provider.py` `ReasoningCompat`; `agent.py` `Sarathi` (no tools yet), `make_store`/`make_harness`, `deps_factory`; `store.setup()` in lifespan.

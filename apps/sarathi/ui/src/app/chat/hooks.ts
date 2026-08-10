@@ -82,8 +82,8 @@ export const useChatSocket = (sessionId: string, store: ChatStore) => {
 
   useEffect(() => {
     if (!ready) return;
-    const text = pendingFirstMessage.take(sessionId);
-    if (text) sendFrame({ type: "user_message", text, attachments: [] });
+    const message = pendingFirstMessage.take(sessionId);
+    if (message) sendFrame({ type: "user_message", text: message.text, attachments: message.attachments });
   }, [ready, sessionId, sendFrame]);
 
   return { sendFrame, connected: readyState === ReadyState.OPEN, ready, running };

@@ -84,7 +84,7 @@ apps/sarathi/
 | `PATCH /sessions/{id}` | `{model}` — model picker; validated against `SARATHI_MODELS`; ownership check on metadata |
 | `GET /memory` | `store.memory_all()` filtered to `metadata.user == uid` |
 | `DELETE /memory/{id}` | ownership check, then `memory.delete(id)` |
-| `POST /uploads` | multipart; pdf/docx/txt, ≤20 MB; saved `UPLOAD_DIR/{uid}/{uuid}_{name}`; → `{path, name}` |
+| `POST /uploads` | multipart; ~~pdf/docx/txt~~ pdf/docx (**Changed in P3.** `read_doc` reads only `.pdf`/`.docx`; a `.txt` attachment would produce a model-facing error), ≤20 MB; saved `UPLOAD_DIR/{uid}/{uuid}_{name}`; → `{path, name}` |
 | `GET /models` | from `SARATHI_MODELS` |
 | `POST /meta/ws-types` | schema-only dummy (observability_ui `agents.py:19` trick): request = client-frame union, response = server-frame union incl. tantra `SessionEvent` + delta models, so orval generates TS types for the whole WS vocabulary |
 - `FastAPI(separate_input_output_schemas=False, generate_unique_id_function=...)`.
@@ -213,16 +213,26 @@ Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7. P3/P4/P5 look indep
   - Dark theme made the default now (`<html className="dark">`); the toggle stays in P5.
   - Real-endpoint streaming verify deferred — no `OPENAI_*` creds available; compose smoke (signup → session → WS replay/turn/reconnect/1008) + FakeProvider frame-order suite ran instead. Run the real-endpoint pass alongside P3 verify.
 
-### Phase 3 — Tools, subagent, attachments · deps: P2 · —
+### Phase 3 — Tools, subagent, attachments · deps: P2 · ✅ done 2026-08-10
 - Wire `web_search(BRAVE_API_KEY)`, `web_fetch()`, `read_doc()` onto `Sarathi`; add `Researcher` subagent.
 - `POST /uploads` + validation; composer paperclip; attachment markers appended to input, regex-stripped to chips on render.
 - Transcript: tool chips (spinner/result/progress), subagent collapsed blocks keyed by child `session_id`; reconnect walk renders finished child blocks from replay.
 - **Verify:** research question shows search+fetch chips then a cited answer; "deep research" shows a nested Researcher block; uploaded `fixtures/sample.pdf` gets summarized via a visible `read_doc` chip; oversized/wrong-type upload rejected with a toast; pytest covers upload validation and the attachment-marker round-trip.
 - Checklist:
-  - [ ] tools + Researcher on Sarathi
-  - [ ] uploads endpoint + paperclip
-  - [ ] tool chip + subagent block UI
-  - [ ] child replay on reconnect
+  - [x] tools + Researcher on Sarathi
+  - [x] uploads endpoint + paperclip
+  - [x] tool chip + subagent block UI
+  - [x] child replay on reconnect
+- P3 notes:
+  - Tools wired lazily: `@cache _wire_tools()` called from `make_harness` sets `Sarathi.tools`/`Researcher.tools` (module-level `get_settings()` would break conftest import order). Empty `BRAVE_API_KEY` drops `web_search` silently instead of crashing at construction.
+  - Attachment path guard added in `run_turn` (unspecced): every attachment path must resolve under `UPLOAD_DIR/{uid}/` else `server_error` and no turn — client controls the frame, and unguarded it's arbitrary-PDF read + cross-user access. Verified prefix/`..`/symlink bypasses fail (`Path.resolve` + `is_relative_to` on both sides).
+  - Tool-chip spinner keys on `tool_call_requested`→`tool_call_completed`, never `tool_call_started` — Started is skipped on every error path (unknown tool, bad args, deny). Live order is Requested → SampleCompleted → Started → Completed.
+  - `ToolCallStarted` precedes `ChildSessionSpawned` live; replay splices child frames right after `child_session_spawned`. Replayed child frames carry `depth: 0` (each session replays as its own root) — subagent blocks group by child `session_id` only, never depth.
+  - A subagent turn emits two `turn_completed`s (child then parent); everything waiting on turn end filters by `session_id`.
+  - The delegate's tool chip is replaced in place by the subagent block on `child_session_spawned` (same `call_id`; appending would double-render one call); delegate `result` renders only when `is_error` (success duplicates the child's own text).
+  - Shipped tools emit no `tool_progress` (none take `ctx`) — chips show spinner-only between requested/completed; progress rendering is built anyway with `(call_id, message)` dedupe returning identical state on duplicates (no re-render).
+  - Stop→`cancelled` behavioral test landed (P2 deferral resolved): gate-parked tool sample + WS cancel frame → `turn_completed(stop_reason="cancelled")`, no tool started, no child spawned.
+  - Compose smoke ran live: upload 201 (`{uid}/{uuid}_{name}` on disk)/415/413/401, guard `server_error` on foreign path, marker round-trip in `turn_started.input`. Real-endpoint behavioral pass (cited answer, Researcher block, PDF summarized, live stop) still needs `OPENAI_*` (+`BRAVE_API_KEY`) creds — deferred to the P7 runbook alongside the P2 streaming deferral.
 
 ### Phase 4 — Memory + approval flow · deps: P3 · —
 - User-scoped `memory_write`/`memory_recall` tools; `permissions={"memory_write": "ask"}`; optional embedder from `EMBEDDING_MODEL`.
@@ -269,7 +279,7 @@ Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7. P3/P4/P5 look indep
 
 ## Risks
 - **Endpoint emits no reasoning deltas** → thoughts UI is empty, a headline feature silently missing. Mitigation: `ReasoningCompat` covers both known field names; runbook scenario 2 SKIPs loudly with the endpoint named; README recommends a known-good endpoint/model pair.
-- **Tantra v2 tools not actually landed** (spec assumes v2 complete; today `web_search`/`web_fetch`/`read_doc` are `NotImplementedError` stubs) — P3 hard-blocks on tantra v2 P2–P4. Signatures are frozen, so P0–P2 proceed regardless.
+- ~~**Tantra v2 tools not actually landed** (spec assumes v2 complete; today `web_search`/`web_fetch`/`read_doc` are `NotImplementedError` stubs) — P3 hard-blocks on tantra v2 P2–P4. Signatures are frozen, so P0–P2 proceed regardless.~~ **Resolved in P3.** All three landed fully implemented in `tantra.extratools`.
 - **PostgresStore single connection per instance** — per-connection/request instances mitigate; if connection count becomes a problem at demo scale it won't, but note `close()` exists outside the frozen protocol for cleanup.
 - **Permission-ask response format assumed** ("allow"/"deny") — verified in P2 before the semantics freeze; frame shape unaffected either way.
 - **Replay/children asymmetry regressions** — the depth-first child walk is hand-rolled app code against a documented library gap; the P2 FakeProvider WS test pins frame order to catch drift.

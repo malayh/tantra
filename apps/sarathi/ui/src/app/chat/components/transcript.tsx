@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ChevronRight } from "lucide-react";
+import { Bot, ChevronRight, FileText, Globe, Loader2, Search, Wrench } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useStore } from "zustand";
 
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
-import type { ChatStore, TranscriptItem, Turn } from "../state";
+import type { ChatStore, SubagentItem, TextItem, ToolItem, TranscriptItem, Turn } from "../state";
 
 const MARKDOWN_CLASS = [
   "text-sm leading-relaxed [&>*+*]:mt-3",
@@ -22,7 +22,29 @@ const MARKDOWN_CLASS = [
   "[&_table]:w-full [&_th]:border-border [&_td]:border-border [&_th]:border [&_td]:border [&_th]:px-2 [&_td]:px-2",
 ].join(" ");
 
-function ThinkingBlock({ item }: { item: TranscriptItem }) {
+const TOOL_ICONS = { web_search: Search, web_fetch: Globe, read_doc: FileText } as const;
+
+const RESULT_LIMIT = 4000;
+const SUMMARY_LIMIT = 80;
+
+const stringify = (value: unknown): string =>
+  typeof value === "string" ? value : (JSON.stringify(value, null, 2) ?? "");
+
+const formatResult = (result: unknown): string => {
+  const text = stringify(result);
+  return text.length > RESULT_LIMIT ? `${text.slice(0, RESULT_LIMIT)}\n… truncated` : text;
+};
+
+const summarizeArgs = (args: Record<string, unknown>): string => {
+  const values = Object.values(args);
+  if (values.length === 0) return "";
+  const text = typeof values[0] === "string" ? values[0] : (JSON.stringify(values[0]) ?? "");
+  return text.length > SUMMARY_LIMIT ? `${text.slice(0, SUMMARY_LIMIT)}…` : text;
+};
+
+const itemKey = (item: TranscriptItem, index: number) => `${item.kind}-${item.sampleId}-${index}`;
+
+function ThinkingBlock({ item }: { item: TextItem }) {
   const [open, setOpen] = useState(!item.final);
 
   useEffect(() => {
@@ -49,7 +71,7 @@ function ThinkingBlock({ item }: { item: TranscriptItem }) {
   );
 }
 
-function TextBlock({ item }: { item: TranscriptItem }) {
+function TextBlock({ item }: { item: TextItem }) {
   return (
     <div className={MARKDOWN_CLASS}>
       <Markdown remarkPlugins={[remarkGfm]}>{item.content}</Markdown>
@@ -58,22 +80,124 @@ function TextBlock({ item }: { item: TranscriptItem }) {
   );
 }
 
+function ToolChip({ item }: { item: ToolItem }) {
+  const [open, setOpen] = useState(!item.final);
+
+  useEffect(() => {
+    setOpen(!item.final);
+  }, [item.final]);
+
+  const Icon = TOOL_ICONS[item.name as keyof typeof TOOL_ICONS] ?? Wrench;
+  const summary = summarizeArgs(item.args);
+  const result = formatResult(item.result);
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger
+        className={cn(
+          "text-muted-foreground hover:text-foreground flex w-full items-center gap-1.5 text-xs",
+          item.isError && "text-destructive",
+        )}
+      >
+        <ChevronRight className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")} />
+        <Icon className="size-3 shrink-0" />
+        <span className="font-medium">{item.name}</span>
+        {summary.length > 0 && <span className="truncate">{summary}</span>}
+        {!item.final && <Loader2 className="size-3 shrink-0 animate-spin" />}
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <div className="border-border mt-2 flex flex-col gap-2 border-l pl-3">
+          {item.progress.map((line, index) => (
+            <p key={`${index}-${line}`} className="text-muted-foreground text-xs">
+              {line}
+            </p>
+          ))}
+          {result.length > 0 && <pre className="bg-muted overflow-x-auto rounded-lg p-3 text-xs">{result}</pre>}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+function SubagentBlock({ item }: { item: SubagentItem }) {
+  const [open, setOpen] = useState(!item.final);
+
+  useEffect(() => {
+    setOpen(!item.final);
+  }, [item.final]);
+
+  const summary = summarizeArgs(item.args);
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger
+        className={cn(
+          "text-muted-foreground hover:text-foreground flex w-full items-center gap-1.5 text-xs",
+          item.isError && "text-destructive",
+        )}
+      >
+        <ChevronRight className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")} />
+        <Bot className="size-3 shrink-0" />
+        <span className="font-medium">{item.agent}</span>
+        {summary.length > 0 && <span className="truncate">{summary}</span>}
+        {!item.final && <Loader2 className="size-3 shrink-0 animate-spin" />}
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <div className="border-border mt-2 flex flex-col gap-3 border-l pl-3">
+          {item.items.map((nested, index) => (
+            <Item key={itemKey(nested, index)} item={nested} />
+          ))}
+          {item.isError && <p className="text-destructive text-xs">{formatResult(item.result)}</p>}
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+function Item({ item }: { item: TranscriptItem }) {
+  switch (item.kind) {
+    case "thinking":
+      return <ThinkingBlock item={item} />;
+    case "text":
+      return <TextBlock item={item} />;
+    case "tool":
+      return <ToolChip item={item} />;
+    case "subagent":
+      return <SubagentBlock item={item} />;
+  }
+}
+
 function TurnBlock({ turn }: { turn: Turn }) {
-  const empty = turn.items.every((item) => item.content.length === 0);
+  const empty = turn.items.every(
+    (item) => item.kind !== "tool" && item.kind !== "subagent" && item.content.length === 0,
+  );
 
   return (
     <div className="flex flex-col gap-3">
-      {turn.input.length > 0 && (
+      {(turn.input.length > 0 || turn.attachments.length > 0) && (
         <div className="flex justify-end">
-          <div className="bg-secondary text-secondary-foreground max-w-[80%] rounded-2xl px-4 py-2 text-sm whitespace-pre-wrap">
-            {turn.input}
+          <div className="bg-secondary text-secondary-foreground flex max-w-[80%] flex-col gap-2 rounded-2xl px-4 py-2 text-sm">
+            {turn.attachments.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {turn.attachments.map((attachment) => (
+                  <span
+                    key={attachment.path}
+                    className="bg-muted flex items-center gap-1 rounded-md px-2 py-0.5 text-xs"
+                  >
+                    <FileText className="size-3 shrink-0" />
+                    {attachment.name}
+                  </span>
+                ))}
+              </div>
+            )}
+            {turn.input.length > 0 && <span className="whitespace-pre-wrap">{turn.input}</span>}
           </div>
         </div>
       )}
 
       {turn.items.map((item, index) => (
-        <div key={`${item.kind}-${item.sampleId}-${index}`}>
-          {item.kind === "thinking" ? <ThinkingBlock item={item} /> : <TextBlock item={item} />}
+        <div key={itemKey(item, index)}>
+          <Item item={item} />
         </div>
       ))}
 

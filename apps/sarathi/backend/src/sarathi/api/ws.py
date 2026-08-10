@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sarathi.agent import FactoryDep, close_harness
 from sarathi.auth import resolve_user
+from sarathi.config import get_settings
 from sarathi.db import get_db
 from sarathi.schemas import (
     AskResponseFrame,
@@ -48,10 +50,11 @@ def _typed_response(kind: str, response: str) -> AskResponse:
 
 
 class Connection:
-    def __init__(self, websocket: WebSocket, harness: Harness, sid: str) -> None:
+    def __init__(self, websocket: WebSocket, harness: Harness, sid: str, uid: str) -> None:
         self.websocket = websocket
         self.harness = harness
         self.sid = sid
+        self.uid = uid
         self.asks: dict[str, tuple[str, str]] = {}
         self.queue: asyncio.Queue[UserMessageFrame | AskResponseFrame] = asyncio.Queue()
 
@@ -120,7 +123,14 @@ class Connection:
             else:
                 await self.answer_ask(frame)
 
+    def owns_attachments(self, frame: UserMessageFrame) -> bool:
+        root = (Path(get_settings().UPLOAD_DIR) / self.uid).resolve()
+        return all(Path(item.path).resolve().is_relative_to(root) for item in frame.attachments)
+
     async def run_turn(self, frame: UserMessageFrame) -> None:
+        if not self.owns_attachments(frame):
+            await self.send(ServerErrorFrame(message="invalid attachment path"))
+            return
         lines = [frame.text]
         lines.extend(f"[attachment: {item.name} path={item.path}]" for item in frame.attachments)
         header = await self.harness.store.header(self.sid)
@@ -159,7 +169,7 @@ async def session_socket(
             return
         harness.default_model = header.metadata.get("model") or harness.default_model
 
-        connection = Connection(websocket, harness, session_id)
+        connection = Connection(websocket, harness, session_id, str(user.id))
         await connection.replay(session_id)
         await connection.send(ReplayDoneFrame())
 

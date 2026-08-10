@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { getListSessionsQueryKey, useCreateSession } from "@/generated/api/sessions/sessions";
+import type { Attachment } from "@/generated/models";
 import { Composer } from "./components/composer";
 import { Sidebar } from "./components/sidebar";
 import { pendingFirstMessage } from "./state";
@@ -13,9 +14,9 @@ export default function ChatPage() {
   const queryClient = useQueryClient();
   const createSession = useCreateSession();
 
-  const onSend = async (text: string) => {
+  const onSend = async (text: string, attachments: Attachment[]) => {
     const created = await createSession.mutateAsync({ data: {} });
-    pendingFirstMessage.set(created.id, text);
+    pendingFirstMessage.set(created.id, text, attachments);
     queryClient.invalidateQueries({ queryKey: getListSessionsQueryKey() });
     router.push(`/chat/${created.id}`);
   };

@@ -44,9 +44,10 @@ export default function SessionPage() {
 
         <div className="mx-auto w-full max-w-3xl px-6 pb-6">
           <Composer
+            key={sessionId}
             disabled={!ready || running}
             running={running}
-            onSend={(text) => sendFrame({ type: "user_message", text, attachments: [] })}
+            onSend={(text, attachments) => sendFrame({ type: "user_message", text, attachments })}
             onStop={() => sendFrame({ type: "cancel" })}
           />
         </div>

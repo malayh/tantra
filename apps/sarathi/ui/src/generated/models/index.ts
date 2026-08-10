@@ -12,6 +12,7 @@ export * from './askAnswered';
 export * from './askRaised';
 export * from './askResponseFrame';
 export * from './attachment';
+export * from './bodyCreateUpload';
 export * from './busyFrame';
 export * from './cancelFrame';
 export * from './cancelRequested';

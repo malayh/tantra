@@ -1,7 +1,8 @@
 import asyncio
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from pathlib import Path
 
 import httpx
 import pytest
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from sarathi.agent import HarnessFactory, Sarathi, deps_factory, harness_factory
+from sarathi.config import get_settings
 from sarathi.db import get_db
 from sarathi.models import Base
 from tantra import FakeProvider, Harness, MemoryStore, Sample
@@ -55,6 +57,15 @@ async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         await connection.run_sync(Base.metadata.create_all)
     yield async_sessionmaker(engine, expire_on_commit=False)
     await engine.dispose()
+
+
+@pytest.fixture
+def upload_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    root = tmp_path / "uploads"
+    monkeypatch.setenv("UPLOAD_DIR", str(root))
+    get_settings.cache_clear()
+    yield root
+    get_settings.cache_clear()
 
 
 @pytest.fixture

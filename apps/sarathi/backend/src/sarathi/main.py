@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRoute
 
+from sarathi.agent import make_store
 from sarathi.api import auth, memory, meta, sessions, uploads, ws
 from sarathi.config import get_settings
 
@@ -13,6 +14,9 @@ from sarathi.config import get_settings
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     Path(get_settings().UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
+    store = make_store()
+    await store.setup()
+    await store.close()
     yield
 
 

@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Discriminator, Field
@@ -22,6 +23,22 @@ class TokenResponse(BaseModel):
 class UserOut(BaseModel):
     id: int
     email: str
+
+
+class SessionOut(BaseModel):
+    id: str
+    title: str | None = None
+    status: str
+    model: str | None = None
+    updated_at: datetime
+
+
+class CreateSessionRequest(BaseModel):
+    model: str | None = None
+
+
+class PatchSessionRequest(BaseModel):
+    model: str
 
 
 class Attachment(BaseModel):

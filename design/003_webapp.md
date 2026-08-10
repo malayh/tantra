@@ -68,7 +68,7 @@ apps/sarathi/
 - `make_harness(model)` → `Harness(provider=ReasoningCompat(base_url, key), store=make_store(), agents=[Sarathi], default_model=model, deps_factory=deps_factory, memory=BuiltinMemory(store, embedder), compactor=PruneThenSummarize(), skills=[])`.
 - `deps_factory(header)` → `{"user_id": header.metadata.get("user")}` — `.get`, because child-session headers may not carry user metadata; only the root agent has memory tools.
 - Embedder: `OpenAICompatibleEmbedder` iff `EMBEDDING_MODEL` set; else keyword-only recall (`MemoryHit.mode == "keyword"`), which is fine for the demo.
-- Pass real `limits={model: ModelLimits(...)}` where known; otherwise the 128k fallback misfires compaction thresholds — expose optional `SARATHI_CONTEXT_WINDOW` env applied to all listed models.
+- ~~Pass real `limits={model: ModelLimits(...)}` where known~~ **Changed in P2.** `Harness` has no `limits` param — limits live on the provider: `ReasoningCompat(..., limits={m: ModelLimits(...)})`, built iff `SARATHI_CONTEXT_WINDOW` is set (`max_output=8192`); otherwise the provider's 128k fallback applies.
 - Memory tools (in `agent.py`, docstrings are the model-facing descriptions per tantra convention):
   - `memory_write(ctx, content, kind)` → `ctx.memory.write(MemoryWrite(..., metadata={"user": ctx.deps["user_id"]}))`
   - `memory_recall(ctx, query)` → `ctx.memory.recall(query, metadata={"user": ctx.deps["user_id"]})`
@@ -91,7 +91,7 @@ apps/sarathi/
 - Every session/memory endpoint verifies ownership via metadata before acting — tantra's `list()` with a wrong filter returns everything (001 sharp edge).
 
 ## WS protocol — `GET /api/ws/sessions/{session_id}?token=`
-- Auth: JWT query param (browsers can't set WS headers). Ownership check on the session header before accepting.
+- Auth: JWT query param (browsers can't set WS headers). ~~Ownership check on the session header before accepting.~~ **Changed in P2.** Accept first, then check auth+ownership and close 1008 on failure — a pre-accept rejection can't carry a close code to the client.
 - **Server→client:** tantra `Emitted` JSON verbatim (`{session_id, depth, seq, event}` — distinguishable by the `event` key), plus app frames: `{"type": "replay_done"}`, `{"type": "busy", "retry_in": s}`, `{"type": "title_updated", "title"}`, `{"type": "server_error", "message"}`.
 - **Client→server:** `{"type": "user_message", "text", "attachments": [{"path", "name"}]}`, `{"type": "ask_response", "ask_id", "response"}`, `{"type": "cancel"}`.
 - **On connect:** replay root via `harness.replay(sid)`; `replay()` does NOT reproduce child events (001 sharp edge) — when a `child_session_spawned` event passes, depth-first replay that child from `store.list(parent_id=...)` before continuing. Then `replay_done`. Then: header `awaiting_input` → re-send the pending `AskRaised` so the approval card renders; turn incomplete (re-scan log, agni `repl.py:179` pattern — status alone is unreliable) → bare `resume(sid)` and pump. This reconnect-driven resume is the sweep; no background daemon.
@@ -107,7 +107,7 @@ apps/sarathi/
 - Routes: `/login`, `/signup`, `/` → redirect `/chat`, `/chat` (new-session landing), `/chat/[sessionId]`. Colocation convention: `app/chat/components|hooks|state.ts` own everything chat-specific; only true cross-route pieces in `src/components`.
 - Layout: left sidebar (new chat, session list with titles + `updated_at`, memory button → dialog, user menu) · chat pane (header: title + model picker dropdown + connection dot · transcript · composer: textarea, paperclip, send/stop toggle). Dark default with a working light/dark toggle (no `forcedTheme`).
 - **Transcript model** (Zustand store factory per session, `createChatStore(sid)` + `useMemo`): ordered turns; each turn = user message (attachment markers regex-stripped into chips) + ordered items: `thinking` (collapsed by default, shimmer + streams open while active), `text` (markdown, streaming cursor), `tool` chip (name + args summary; spinner between `tool_call_started`/`completed`; result JSON collapsed behind click; `tool_progress` lines inside), `subagent` block (all frames with `session_id` ≠ root grouped by child sid under its `child_session_spawned`, collapsed, badge = agent name + live spinner; `depth` available for nesting), `ask` card (request text + Approve/Deny → `ask_response`), `turn_failed` banner.
-- **Reducer rules from the gotcha list:** reset delta buffers on every `sample_started` (retried samples re-yield deltas — 001 known bug, no reset marker); on `text_part`/`reasoning_part` replace the accumulated delta text for that sample (persisted part is authoritative); duplicate `ToolProgress` after ask-resume is expected (pre-ask side effects re-run) — dedupe by `(call_id, message)`; history comes from persisted parts only.
+- **Reducer rules from the gotcha list:** reset delta buffers on every `sample_started` (~~retried samples re-yield deltas — 001 known bug, no reset marker~~ **Corrected in P2.** retries happen inside one `SampleStarted` with no second event, so the reset never fires for them — the `*_part` REPLACE rule is what actually cleans up re-yielded deltas; the reset stays as defense for multi-sample turns); on `text_part`/`reasoning_part` replace the accumulated delta text for that sample (persisted part is authoritative); duplicate `ToolProgress` after ask-resume is expected (pre-ask side effects re-run) — dedupe by `(call_id, message)`; history comes from persisted parts only.
 - States: composer disabled while turn running or ask pending; "thinking…" shimmer between `sample_started` and first delta; stop button visible while running; `busy` frame → toast with retry; WS reconnect (`react-use-websocket` auto) → clear transcript, full replay.
 - Login/logout, session switch = navigate; opening a session opens its WS.
 
@@ -191,18 +191,27 @@ Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7. P3/P4/P5 look indep
   - Bare-metal `yarn dev` needs `NEXTAUTH_SECRET` in `ui/.env.local` (Next doesn't read `apps/sarathi/.env`); without it `withAuth` redirects to a Configuration error page, not `/login`. Compose path unaffected.
   - No logout UI yet — P2 sidebar user menu owns it; `clearToken()` is exported and already called on login/signup account switch.
 
-### Phase 2 — Core chat loop · deps: P1 · —
+### Phase 2 — Core chat loop · deps: P1 · ✅ done 2026-08-10
 - `provider.py` `ReasoningCompat`; `agent.py` `Sarathi` (no tools yet), `make_store`/`make_harness`, `deps_factory`; `store.setup()` in lifespan.
 - Sessions REST (list/create/patch); WS endpoint: connect→replay(+children walk)→replay_done→pending-ask/incomplete-turn handling; user_message→run; cancel; busy/server_error frames; reader+pump task pair.
 - ui chat: sidebar (sessions via react-query), `createChatStore` reducer (delta buffers, sample_started reset, part-overwrites), transcript with markdown text + collapsed thinking + shimmer + streaming cursor, composer, stop button, reconnect-replays.
 - Confirm the permission-ask response contract (`"allow"`/`"deny"` vs other) from tantra's tests before freezing the `ask_response` payload semantics — the frame shape is frozen, the response string values are not.
 - **Verify:** against a real endpoint — send message, watch text stream token-by-token, thinking collapses; reload mid-turn → replay + auto-resume completes the turn; stop ends turn `cancelled`; pytest drives the WS via ASGI with `FakeProvider` asserting frame order (replay_done, deltas, parts, turn_completed) and busy-on-concurrent-run.
 - Checklist:
-  - [ ] provider subclass + harness factory
-  - [ ] sessions REST + ownership checks
-  - [ ] WS handler (replay/run/resume/cancel)
-  - [ ] transcript reducer + streaming UI
-  - [ ] WS pytest suite with FakeProvider
+  - [x] provider subclass + harness factory
+  - [x] sessions REST + ownership checks
+  - [x] WS handler (replay/run/resume/cancel)
+  - [x] transcript reducer + streaming UI
+  - [x] WS pytest suite with FakeProvider
+- P2 notes:
+  - `ask_response` semantics frozen: `resume` takes a typed `AskResponse`; the frame's `response` string maps by the pending ask's `request.kind` — approval: `"allow"` → `ApprovalResponse(allow=True)`, anything else → deny; choice → `ChoiceResponse(selected=response)`; free_text → `FreeTextResponse(text=response)`.
+  - Stop→`cancelled` is unverifiable until P3: with no tools a turn is one sample and `CancelRequested` only takes effect at store boundaries — a mid-sample cancel still ends `stop_reason="completed"`. Cancel wiring is in and tested for the no-op path; the behavioral check moves to P3's verify.
+  - `list_sessions` post-filters `parent_id is None` — children inherit parent metadata verbatim (incl. `kind: "root"`) and `list()` matches metadata as a subset, so the filter alone would leak subagent sessions into the sidebar.
+  - Per-connection/request teardown is `close_harness()` = `store.close()` + `provider.aclose()` (the provider holds an eager httpx client that otherwise leaks).
+  - WS auth/ownership failures accept-then-close 1008 (can't set a status before the handshake completes in FastAPI); reconnect stops on 1008 client-side, and a null cached token redirects to `/login` instead of connecting.
+  - `httpx-ws` added to backend dev deps (ASGI WS transport for pytest); disconnect-mid-turn test gates FakeProvider on an asyncio.Event to park the server mid-sample deterministically.
+  - Dark theme made the default now (`<html className="dark">`); the toggle stays in P5.
+  - Real-endpoint streaming verify deferred — no `OPENAI_*` creds available; compose smoke (signup → session → WS replay/turn/reconnect/1008) + FakeProvider frame-order suite ran instead. Run the real-endpoint pass alongside P3 verify.
 
 ### Phase 3 — Tools, subagent, attachments · deps: P2 · —
 - Wire `web_search(BRAVE_API_KEY)`, `web_fetch()`, `read_doc()` onto `Sarathi`; add `Researcher` subagent.

@@ -29,6 +29,9 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Sync package README from root
+        run: cp README.md packages/tantra/README.md
+
       - name: Build sdist and wheel
         run: uv build --package tantra-harness
 

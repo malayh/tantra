@@ -26,7 +26,7 @@ def test_tools_wire_without_a_brave_key(monkeypatch: pytest.MonkeyPatch, unwired
 
     _wire_tools()
 
-    assert _names(Sarathi) == ["web_fetch", "read_doc"]
+    assert _names(Sarathi) == ["web_fetch", "read_doc", "memory_write", "memory_recall"]
     assert _names(Researcher) == ["web_fetch"]
 
 
@@ -37,8 +37,12 @@ def test_tools_include_web_search_when_a_brave_key_is_set(monkeypatch: pytest.Mo
 
     _wire_tools()
 
-    assert _names(Sarathi) == ["web_search", "web_fetch", "read_doc"]
+    assert _names(Sarathi) == ["web_search", "web_fetch", "read_doc", "memory_write", "memory_recall"]
     assert _names(Researcher) == ["web_search", "web_fetch"]
+
+
+def test_memory_write_asks_before_it_runs() -> None:
+    assert Sarathi.permissions == {"memory_write": "ask"}
 
 
 def test_the_researcher_is_a_sarathi_subagent_with_a_delegate_description() -> None:

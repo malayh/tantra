@@ -11,7 +11,7 @@ from conftest import SharedProvider, SharedStore
 from httpx_ws import AsyncWebSocketSession, WebSocketDisconnect
 
 from sarathi.agent import HarnessFactory
-from tantra import Sample
+from tantra import BuiltinMemory, MemoryWrite, Sample
 from tantra.events import CancelRequested
 from tantra.providers.base import ToolCall
 
@@ -66,6 +66,15 @@ async def _cancel_recorded(store: SharedStore, sid: str) -> None:
 
 def _message(text: str) -> dict[str, Any]:
     return {"type": "user_message", "text": text, "attachments": []}
+
+
+def _write_call(content: str) -> ToolCall:
+    return ToolCall(id="m1", name="memory_write", args=json.dumps({"content": content, "kind": "preference"}))
+
+
+async def _answer(ws: AsyncWebSocketSession, frames: list[dict[str, Any]], response: str) -> None:
+    ask = next(frame for frame in frames if _kind(frame) == "ask_raised")["event"]
+    await _send(ws, {"type": "ask_response", "ask_id": ask["ask_id"], "response": response})
 
 
 async def _settled(store: SharedStore, sid: str) -> None:
@@ -494,3 +503,133 @@ async def test_attachment_outside_the_user_directory_is_refused(
     assert [_kind(frame) for frame in refused] == ["server_error"]
     assert refused[-1]["message"] == "invalid attachment path"
     assert turn[0]["event"]["input"] == "hi"
+
+
+async def test_memory_write_asks_first_then_writes_the_row_for_the_user(
+    socket: Socket,
+    client: httpx.AsyncClient,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend([Sample(tool_calls=[_write_call("prefers tea")]), Sample(text="saved")])
+    token = await signup()
+    uid = await _uid(client, token)
+    sid = await new_session(token)
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("remember I prefer tea"))
+        raised = await _until(ws, "ask_raised")
+
+        assert "turn_completed" not in [_kind(frame) for frame in raised]
+        assert "tool_call_started" not in [_kind(frame) for frame in raised]
+        assert raised[-1]["event"]["request"]["extra"] == {"permission": "memory_write"}
+
+        await _answer(ws, raised, "allow")
+        turn = await _turn(ws, sid)
+
+    kinds = [_kind(frame) for frame in turn]
+    assert kinds.index("ask_answered") < kinds.index("tool_call_started") < kinds.index("tool_call_completed")
+    completed = next(frame for frame in turn if _kind(frame) == "tool_call_completed")
+    assert completed["event"]["is_error"] is False
+    assert turn[-1]["event"]["stop_reason"] == "completed"
+
+    rows = await store.memory_all()
+    assert [(row.metadata.get("user"), row.body, row.kind) for row in rows] == [(uid, "prefers tea", "preference")]
+
+
+async def test_denying_the_memory_ask_completes_the_turn_without_writing(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend([Sample(tool_calls=[_write_call("prefers tea")]), Sample(text="not saved then")])
+    token = await signup()
+    sid = await new_session(token)
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("remember I prefer tea"))
+        raised = await _until(ws, "ask_raised")
+        await _answer(ws, raised, "deny")
+        turn = await _turn(ws, sid)
+
+    assert "tool_call_started" not in [_kind(frame) for frame in turn]
+    completed = next(frame for frame in turn if _kind(frame) == "tool_call_completed")
+    assert completed["event"]["is_error"] is True
+    assert completed["event"]["result"] == "denied by user"
+    assert turn[-1]["event"]["stop_reason"] == "completed"
+    assert await store.memory_all() == []
+
+
+async def test_a_pending_ask_survives_a_reconnect_and_still_writes(
+    socket: Socket,
+    client: httpx.AsyncClient,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend([Sample(tool_calls=[_write_call("prefers tea")]), Sample(text="saved")])
+    token = await signup()
+    uid = await _uid(client, token)
+    sid = await new_session(token)
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("remember I prefer tea"))
+        await _until(ws, "ask_raised")
+
+    await _settled(store, sid)
+
+    async with socket(sid, token) as ws:
+        replay = await _until(ws, "replay_done")
+        assert "ask_raised" in [_kind(frame) for frame in replay]
+        await _answer(ws, replay, "allow")
+        turn = await _turn(ws, sid)
+
+    assert "ask_raised" in [_kind(frame) for frame in turn]
+    assert [frame["event"]["text"] for frame in turn if _kind(frame) == "text_part"] == ["saved"]
+
+    rows = await store.memory_all()
+    assert [(row.metadata.get("user"), row.body) for row in rows] == [(uid, "prefers tea")]
+
+
+async def test_memory_recall_returns_only_the_callers_rows(
+    socket: Socket,
+    client: httpx.AsyncClient,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend(
+        [
+            Sample(tool_calls=[ToolCall(id="r1", name="memory_recall", args='{"query": "tea"}')]),
+            Sample(text="done"),
+        ]
+    )
+    token = await signup()
+    uid = await _uid(client, token)
+    memory = BuiltinMemory(store)
+    await memory.write(MemoryWrite(kind="preference", title="mine", body="drinks tea daily", metadata={"user": uid}))
+    await memory.write(
+        MemoryWrite(kind="preference", title="theirs", body="hates tea entirely", metadata={"user": "someone-else"})
+    )
+    sid = await new_session(token)
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("what do I drink"))
+        turn = await _turn(ws, sid)
+
+    assert "ask_raised" not in [_kind(frame) for frame in turn]
+    completed = next(
+        frame for frame in turn if _kind(frame) == "tool_call_completed" and frame["event"]["call_id"] == "r1"
+    )
+    assert [row["body"] for row in completed["event"]["result"]] == ["drinks tea daily"]
+    assert turn[-1]["event"]["stop_reason"] == "completed"

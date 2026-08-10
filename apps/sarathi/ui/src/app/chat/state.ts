@@ -1,6 +1,7 @@
 import { createStore } from "zustand/vanilla";
 
 import type {
+  AskRaised,
   AskResponseFrame,
   Attachment,
   BusyFrame,
@@ -52,7 +53,18 @@ export type SubagentItem = ItemBase & {
   isError: boolean;
 };
 
-export type TranscriptItem = TextItem | ToolItem | SubagentItem;
+export type AskItem = ItemBase & {
+  kind: "ask";
+  callId: string | null;
+  askId: string;
+  title: string;
+  body: string;
+  requestKind: string;
+  status: "pending" | "answered";
+  allow?: boolean;
+};
+
+export type TranscriptItem = TextItem | ToolItem | SubagentItem | AskItem;
 
 export type Turn = {
   id: string;
@@ -147,6 +159,53 @@ const completeCall = (items: TranscriptItem[], callId: string, result: unknown, 
   return items.map((item, position) => (position === index ? { ...item, result, isError, final: true } : item));
 };
 
+const askText = (request: AskRaised["request"]): { title: string; body: string } => {
+  if (request.kind === "free_text") return { title: request.prompt, body: "" };
+  if (request.kind === "choice") return { title: request.title, body: (request.options ?? []).join("\n") };
+  if (request.kind === "approval") return { title: request.title, body: request.body ?? "" };
+  return { title: "", body: "" };
+};
+
+const findAsk = (items: TranscriptItem[], match: (item: AskItem) => boolean): AskItem | null => {
+  for (const item of items) {
+    if (item.kind === "ask" && match(item)) return item;
+    if (item.kind === "subagent") {
+      const nested = findAsk(item.items, match);
+      if (nested !== null) return nested;
+    }
+  }
+  return null;
+};
+
+const answerAsk = (items: TranscriptItem[], askId: string, allow: boolean | undefined): TranscriptItem[] => {
+  let changed = false;
+
+  const next = items.map((item): TranscriptItem => {
+    if (item.kind === "ask" && item.askId === askId && item.status === "pending") {
+      changed = true;
+      return { ...item, status: "answered", allow };
+    }
+    if (item.kind === "subagent") {
+      const nested = answerAsk(item.items, askId, allow);
+      if (nested !== item.items) {
+        changed = true;
+        return { ...item, items: nested };
+      }
+    }
+    return item;
+  });
+
+  return changed ? next : items;
+};
+
+export const pendingAsk = (turns: Turn[]): { askId: string } | null => {
+  const last = turns[turns.length - 1];
+  if (last === undefined) return null;
+
+  const found = findAsk(last.items, (item) => item.status === "pending");
+  return found === null ? null : { askId: found.askId };
+};
+
 type ItemScope = { items: TranscriptItem[]; sampleId: string | null };
 
 const reduceItems = (scope: ItemScope, event: SessionEvent): ItemScope => {
@@ -197,6 +256,32 @@ const reduceItems = (scope: ItemScope, event: SessionEvent): ItemScope => {
       return { ...scope, items: addProgress(scope.items, event.call_id, event.message) };
     case "tool_call_completed":
       return { ...scope, items: completeCall(scope.items, event.call_id, event.result, event.is_error ?? false) };
+    case "ask_raised": {
+      if (findAsk(scope.items, (item) => item.askId === event.ask_id) !== null) return scope;
+      const { title, body } = askText(event.request);
+      return {
+        ...scope,
+        items: [
+          ...scope.items,
+          {
+            kind: "ask",
+            askId: event.ask_id,
+            callId: event.call_id ?? null,
+            title,
+            body,
+            requestKind: event.request.kind ?? "approval",
+            status: "pending",
+            sampleId: openSample,
+            content: "",
+            final: true,
+          },
+        ],
+      };
+    }
+    case "ask_answered": {
+      const allow = event.response.kind === "approval" ? event.response.allow : undefined;
+      return { ...scope, items: answerAsk(scope.items, event.ask_id, allow) };
+    }
     case "child_session_spawned": {
       const index = scope.items.findIndex((item) => item.kind === "tool" && item.callId === event.call_id);
       const requested = index === -1 ? null : (scope.items[index] as ToolItem);

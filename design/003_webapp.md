@@ -156,6 +156,7 @@ Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7. P3/P4/P5 look indep
 - When the build deviates from the plan, **strike the original line and say why** — `~~original~~ **Changed in P3.** <reason>`. Never silently rewrite.
 - After a phase lands, add only detail that would surprise the next reader — a load-bearing constant, a behavior that isn't what the name suggests, an ordering that matters.
 - Problems found but not fixed go to Open Decisions or a Follow-up note with enough detail to act on later.
+- Suspected tantra core-library bugs/warts hit during app work go to `docs/issues.md` (what/where/impact/workaround) — user triages later.
 
 ### Phase 0 — Scaffolding + frozen contracts · deps: none · blocks all · ✅ done 2026-08-10
 - Workspace member `apps/sarathi/backend` (src layout, deps, justfile targets incl. `export-openapi`); root `pyproject.toml` members updated.
@@ -234,16 +235,27 @@ Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7. P3/P4/P5 look indep
   - Stop→`cancelled` behavioral test landed (P2 deferral resolved): gate-parked tool sample + WS cancel frame → `turn_completed(stop_reason="cancelled")`, no tool started, no child spawned.
   - Compose smoke ran live: upload 201 (`{uid}/{uuid}_{name}` on disk)/415/413/401, guard `server_error` on foreign path, marker round-trip in `turn_started.input`. Real-endpoint behavioral pass (cited answer, Researcher block, PDF summarized, live stop) still needs `OPENAI_*` (+`BRAVE_API_KEY`) creds — deferred to the P7 runbook alongside the P2 streaming deferral.
 
-### Phase 4 — Memory + approval flow · deps: P3 · —
+### Phase 4 — Memory + approval flow · deps: P3 · ✅ done 2026-08-10
 - User-scoped `memory_write`/`memory_recall` tools; `permissions={"memory_write": "ask"}`; optional embedder from `EMBEDDING_MODEL`.
 - Approval card on `AskRaised` → `ask_response` → resume; child-ask two-call dance handled generically in the WS handler; composer locked while ask pending; pending ask re-sent on reconnect.
 - Memory REST (list/delete with ownership) + memory dialog in sidebar.
 - **Verify:** "remember I prefer X" → card → approve → row in panel → new session recalls X → second account sees nothing; deny path writes nothing; kill the backend container mid-ask, restart, reconnect → card re-renders and approve still lands (durable suspend across processes); pytest covers scoping (user A cannot list/delete B's memories) and the ask→resume flow with FakeProvider.
 - Checklist:
-  - [ ] scoped memory tools + ask permission
-  - [ ] approval card + resume wiring
-  - [ ] memory panel + REST
-  - [ ] durable-ask restart test
+  - [x] scoped memory tools + ask permission
+  - [x] approval card + resume wiring
+  - [x] memory panel + REST
+  - [x] durable-ask restart test
+- P4 notes:
+  - Approval card needed no new WS code — P2's `track`/`answer_ask`/`_typed_response` + the `incomplete()`→bare-`resume` reconnect path already implement the whole ask flow; P4 added the tools, tests, and UI only.
+  - Reconnect delivers the pending `AskRaised` TWICE (replay + idempotent auto-resume, same original seq) — the reducer upserts asks by `ask_id`, returning identical state on the duplicate. Ask items are created `final: true` so the post-resume `sample_started` wipe spares the card.
+  - `memory_write(content, kind)` maps to `MemoryWrite(title=content[:80], body=content)` — tantra's model has no `content` field (`extra="forbid"`).
+  - Memory list is `store.memory_all()` + app-side filter (user ∧ not deleted ∧ not superseded) — no filtered query exists and `recall("")` returns `[]`; delete pre-checks via `memory_get` because `BuiltinMemory.delete` has no ownership concept and raises on unknown ids.
+  - Test factory now calls `_wire_tools()` — it builds Harness directly, so without it `Sarathi.tools` was empty and `memory_write` resolved as an unknown tool (no ask ever raised).
+  - Durable-ask restart proven in pytest: fresh Harness per socket over the shared store (store-level equivalent of a process kill); replay re-renders the card, approve on the new socket completes and writes. Literal kill-the-container check needs real creds → P7 runbook.
+  - Child-ask two-call dance is generic but app-untested (Researcher has no asking tools); traced sound by review, covered by tantra's test_subagents.py.
+  - AskCard clears its local sent-latch when a busy/server_error banner arrives (two-tab lease contention otherwise left the card stuck disabled).
+  - Compose smoke ran live (REST level): two users, `GET /api/memory` 200 `[]` each, DELETE bogus id → 404, no auth → 401. Ask-flow behavioral pass (card → approve → panel row → fresh-session recall → cross-account isolation → deny → container-kill) needs real `OPENAI_*` creds → P7 runbook.
+  - `docs/issues.md` started (user request): tantra warts log — seeded with the metadata `None` fail-open filter, unfiltered `memory_all`, cross-tenant shipped tools, ownerless delete, AskRaised re-emit, depth-0 replay, skipped `ToolCallStarted`, `reasoning`-only provider field.
 
 ### Phase 5 — Titles, model picker, polish · deps: P4 · —
 - `titles.py` one-shot generation after first turn; `title_updated` frame; sidebar live-updates.

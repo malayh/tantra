@@ -13,6 +13,7 @@ import type { Attachment } from "@/generated/models";
 type ComposerProps = {
   disabled: boolean;
   running?: boolean;
+  askPending?: boolean;
   onSend: (text: string, attachments: Attachment[]) => void;
   onStop?: () => void;
 };
@@ -22,7 +23,7 @@ const uploadMessage = (error: unknown): string => {
   return typeof detail === "string" ? detail : "Upload failed.";
 };
 
-export function Composer({ disabled, running = false, onSend, onStop }: ComposerProps) {
+export function Composer({ disabled, running = false, askPending = false, onSend, onStop }: ComposerProps) {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -103,7 +104,7 @@ export function Composer({ disabled, running = false, onSend, onStop }: Composer
             }
           }}
         />
-        {running ? (
+        {running && !askPending ? (
           <Button variant="outline" size="icon" aria-label="Stop" onClick={onStop}>
             <Square />
           </Button>

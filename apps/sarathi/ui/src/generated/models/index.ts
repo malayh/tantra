@@ -29,6 +29,7 @@ export * from './freeTextResponse';
 export * from './health200';
 export * from './hTTPValidationError';
 export * from './loginRequest';
+export * from './memoryOut';
 export * from './patchSessionRequest';
 export * from './reasoningDelta';
 export * from './reasoningPart';

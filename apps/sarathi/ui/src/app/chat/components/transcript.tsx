@@ -6,9 +6,13 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useStore } from "zustand";
 
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
-import type { ChatStore, SubagentItem, TextItem, ToolItem, TranscriptItem, Turn } from "../state";
+import type { AskItem, Banner, ChatStore, SubagentItem, TextItem, ToolItem, TranscriptItem, Turn } from "../state";
+
+type AskResponder = (askId: string, response: string) => void;
 
 const MARKDOWN_CLASS = [
   "text-sm leading-relaxed [&>*+*]:mt-3",
@@ -40,6 +44,14 @@ const summarizeArgs = (args: Record<string, unknown>): string => {
   if (values.length === 0) return "";
   const text = typeof values[0] === "string" ? values[0] : (JSON.stringify(values[0]) ?? "");
   return text.length > SUMMARY_LIMIT ? `${text.slice(0, SUMMARY_LIMIT)}…` : text;
+};
+
+const formatBody = (body: string): string => {
+  try {
+    return JSON.stringify(JSON.parse(body), null, 2);
+  } catch {
+    return body;
+  }
 };
 
 const itemKey = (item: TranscriptItem, index: number) => `${item.kind}-${item.sampleId}-${index}`;
@@ -119,7 +131,65 @@ function ToolChip({ item }: { item: ToolItem }) {
   );
 }
 
-function SubagentBlock({ item }: { item: SubagentItem }) {
+function AskCard({
+  item,
+  banner,
+  onAskResponse,
+}: {
+  item: AskItem;
+  banner: Banner | null;
+  onAskResponse: AskResponder;
+}) {
+  const [sent, setSent] = useState(false);
+
+  useEffect(() => {
+    if (banner !== null) setSent(false);
+  }, [banner]);
+
+  const respond = (response: string) => {
+    setSent(true);
+    onAskResponse(item.askId, response);
+  };
+
+  const body = formatBody(item.body);
+
+  return (
+    <Card size="sm" className="max-w-md">
+      <CardHeader>
+        <CardTitle>{item.title}</CardTitle>
+      </CardHeader>
+      {body.length > 0 && (
+        <CardContent>
+          <pre className="bg-muted overflow-x-auto rounded-lg p-3 text-xs whitespace-pre-wrap">{body}</pre>
+        </CardContent>
+      )}
+      <CardFooter className="gap-2">
+        {item.status === "pending" ? (
+          <>
+            <Button size="sm" disabled={sent} onClick={() => respond("allow")}>
+              Approve
+            </Button>
+            <Button size="sm" variant="destructive" disabled={sent} onClick={() => respond("deny")}>
+              Deny
+            </Button>
+          </>
+        ) : (
+          <p className="text-muted-foreground text-xs">{item.allow === false ? "Denied" : "Approved"}</p>
+        )}
+      </CardFooter>
+    </Card>
+  );
+}
+
+function SubagentBlock({
+  item,
+  banner,
+  onAskResponse,
+}: {
+  item: SubagentItem;
+  banner: Banner | null;
+  onAskResponse: AskResponder;
+}) {
   const [open, setOpen] = useState(!item.final);
 
   useEffect(() => {
@@ -145,7 +215,7 @@ function SubagentBlock({ item }: { item: SubagentItem }) {
       <CollapsibleContent>
         <div className="border-border mt-2 flex flex-col gap-3 border-l pl-3">
           {item.items.map((nested, index) => (
-            <Item key={itemKey(nested, index)} item={nested} />
+            <Item key={itemKey(nested, index)} item={nested} banner={banner} onAskResponse={onAskResponse} />
           ))}
           {item.isError && <p className="text-destructive text-xs">{formatResult(item.result)}</p>}
         </div>
@@ -154,7 +224,15 @@ function SubagentBlock({ item }: { item: SubagentItem }) {
   );
 }
 
-function Item({ item }: { item: TranscriptItem }) {
+function Item({
+  item,
+  banner,
+  onAskResponse,
+}: {
+  item: TranscriptItem;
+  banner: Banner | null;
+  onAskResponse: AskResponder;
+}) {
   switch (item.kind) {
     case "thinking":
       return <ThinkingBlock item={item} />;
@@ -163,13 +241,23 @@ function Item({ item }: { item: TranscriptItem }) {
     case "tool":
       return <ToolChip item={item} />;
     case "subagent":
-      return <SubagentBlock item={item} />;
+      return <SubagentBlock item={item} banner={banner} onAskResponse={onAskResponse} />;
+    case "ask":
+      return <AskCard item={item} banner={banner} onAskResponse={onAskResponse} />;
   }
 }
 
-function TurnBlock({ turn }: { turn: Turn }) {
+function TurnBlock({
+  turn,
+  banner,
+  onAskResponse,
+}: {
+  turn: Turn;
+  banner: Banner | null;
+  onAskResponse: AskResponder;
+}) {
   const empty = turn.items.every(
-    (item) => item.kind !== "tool" && item.kind !== "subagent" && item.content.length === 0,
+    (item) => item.kind !== "tool" && item.kind !== "subagent" && item.kind !== "ask" && item.content.length === 0,
   );
 
   return (
@@ -197,7 +285,7 @@ function TurnBlock({ turn }: { turn: Turn }) {
 
       {turn.items.map((item, index) => (
         <div key={itemKey(item, index)}>
-          <Item item={item} />
+          <Item item={item} banner={banner} onAskResponse={onAskResponse} />
         </div>
       ))}
 
@@ -208,8 +296,9 @@ function TurnBlock({ turn }: { turn: Turn }) {
   );
 }
 
-export function Transcript({ store }: { store: ChatStore }) {
+export function Transcript({ store, onAskResponse }: { store: ChatStore; onAskResponse: AskResponder }) {
   const turns = useStore(store, (state) => state.turns);
+  const banner = useStore(store, (state) => state.banner);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -221,7 +310,7 @@ export function Transcript({ store }: { store: ChatStore }) {
     <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-6 py-8">
         {turns.map((turn) => (
-          <TurnBlock key={turn.id} turn={turn} />
+          <TurnBlock key={turn.id} turn={turn} banner={banner} onAskResponse={onAskResponse} />
         ))}
       </div>
     </div>

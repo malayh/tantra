@@ -14,7 +14,7 @@ import { createChatStore } from "../state";
 export default function SessionPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const store = useMemo(() => createChatStore(sessionId), [sessionId]);
-  const { sendFrame, connected, ready, running } = useChatSocket(sessionId, store);
+  const { sendFrame, connected, ready, running, pendingAsk } = useChatSocket(sessionId, store);
   const banner = useStore(store, (state) => state.banner);
 
   return (
@@ -29,7 +29,10 @@ export default function SessionPage() {
           />
         </header>
 
-        <Transcript store={store} />
+        <Transcript
+          store={store}
+          onAskResponse={(askId, response) => sendFrame({ type: "ask_response", ask_id: askId, response })}
+        />
 
         {banner && (
           <div
@@ -47,6 +50,7 @@ export default function SessionPage() {
             key={sessionId}
             disabled={!ready || running}
             running={running}
+            askPending={pendingAsk !== null}
             onSend={(text, attachments) => sendFrame({ type: "user_message", text, attachments })}
             onStop={() => sendFrame({ type: "cancel" })}
           />

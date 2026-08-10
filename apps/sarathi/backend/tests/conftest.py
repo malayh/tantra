@@ -12,11 +12,11 @@ from httpx_ws.transport import ASGIWebSocketTransport
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from sarathi.agent import HarnessFactory, Sarathi, deps_factory, harness_factory
+from sarathi.agent import HarnessFactory, Sarathi, _wire_tools, deps_factory, harness_factory
 from sarathi.config import get_settings
 from sarathi.db import get_db
 from sarathi.models import Base
-from tantra import FakeProvider, Harness, MemoryStore, Sample
+from tantra import BuiltinMemory, FakeProvider, Harness, MemoryStore, Sample
 from tantra.providers.base import ProviderEvent, SampleRequest, TextDelta
 
 PASSWORD = "hunter2hunter2"
@@ -81,12 +81,14 @@ def provider() -> SharedProvider:
 @pytest.fixture
 def factory(store: SharedStore, provider: SharedProvider) -> HarnessFactory:
     def build(model: str | None = None) -> Harness:
+        _wire_tools()
         return Harness(
             provider,
             store,
             [Sarathi],
             default_model=model or "test-model",
             deps_factory=deps_factory,
+            memory=BuiltinMemory(store),
         )
 
     return build

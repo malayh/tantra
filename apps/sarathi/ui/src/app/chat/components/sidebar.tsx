@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { getListSessionsQueryKey, useCreateSession, useListSessions } from "@/generated/api/sessions/sessions";
 import { clearToken } from "@/lib/apiClient";
 import { cn } from "@/lib/utils";
+import { MemoryDialog } from "./memory-dialog";
 
 const shortTime = (iso: string): string => {
   const minutes = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
@@ -72,6 +73,7 @@ export function Sidebar() {
 
       <div className="border-border flex items-center gap-2 border-t p-3">
         <span className="text-muted-foreground min-w-0 flex-1 truncate text-xs">{session?.user?.email}</span>
+        <MemoryDialog />
         <Button variant="ghost" size="icon-sm" aria-label="Log out" onClick={logout}>
           <LogOut />
         </Button>

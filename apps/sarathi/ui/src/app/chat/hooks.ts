@@ -6,7 +6,7 @@ import useWebSocket, { ReadyState } from "react-use-websocket";
 import { useStore } from "zustand";
 
 import { getToken } from "@/lib/apiClient";
-import { type ChatStore, type ClientFrame, pendingFirstMessage, type ServerFrame } from "./state";
+import { type ChatStore, type ClientFrame, pendingAsk, pendingFirstMessage, type ServerFrame } from "./state";
 
 const RECONNECT_ATTEMPTS = 30;
 const RECONNECT_INTERVAL = 2000;
@@ -71,6 +71,7 @@ export const useChatSocket = (sessionId: string, store: ChatStore) => {
 
   const ready = useStore(store, (state) => state.ready);
   const running = useStore(store, (state) => state.turns[state.turns.length - 1]?.status === "running");
+  const askId = useStore(store, (state) => pendingAsk(state.turns)?.askId ?? null);
 
   const sendFrame = useCallback(
     (frame: ClientFrame) => {
@@ -86,5 +87,5 @@ export const useChatSocket = (sessionId: string, store: ChatStore) => {
     if (message) sendFrame({ type: "user_message", text: message.text, attachments: message.attachments });
   }, [ready, sessionId, sendFrame]);
 
-  return { sendFrame, connected: readyState === ReadyState.OPEN, ready, running };
+  return { sendFrame, connected: readyState === ReadyState.OPEN, ready, running, pendingAsk: askId };
 };

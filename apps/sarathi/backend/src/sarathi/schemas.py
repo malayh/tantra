@@ -41,6 +41,15 @@ class PatchSessionRequest(BaseModel):
     model: str
 
 
+class MemoryOut(BaseModel):
+    id: str
+    kind: str
+    title: str
+    body: str
+    tags: list[str] = Field(default_factory=list)
+    created_at: datetime
+
+
 class Attachment(BaseModel):
     path: str
     name: str

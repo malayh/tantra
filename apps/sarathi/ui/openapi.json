@@ -269,6 +269,76 @@
         }
       }
     },
+    "/api/memory": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "List Memory",
+        "operationId": "list_memory",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MemoryOut"
+                  },
+                  "type": "array",
+                  "title": "Response List Memory"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ]
+      }
+    },
+    "/api/memory/{memory_id}": {
+      "delete": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "Delete Memory",
+        "operationId": "delete_memory",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "memory_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Memory Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/uploads": {
       "post": {
         "tags": [
@@ -1027,6 +1097,47 @@
           "password"
         ],
         "title": "LoginRequest"
+      },
+      "MemoryOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "body": {
+            "type": "string",
+            "title": "Body"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tags"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "body",
+          "created_at"
+        ],
+        "title": "MemoryOut"
       },
       "PatchSessionRequest": {
         "properties": {

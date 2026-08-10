@@ -208,7 +208,7 @@ P5's concept/core-library pages depend only on P0 (they document v1 surface); it
   - `.gitattributes` pins `*.pdf`/`*.docx` binary — sample.pdf otherwise commits as text and CRLF conversion silently breaks its xref offsets (pypdf auto-recovers with a warning, hiding the corruption).
   - sample.docx is 36KB — python-docx's floor for a valid package (sample.pdf is 639 bytes); not bloat.
 
-### Phase 5 — docs site · deps: P1–P4 · CODE DONE — deploy verification pending
+### Phase 5 — docs site · deps: P1–P4 · ✅ DONE
 - Repo layout: `docs/` (markdown + ~~`mkdocs.yml`~~ **changed in P5.** `mkdocs.yml` at repo root — mkdocs requires `docs_dir` ≠ the config file's dir), `landing/` (`index.html` + assets, self-contained, no build step). `mkdocs-material` added to the root dev group; `just docs` recipe runs `mkdocs serve`.
 - `mkdocs.yml`: Material theme, `site_url: https://malayh.github.io/tantra/docs/`, `--strict` builds (broken internal links fail CI).
 - Landing page: what tantra is (harness framework — the turn loop as a library), the pitch (durable/re-entrant turns, one engine many drivers, FastAPI-style posture), install command, a real code sample (Agent + tools + Harness), links to docs and GitHub. Designed, not a theme default — this is the "look nice" requirement.
@@ -227,7 +227,7 @@ P5's concept/core-library pages depend only on P0 (they document v1 surface); it
   - [x] guides (core + one per new tool)
   - [x] reference pages
   - [x] sharp edges page
-  - [ ] deploy workflow live, site reachable
+  - [x] deploy workflow live, site reachable
 - Landed notes:
   - Reference is per-module (16 pages, user decision); guides carry the prose, `reference/extratools.md` carries only signatures.
   - Every runnable sample was executed (11 scratch scripts) and each documented output block is the captured stdout; review re-executed all of them independently.

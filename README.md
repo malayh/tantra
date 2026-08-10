@@ -74,9 +74,10 @@ Notes on the snippet:
 - https://malayh.github.io/tantra/
 - https://malayh.github.io/tantra/docs/
 
-## Reference app
+## Reference apps
 
-`apps/agni` in https://github.com/malayh/tantra — a terminal coding agent built on this library: REPL, permission prompts, skills, memory, compaction.
+- `apps/agni` in apps/agni — a terminal coding agent built on this library: REPL, permission prompts, skills, memory, compaction.
+- `apps/sarthi` in apps/sarathi — a AI chat interface with pdf reader and web search built in. 
 
 ## License
 

@@ -20,6 +20,7 @@ NewSession = Callable[..., Awaitable[str]]
 Socket = Callable[[str, str], AbstractAsyncContextManager[AsyncWebSocketSession]]
 
 RECEIVE_TIMEOUT = 5.0
+SILENCE_TIMEOUT = 0.5
 
 
 def _kind(frame: dict[str, Any]) -> str:
@@ -633,3 +634,173 @@ async def test_memory_recall_returns_only_the_callers_rows(
     )
     assert [row["body"] for row in completed["event"]["result"]] == ["drinks tea daily"]
     assert turn[-1]["event"]["stop_reason"] == "completed"
+
+
+async def test_the_first_completed_turn_titles_the_session(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend([Sample(text="hello"), Sample(text="My Session Title")])
+    token = await signup()
+    sid = await new_session(token)
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("what is tantra"))
+        await _until(ws, "turn_completed")
+        titled = await _until(ws, "title_updated")
+
+    assert titled == [{"type": "title_updated", "title": "My Session Title"}]
+    header = await store.header(sid)
+    assert header is not None and header.title == "My Session Title"
+    assert len(provider.requests) == 2
+    assert "You are a title generator" in provider.requests[1].system[0].text
+    assert "what is tantra" in provider.requests[1].messages[0].content
+
+
+async def test_a_titled_session_is_never_titled_again(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend([Sample(text="hello"), Sample(text="My Session Title"), Sample(text="second answer")])
+    token = await signup()
+    sid = await new_session(token)
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("first"))
+        await _until(ws, "turn_completed")
+        await _until(ws, "title_updated")
+        await _send(ws, _message("second"))
+        following = await _until(ws, "turn_completed")
+
+    assert "title_updated" not in [_kind(frame) for frame in following]
+    assert len(provider.requests) == 3
+    header = await store.header(sid)
+    assert header is not None and header.title == "My Session Title"
+
+
+async def test_a_failed_title_leaves_the_session_untitled(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.append(Sample(text="hello"))
+    token = await signup()
+    sid = await new_session(token)
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("first"))
+        turn = await _until(ws, "turn_completed")
+        with pytest.raises(TimeoutError):
+            await ws.receive_text(timeout=SILENCE_TIMEOUT)
+
+    assert turn[-1]["event"]["stop_reason"] == "completed"
+    header = await store.header(sid)
+    assert header is not None and header.title is None
+
+
+async def test_a_failed_title_is_retried_only_on_a_new_connection(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.append(Sample(text="hello"))
+    token = await signup()
+    sid = await new_session(token)
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("first"))
+        await _until(ws, "turn_completed")
+        with pytest.raises(TimeoutError):
+            await ws.receive_text(timeout=SILENCE_TIMEOUT)
+
+        provider.samples.extend([Sample(text="second answer"), Sample(text="Late Title")])
+        await _send(ws, _message("second"))
+        following = await _until(ws, "turn_completed")
+        with pytest.raises(TimeoutError):
+            await ws.receive_text(timeout=SILENCE_TIMEOUT)
+
+    assert "title_updated" not in [_kind(frame) for frame in following]
+    assert len(provider.requests) == 2
+    header = await store.header(sid)
+    assert header is not None and header.title is None
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        titled = await _until(ws, "title_updated")
+
+    assert titled == [{"type": "title_updated", "title": "Late Title"}]
+    assert len(provider.requests) == 3
+
+
+async def test_a_pending_ask_defers_the_title_until_the_turn_completes(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend(
+        [Sample(tool_calls=[_write_call("prefers tea")]), Sample(text="saved"), Sample(text="Tea Preference")]
+    )
+    token = await signup()
+    sid = await new_session(token)
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("remember I prefer tea"))
+        raised = await _until(ws, "ask_raised")
+        assert len(provider.requests) == 1
+
+        await _answer(ws, raised, "allow")
+        await _turn(ws, sid)
+        titled = await _until(ws, "title_updated")
+
+    assert titled == [{"type": "title_updated", "title": "Tea Preference"}]
+    header = await store.header(sid)
+    assert header is not None and header.title == "Tea Preference"
+
+
+async def test_switching_the_model_applies_to_the_next_turn(
+    socket: Socket,
+    client: httpx.AsyncClient,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend([Sample(text="hello"), Sample(text="Model Switch"), Sample(text="second answer")])
+    token = await signup()
+    sid = await new_session(token)
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("first"))
+        await _until(ws, "turn_completed")
+        await _until(ws, "title_updated")
+
+        patched = await client.patch(
+            f"/api/sessions/{sid}",
+            json={"model": "other-model"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert patched.status_code == 200
+
+        await _send(ws, _message("second"))
+        following = await _until(ws, "turn_completed")
+
+    started = next(frame for frame in following if _kind(frame) == "sample_started")
+    assert started["event"]["model"] == "other-model"
+    assert provider.requests[-1].model == "other-model"

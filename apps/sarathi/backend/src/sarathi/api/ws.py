@@ -20,8 +20,10 @@ from sarathi.schemas import (
     ClientFrame,
     ReplayDoneFrame,
     ServerErrorFrame,
+    TitleUpdatedFrame,
     UserMessageFrame,
 )
+from sarathi.titles import generate_title
 from tantra import (
     ApprovalResponse,
     AskResponse,
@@ -39,6 +41,7 @@ router = APIRouter(prefix="/api/ws", tags=["ws"])
 CLIENT_FRAME_ADAPTER: TypeAdapter[ClientFrame] = TypeAdapter(ClientFrame)
 FALLBACK_RETRY_IN = 5.0
 POLICY_VIOLATION = 1008
+ATTACHMENT_MARKER = "[attachment: "
 
 
 def _typed_response(kind: str, response: str) -> AskResponse:
@@ -56,6 +59,7 @@ class Connection:
         self.sid = sid
         self.uid = uid
         self.asks: dict[str, tuple[str, str]] = {}
+        self.titled = False
         self.queue: asyncio.Queue[UserMessageFrame | AskResponseFrame] = asyncio.Queue()
 
     async def send(self, frame: BaseModel) -> None:
@@ -113,15 +117,49 @@ class Connection:
                 continue
             await self.queue.put(frame)
 
+    async def maybe_title(self) -> None:
+        if self.titled:
+            return
+        header = await self.harness.store.header(self.sid)
+        if header is None:
+            return
+        if header.title is not None:
+            self.titled = True
+            return
+        if await self.incomplete(self.sid):
+            return
+        started: Any = None
+        async for stamped in self.harness.store.read(self.sid):
+            if isinstance(stamped.event, TurnStarted):
+                started = stamped.event
+        if started is None:
+            return
+        lines = [line for line in started.input.splitlines() if not line.startswith(ATTACHMENT_MARKER)]
+        text = "\n".join(lines).strip()
+        if not text:
+            return
+        self.titled = True
+        title = await generate_title(self.harness.provider, self.harness.default_model or "", text)
+        if not title:
+            return
+        header = await self.harness.store.header(self.sid)
+        if header is None or header.title is not None:
+            return
+        header.title = title
+        await self.harness.store.put_header(header)
+        await self.send(TitleUpdatedFrame(title=title))
+
     async def pump_loop(self) -> None:
         if await self.incomplete(self.sid):
             await self.pump(self.harness.resume(self.sid))
+        await self.maybe_title()
         while True:
             frame = await self.queue.get()
             if isinstance(frame, UserMessageFrame):
                 await self.run_turn(frame)
             else:
                 await self.answer_ask(frame)
+            await self.maybe_title()
 
     def owns_attachments(self, frame: UserMessageFrame) -> bool:
         root = (Path(get_settings().UPLOAD_DIR) / self.uid).resolve()
@@ -132,7 +170,7 @@ class Connection:
             await self.send(ServerErrorFrame(message="invalid attachment path"))
             return
         lines = [frame.text]
-        lines.extend(f"[attachment: {item.name} path={item.path}]" for item in frame.attachments)
+        lines.extend(f"{ATTACHMENT_MARKER}{item.name} path={item.path}]" for item in frame.attachments)
         header = await self.harness.store.header(self.sid)
         model = header.metadata.get("model") if header is not None else None
         if model:

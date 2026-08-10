@@ -1,10 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { env } from "next-runtime-env";
 import useWebSocket, { ReadyState } from "react-use-websocket";
+import { toast } from "sonner";
 import { useStore } from "zustand";
 
+import { getListSessionsQueryKey } from "@/generated/api/sessions/sessions";
 import { getToken } from "@/lib/apiClient";
 import { type ChatStore, type ClientFrame, pendingAsk, pendingFirstMessage, type ServerFrame } from "./state";
 
@@ -12,7 +15,7 @@ const RECONNECT_ATTEMPTS = 30;
 const RECONNECT_INTERVAL = 2000;
 const POLICY_VIOLATION = 1008;
 
-const route = (store: ChatStore, data: string) => {
+const route = (store: ChatStore, data: string, onTitle: () => void) => {
   const frame = JSON.parse(data) as ServerFrame;
   const state = store.getState();
 
@@ -24,8 +27,14 @@ const route = (store: ChatStore, data: string) => {
     state.setReady(true);
     return;
   }
+  if (frame.type === "title_updated") {
+    onTitle();
+    return;
+  }
   if (frame.type === "busy") {
-    state.setBanner({ kind: "busy", message: `Another turn is running — retry in ${Math.ceil(frame.retry_in)}s.` });
+    const message = `Another turn is running — retry in ${Math.ceil(frame.retry_in)}s.`;
+    state.setBanner({ kind: "busy", message });
+    toast.info(message);
     return;
   }
   if (frame.type === "server_error") {
@@ -35,6 +44,7 @@ const route = (store: ChatStore, data: string) => {
 
 export const useChatSocket = (sessionId: string, store: ChatStore) => {
   const [authorized, setAuthorized] = useState(false);
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     let active = true;
@@ -64,7 +74,10 @@ export const useChatSocket = (sessionId: string, store: ChatStore) => {
         store.getState().reset();
         store.getState().setReady(false);
       },
-      onMessage: (message) => route(store, message.data as string),
+      onMessage: (message) =>
+        route(store, message.data as string, () =>
+          queryClient.invalidateQueries({ queryKey: getListSessionsQueryKey() }),
+        ),
     },
     authorized,
   );

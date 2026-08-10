@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { isAxiosError } from "axios";
 import { Brain, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -16,11 +15,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { getListMemoryQueryKey, useDeleteMemory, useListMemory } from "@/generated/api/memory/memory";
-
-const errorMessage = (error: unknown, fallback: string): string => {
-  const detail = isAxiosError(error) ? (error.response?.data as { detail?: unknown } | undefined)?.detail : undefined;
-  return typeof detail === "string" ? detail : fallback;
-};
+import { errorMessage } from "@/lib/errors";
 
 const shortDate = (iso: string): string =>
   new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });

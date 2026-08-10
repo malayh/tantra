@@ -291,7 +291,11 @@ function TurnBlock({
 
       {turn.status === "running" && empty && <p className="text-muted-foreground animate-pulse text-sm">Thinking…</p>}
       {turn.status === "cancelled" && <p className="text-muted-foreground text-xs">Stopped.</p>}
-      {turn.status === "failed" && <p className="text-destructive text-sm">{turn.error ?? "The turn failed."}</p>}
+      {turn.status === "failed" && (
+        <div className="border-destructive/50 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm">
+          {turn.error ?? "The turn failed."}
+        </div>
+      )}
     </div>
   );
 }
@@ -299,6 +303,7 @@ function TurnBlock({
 export function Transcript({ store, onAskResponse }: { store: ChatStore; onAskResponse: AskResponder }) {
   const turns = useStore(store, (state) => state.turns);
   const banner = useStore(store, (state) => state.banner);
+  const ready = useStore(store, (state) => state.ready);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -309,6 +314,9 @@ export function Transcript({ store, onAskResponse }: { store: ChatStore; onAskRe
   return (
     <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-6 py-8">
+        {ready && turns.length === 0 && (
+          <p className="text-muted-foreground py-16 text-center text-sm">Send a message to get started</p>
+        )}
         {turns.map((turn) => (
           <TurnBlock key={turn.id} turn={turn} banner={banner} onAskResponse={onAskResponse} />
         ))}

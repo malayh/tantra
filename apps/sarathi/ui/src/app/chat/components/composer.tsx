@@ -1,7 +1,6 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { isAxiosError } from "axios";
 import { FileText, Loader2, Paperclip, Send, Square, X } from "lucide-react";
 import { toast } from "sonner";
 
@@ -9,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { useCreateUpload } from "@/generated/api/uploads/uploads";
 import type { Attachment } from "@/generated/models";
+import { errorMessage } from "@/lib/errors";
 
 type ComposerProps = {
   disabled: boolean;
@@ -16,11 +16,6 @@ type ComposerProps = {
   askPending?: boolean;
   onSend: (text: string, attachments: Attachment[]) => void;
   onStop?: () => void;
-};
-
-const uploadMessage = (error: unknown): string => {
-  const detail = isAxiosError(error) ? (error.response?.data as { detail?: unknown } | undefined)?.detail : undefined;
-  return typeof detail === "string" ? detail : "Upload failed.";
 };
 
 export function Composer({ disabled, running = false, askPending = false, onSend, onStop }: ComposerProps) {
@@ -44,7 +39,7 @@ export function Composer({ disabled, running = false, askPending = false, onSend
       const created = await upload.mutateAsync({ data: { file } });
       setAttachments((current) => [...current, created]);
     } catch (error) {
-      toast.error(uploadMessage(error));
+      toast.error(errorMessage(error, "Upload failed."));
     }
   };
 

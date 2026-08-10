@@ -1,14 +1,18 @@
 "use client";
 
+import { useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
-import { LogOut, Plus } from "lucide-react";
+import { LogOut, Moon, Plus, Sun } from "lucide-react";
 import { signOut, useSession } from "next-auth/react";
+import { useTheme } from "next-themes";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { getListSessionsQueryKey, useCreateSession, useListSessions } from "@/generated/api/sessions/sessions";
 import { clearToken } from "@/lib/apiClient";
+import { errorMessage } from "@/lib/errors";
 import { cn } from "@/lib/utils";
 import { MemoryDialog } from "./memory-dialog";
 
@@ -24,8 +28,13 @@ export function Sidebar() {
   const router = useRouter();
   const pathname = usePathname();
   const queryClient = useQueryClient();
-  const { data: sessions } = useListSessions();
+  const { data: sessions, error } = useListSessions();
   const { data: session } = useSession();
+  const { resolvedTheme, setTheme } = useTheme();
+
+  useEffect(() => {
+    if (error) toast.error(errorMessage(error, "Could not load sessions."));
+  }, [error]);
 
   const createSession = useCreateSession({
     mutation: {
@@ -33,6 +42,7 @@ export function Sidebar() {
         queryClient.invalidateQueries({ queryKey: getListSessionsQueryKey() });
         router.push(`/chat/${created.id}`);
       },
+      onError: (failure) => toast.error(errorMessage(failure, "Could not start a new chat.")),
     },
   });
 
@@ -56,6 +66,7 @@ export function Sidebar() {
       </div>
 
       <nav className="flex-1 overflow-y-auto px-2 pb-2">
+        {sessions?.length === 0 && <p className="text-muted-foreground px-2 py-2 text-sm">No sessions yet</p>}
         {sessions?.map((item) => (
           <Link
             key={item.id}
@@ -74,6 +85,16 @@ export function Sidebar() {
       <div className="border-border flex items-center gap-2 border-t p-3">
         <span className="text-muted-foreground min-w-0 flex-1 truncate text-xs">{session?.user?.email}</span>
         <MemoryDialog />
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Toggle theme"
+          title="Toggle theme"
+          onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")}
+        >
+          <Sun className="dark:hidden" />
+          <Moon className="hidden dark:block" />
+        </Button>
         <Button variant="ghost" size="icon-sm" aria-label="Log out" onClick={logout}>
           <LogOut />
         </Button>

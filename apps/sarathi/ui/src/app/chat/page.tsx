@@ -2,9 +2,11 @@
 
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
 import { getListSessionsQueryKey, useCreateSession } from "@/generated/api/sessions/sessions";
 import type { Attachment } from "@/generated/models";
+import { errorMessage } from "@/lib/errors";
 import { Composer } from "./components/composer";
 import { Sidebar } from "./components/sidebar";
 import { pendingFirstMessage } from "./state";
@@ -12,13 +14,23 @@ import { pendingFirstMessage } from "./state";
 export default function ChatPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const createSession = useCreateSession();
+  const createSession = useCreateSession({
+    mutation: {
+      onError: (failure) => toast.error(errorMessage(failure, "Could not start a new chat.")),
+    },
+  });
 
-  const onSend = async (text: string, attachments: Attachment[]) => {
-    const created = await createSession.mutateAsync({ data: {} });
-    pendingFirstMessage.set(created.id, text, attachments);
-    queryClient.invalidateQueries({ queryKey: getListSessionsQueryKey() });
-    router.push(`/chat/${created.id}`);
+  const onSend = (text: string, attachments: Attachment[]) => {
+    createSession.mutate(
+      { data: {} },
+      {
+        onSuccess: (created) => {
+          pendingFirstMessage.set(created.id, text, attachments);
+          queryClient.invalidateQueries({ queryKey: getListSessionsQueryKey() });
+          router.push(`/chat/${created.id}`);
+        },
+      },
+    );
   };
 
   return (

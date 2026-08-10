@@ -44,6 +44,13 @@ Warts and suspected bugs in tantra core, hit while building `apps/sarathi`. Cand
 - A UI spinner keyed on Started→Completed hangs forever on those paths.
 - Workaround: key on Requested→Completed.
 
+## `put_header` is last-writer-wins; concurrent header edits during a turn are silently lost
+
+- `Harness.run`/`resume` read the header once and hand the same object to the loop; `TurnLoop` re-puts it after every sample (`loop.py:777`) and `_settle` writes it again at turn end (`harness.py:296-301`). `put_header` protects only `last_seq`/`lease` — no CAS/`expect` token, unlike `append(expect_seq=...)`.
+- Any external read-modify-write while a turn runs — a model change via PATCH, a title write, any metadata edit — is reverted by the loop's next header write, with no way for the caller to detect the loss.
+- Repro: `MemoryStore` + `FakeProvider`, patch `metadata["model"]` on `TurnStarted` → header after the turn shows the old value.
+- Workaround: sarathi disables the model picker while a turn is running and writes titles only after the turn generator is fully drained (post-`_settle`), re-reading the header immediately before the write. A library fix would be an `expect` token on `put_header` or a narrow `patch_metadata` op.
+
 ## Provider reads only the `reasoning` delta field
 
 - `openai_compat.py:129` reads `delta.reasoning`; endpoints emitting `reasoning_content` (DeepSeek-style) stream no thoughts.

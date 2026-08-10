@@ -4,8 +4,10 @@ import { useMemo } from "react";
 import { useParams } from "next/navigation";
 import { useStore } from "zustand";
 
+import { useListSessions } from "@/generated/api/sessions/sessions";
 import { cn } from "@/lib/utils";
 import { Composer } from "../components/composer";
+import { ModelPicker } from "../components/model-picker";
 import { Sidebar } from "../components/sidebar";
 import { Transcript } from "../components/transcript";
 import { useChatSocket } from "../hooks";
@@ -16,13 +18,16 @@ export default function SessionPage() {
   const store = useMemo(() => createChatStore(sessionId), [sessionId]);
   const { sendFrame, connected, ready, running, pendingAsk } = useChatSocket(sessionId, store);
   const banner = useStore(store, (state) => state.banner);
+  const { data: sessions } = useListSessions();
+  const current = sessions?.find((item) => item.id === sessionId);
 
   return (
     <div className="flex h-screen">
       <Sidebar />
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="border-border flex items-center gap-2 border-b px-6 py-3">
-          <h1 className="truncate text-sm font-medium">Chat</h1>
+          <h1 className="truncate text-sm font-medium">{current?.title ?? "New chat"}</h1>
+          <ModelPicker sessionId={sessionId} model={current?.model} running={running} />
           <span
             title={connected ? "Connected" : "Disconnected"}
             className={cn("ml-auto size-2 rounded-full", connected ? "bg-green-500" : "bg-muted-foreground")}
@@ -34,13 +39,8 @@ export default function SessionPage() {
           onAskResponse={(askId, response) => sendFrame({ type: "ask_response", ask_id: askId, response })}
         />
 
-        {banner && (
-          <div
-            className={cn(
-              "border-border mx-auto w-full max-w-3xl border-t px-6 py-2 text-xs",
-              banner.kind === "error" ? "text-destructive" : "text-muted-foreground",
-            )}
-          >
+        {banner?.kind === "error" && (
+          <div className="border-border text-destructive mx-auto w-full max-w-3xl border-t px-6 py-2 text-xs">
             {banner.message}
           </div>
         )}

@@ -43,7 +43,15 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    for router in (auth.router, sessions.router, memory.router, uploads.router, ws.router, meta.router):
+    for router in (
+        auth.router,
+        sessions.router,
+        memory.router,
+        uploads.router,
+        ws.router,
+        meta.router,
+        meta.models_router,
+    ):
         application.include_router(router)
     return application
 

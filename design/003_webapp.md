@@ -257,15 +257,27 @@ Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7. P3/P4/P5 look indep
   - Compose smoke ran live (REST level): two users, `GET /api/memory` 200 `[]` each, DELETE bogus id → 404, no auth → 401. Ask-flow behavioral pass (card → approve → panel row → fresh-session recall → cross-account isolation → deny → container-kill) needs real `OPENAI_*` creds → P7 runbook.
   - `docs/issues.md` started (user request): tantra warts log — seeded with the metadata `None` fail-open filter, unfiltered `memory_all`, cross-tenant shipped tools, ownerless delete, AskRaised re-emit, depth-0 replay, skipped `ToolCallStarted`, `reasoning`-only provider field.
 
-### Phase 5 — Titles, model picker, polish · deps: P4 · —
+### Phase 5 — Titles, model picker, polish · deps: P4 · ✅ done 2026-08-10
 - `titles.py` one-shot generation after first turn; `title_updated` frame; sidebar live-updates.
 - `GET /models`, header dropdown, `PATCH /sessions/{id}`, fresh-read `default_model` per turn.
 - Polish: empty states, error toasts, connection dot, light/dark toggle, `turn_failed` banner, busy toast.
 - **Verify:** first exchange names the session in the sidebar without reload; switching model changes the model on the next turn (assert via `sample_started.model` in the stream); theme toggle persists.
 - Checklist:
-  - [ ] title generation + frame
-  - [ ] model picker end-to-end
-  - [ ] states/toasts/theme
+  - [x] title generation + frame
+  - [x] model picker end-to-end
+  - [x] states/toasts/theme
+- P5 notes:
+  - Title source is the last `TurnStarted.input` from the log (attachment-marker lines stripped), not the in-flight frame — one code path covers run, ask-resume, and reconnect-resume; an attachment-only or blank first message gets titled from a later turn instead of never.
+  - `maybe_title` fires only after `pump()` returns (generator drained ⇒ `_settle` done) and re-reads the header right before `put_header` — writing mid-turn would be clobbered by the TurnLoop's own per-sample header writes (see `docs/issues.md`: last-writer-wins `put_header`).
+  - Per-connection title latch: at most one generation attempt per WS connection; a failed attempt retries on the next connect (fresh `Connection`). Ask-suspended turns don't consume the latch — the title lands after approve on the same socket.
+  - Title generation runs synchronously in the pump loop: a message sent while the title call is in flight waits for it (bounded by provider timeout). Accepted latency — a background task would reopen the header-write race.
+  - Model picker is disabled while a turn runs: a PATCH landing mid-turn is silently reverted by the running turn's header writes (same wart).
+  - `TitleUpdatedFrame` carries no `session_id`; the client keys it to its own socket and just invalidates the sessions list (sidebar + header both read that query).
+  - Busy surfaces as a toast per spec, but the store still sets the busy banner state — AskCard's stuck-button recovery keys on `banner !== null`; only the busy strip rendering was dropped (error strip stays).
+  - `GET /api/models` lives on a second `APIRouter(prefix="/api")` in `meta.py` — the meta router's `/api/meta` prefix would have broken the frozen `/api/models` path.
+  - Cancelled turns do get titled (`turn_completed(stop_reason="cancelled")` passes the incomplete check) — input is real, harmless.
+  - FakeProvider budget: every completed turn on an untitled session consumes one extra scripted sample for the title attempt (exhaustion is swallowed). Existing tests needed no edits; new title tests pin exact `provider.requests` counts.
+  - Backend 69 tests (14 new: titles unit, title flow/no-retitle/silent-failure/ask-defers/latch-retry, model-switch via `sample_started.model`, `/api/models` auth); compose smoke: `GET /api/models` 200 `["gpt-4o-mini","gpt-4o"]` authed, 401 unauthed. Live behavioral pass (real title text, theme persistence, picker) → P7 runbook.
 
 ### Phase 6 — Compose hardening + docs · deps: P5 · —
 - Final compose pass: depends_on/healthcheck ordering, uploads volume, restart policies; backend Dockerfile from repo-root context, `uv sync --frozen --package sarathi`.

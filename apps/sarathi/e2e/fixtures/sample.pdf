@@ -1,0 +1,269 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Length 1164 >>
+stream
+BT
+1 0 0 1 62 748 Tm
+/F2 16 Tf
+25 TL
+(KESTREL HALLOWAY SYSTEMS - INTERNAL TECHNICAL MEMO) Tj
+T*
+/F2 13 Tf
+22 TL
+(Project Vantroxil - Relay Mesh Trial Report) Tj
+T*
+/F1 11 Tf
+20 TL
+(Document KHS-MEMO-7731    Classification: Internal    Page 1 of 3) Tj
+T*
+/F1 11 Tf
+20 TL
+() Tj
+T*
+/F2 12 Tf
+21 TL
+(1. Trial summary) Tj
+T*
+/F1 11 Tf
+20 TL
+(The Vantroxil Relay Mesh completed its third field trial at the) Tj
+T*
+/F1 11 Tf
+20 TL
+(Brindlecourt test range on 14 March 2031. Across the eleven-hour) Tj
+T*
+/F1 11 Tf
+20 TL
+(window the mesh sustained 41,879 handshakes per second, a figure) Tj
+T*
+/F1 11 Tf
+20 TL
+(the Brindlecourt controllers logged as the peak stable rate.) Tj
+T*
+/F1 11 Tf
+20 TL
+() Tj
+T*
+/F1 11 Tf
+20 TL
+(Lead engineer: Dr. Isolde Vranck \(Mesh Systems Group\).) Tj
+T*
+/F1 11 Tf
+20 TL
+(Trial designation: BRINDLECOURT-III.) Tj
+T*
+/F1 11 Tf
+20 TL
+() Tj
+T*
+/F2 12 Tf
+21 TL
+(2. Configuration under test) Tj
+T*
+/F1 11 Tf
+20 TL
+(Nine Vantroxil relay nodes were arranged in the Halloway ring) Tj
+T*
+/F1 11 Tf
+20 TL
+(topology with a single Kestrel arbiter holding the mesh clock.) Tj
+T*
+/F1 11 Tf
+20 TL
+(No node exceeded 63 percent of its packet budget.) Tj
+T*
+ET
+endstream
+endobj
+2 0 obj
+<< /Type /Page /Parent 9 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R /F2 8 0 R >> /ProcSet [/PDF /Text] >> /Contents 1 0 R >>
+endobj
+3 0 obj
+<< /Length 1178 >>
+stream
+BT
+1 0 0 1 62 748 Tm
+/F2 16 Tf
+25 TL
+(Project Vantroxil - Fault Analysis) Tj
+T*
+/F1 11 Tf
+20 TL
+(Document KHS-MEMO-7731    Classification: Internal    Page 2 of 3) Tj
+T*
+/F1 11 Tf
+20 TL
+() Tj
+T*
+/F2 12 Tf
+21 TL
+(3. Calibration drift) Tj
+T*
+/F1 11 Tf
+20 TL
+(Drift observed in the second half of the trial was traced to the) Tj
+T*
+/F1 11 Tf
+20 TL
+(Quellmarsh oscillator fitted to relay nodes 4 through 9. The) Tj
+T*
+/F1 11 Tf
+20 TL
+(Quellmarsh part loses 0.734 microseconds per thermal cycle once) Tj
+T*
+/F1 11 Tf
+20 TL
+(its case temperature passes 62 degrees Celsius.) Tj
+T*
+/F1 11 Tf
+20 TL
+() Tj
+T*
+/F1 11 Tf
+20 TL
+(The drift is cumulative and is not corrected by the Kestrel) Tj
+T*
+/F1 11 Tf
+20 TL
+(arbiter, because the arbiter resynchronises only on whole-frame) Tj
+T*
+/F1 11 Tf
+20 TL
+(boundaries and the error stays below its detection floor.) Tj
+T*
+/F1 11 Tf
+20 TL
+() Tj
+T*
+/F2 12 Tf
+21 TL
+(4. Recommended remedy) Tj
+T*
+/F1 11 Tf
+20 TL
+(Replace the Quellmarsh oscillator with the Thorne-Ladbroke TL-88) Tj
+T*
+/F1 11 Tf
+20 TL
+(reference unit, which holds 0.011 microseconds over the same) Tj
+T*
+/F1 11 Tf
+20 TL
+(thermal range. Retrofit cost is 812 credits per node.) Tj
+T*
+ET
+endstream
+endobj
+4 0 obj
+<< /Type /Page /Parent 9 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R /F2 8 0 R >> /ProcSet [/PDF /Text] >> /Contents 3 0 R >>
+endobj
+5 0 obj
+<< /Length 1061 >>
+stream
+BT
+1 0 0 1 62 748 Tm
+/F2 16 Tf
+25 TL
+(Project Vantroxil - Deployment Gate) Tj
+T*
+/F1 11 Tf
+20 TL
+(Document KHS-MEMO-7731    Classification: Internal    Page 3 of 3) Tj
+T*
+/F1 11 Tf
+20 TL
+() Tj
+T*
+/F2 12 Tf
+21 TL
+(5. Blocking item) Tj
+T*
+/F1 11 Tf
+20 TL
+(Deployment of the Vantroxil Relay Mesh is blocked until the) Tj
+T*
+/F1 11 Tf
+20 TL
+(Ospreydown ground station clears audit ticket KHS-99427. The) Tj
+T*
+/F1 11 Tf
+20 TL
+(remediation budget attached to that ticket is 3.2 million credits) Tj
+T*
+/F1 11 Tf
+20 TL
+(and the Ospreydown board has set a decision date of) Tj
+T*
+/F1 11 Tf
+20 TL
+(02 September 2031.) Tj
+T*
+/F1 11 Tf
+20 TL
+() Tj
+T*
+/F2 12 Tf
+21 TL
+(6. Owners) Tj
+T*
+/F1 11 Tf
+20 TL
+(Audit liaison: Marisol Pentworth-Yao.) Tj
+T*
+/F1 11 Tf
+20 TL
+(Escalation path: Kestrel Halloway Systems board, quarterly review.) Tj
+T*
+/F1 11 Tf
+20 TL
+() Tj
+T*
+/F2 12 Tf
+21 TL
+(7. Note) Tj
+T*
+/F1 11 Tf
+20 TL
+(Every name, number and finding in this memo is fictional and) Tj
+T*
+/F1 11 Tf
+20 TL
+(exists only as a test fixture for the Sarathi end-to-end runbook.) Tj
+T*
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 9 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R /F2 8 0 R >> /ProcSet [/PDF /Text] >> /Contents 5 0 R >>
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+8 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>
+endobj
+9 0 obj
+<< /Type /Pages /Kids [2 0 R 4 0 R 6 0 R] /Count 3 >>
+endobj
+10 0 obj
+<< /Type /Catalog /Pages 9 0 R >>
+endobj
+xref
+0 11
+0000000000 65535 f 
+0000000015 00000 n 
+0000001231 00000 n 
+0000001389 00000 n 
+0000002619 00000 n 
+0000002777 00000 n 
+0000003890 00000 n 
+0000004048 00000 n 
+0000004145 00000 n 
+0000004247 00000 n 
+0000004316 00000 n 
+trailer
+<< /Size 11 /Root 10 0 R >>
+startxref
+4366
+%%EOF

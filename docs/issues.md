@@ -57,6 +57,12 @@ Warts and suspected bugs in tantra core, hit while building `apps/sarathi`. Cand
 - Stop/cancel UX is broken for any app using subagents unless the app re-implements tree discovery.
 - Workaround: sarathi walks `ChildSessionSpawned` events recursively and cancels descendants deepest-first, then the root (`api/ws.py`). A `cancel(sid, recursive=True)` on the harness would remove the app-side walk.
 
+## `cancel` cannot win its seq race against an actively-appending session
+
+- `cancel(sid)` reads the whole log, then `append(expect_seq=last_seq)`, retrying `CANCEL_ATTEMPTS = 5` times with no backoff (`harness.py:441-459`). A running session appends constantly (tool results, sample parts), so every retry re-reads and loses the race — after 5 losses `SeqConflict` propagates and no `CancelRequested` is ever written.
+- Cancelling the exact sessions you most want to cancel — busy ones, e.g. a researcher child mid-fetch-loop — fails essentially always; only idle logs (a parent blocked inside the spawn tool call) accept the cancel. Live E2E proof: two stop presses during running children, both children finished with `stop_reason="completed"` and zero cancel events in their logs (one ran to `max_steps`, 318 events), while the root accepted its cancel on the first try.
+- Workaround: none app-side — sarathi's tree walk calls `cancel` per descendant and can only swallow the `SeqConflict` (`api/ws.py`). Fix: append `CancelRequested` without `expect_seq` (it is a flag; it needs no seq consistency), or retry with backoff/jitter.
+
 ## Cancel is only observed at store boundaries
 
 - The loop checks `state.cancelled` before each sample (`loop.py:726`) and before each tool call (`loop.py:602`); an in-flight sample stream or tool call runs to completion first.

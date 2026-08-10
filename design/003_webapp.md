@@ -288,12 +288,19 @@ Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7. P3/P4/P5 look indep
   - [ ] README + .env.example accurate
   - [ ] clean-checkout boot test
 
-### Phase 7 — E2E runbook · deps: P6 · —
+### Phase 7 — E2E runbook · deps: P6 · ✅ done 2026-08-10 (P6 skipped by user)
 - `e2e/runbook.md` (preamble, 10 scenarios, report template), `e2e/fixtures/sample.pdf` (multi-page, distinctive content to assert grounding), `e2e/reports/` gitignored except `.gitkeep`.
 - **Verify:** execute the runbook once via Claude Code driving a browser against the compose stack with a real cheap model; produce the first report; every scenario PASS or a spec deviation is recorded.
 - Checklist:
-  - [ ] runbook + fixtures + template
-  - [ ] first full run + report committed observations
+  - [x] runbook + fixtures + template
+  - [x] first full run + report committed observations
+- Status notes:
+  - Runbook folds in the four deferred checks (S2 title-no-reload, S6 container-kill durable ask, S8 tree cancel, S10 theme-across-reload); fixture is a hand-written 3-page raw PDF (no PDF lib available) verified through `tantra.extratools.doc._read` — 12/12 distinctive strings extract.
+  - First run (models `z-ai/glm-5.2` + `deepseek/deepseek-v4-flash-0731`): **8 PASS · 1 FAIL · 1 SKIP** — full report in `e2e/reports/2026-08-10.md` (gitignored; observations here).
+  - S3 SKIP: `BRAVE_API_KEY` empty → `web_search` unregistered. Observed: researcher improvises constructed google/bing URLs in a non-converging loop; re-run after adding a key.
+  - S8 FAIL (both attempts, DB-verified): stop cancels only the root — `harness.cancel`'s `expect_seq` retry (5×, no backoff) always loses against the actively-appending child log, `SeqConflict` swallowed per-target in `api/ws.py`; child runs to `completed`, root ends `cancelled` only when the spawn tool returns. New `docs/issues.md` entry; fix belongs in tantra core (blind append for `CancelRequested`).
+  - Other PASS highlights: thoughts stream + collapse on glm-5.2; PDF grounding recovered all page-2/3 facts + page-1 from history without a second `read_doc`; durable ask survived `docker compose restart backend` with exactly one card; user-B isolation clean (3 empty recalls); model switch proven via `sample_started.model`; mid-turn reload replayed completed items only and re-sampled to a coherent finish.
+  - Minor deviations logged in the report: sidebar `New chat` click intermittently doesn't navigate from a session page; theme verified via DOM/localStorage because the tester's Chrome runs Dark Reader (repaints the app dark regardless of app theme).
 
 ## Open Decisions
 - **Background sweep daemon** — reconnect-driven resume suffices for the demo; revisit if abandoned turns holding `running` status confuse the sidebar. Resolve by observing runbook runs.

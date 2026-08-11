@@ -76,8 +76,8 @@ Notes on the snippet:
 
 ## Reference apps
 
+- `apps/sarthi` in apps/sarathi — a fully usable Perplexity clone with multi tanancy, memoery, parallel agents, web search built in 
 - `apps/agni` in apps/agni — a terminal coding agent built on this library: REPL, permission prompts, skills, memory, compaction.
-- `apps/sarthi` in apps/sarathi — a AI chat interface with pdf reader and web search built in. 
 
 ## License
 

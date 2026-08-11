@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -11,13 +12,16 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from tantra.errors import TantraError
 from tantra.providers.base import Embedder
-from tantra.tools import Context, tool
+from tantra.stores.base import matches_metadata
+from tantra.tools import Context, Tool, tool
 
 KEYWORD = "keyword"
 VECTOR = "vector"
 CANDIDATE_FLOOR = 20
 ROW_METHODS = ("memory_put", "memory_get", "memory_all")
 NO_MEMORY = "no memory configured: this harness was built without Harness(memory=...)"
+
+MemoryScope = Callable[[Context], dict[str, Any]]
 
 _SPLIT = re.compile(r"[^a-z0-9]+")
 
@@ -91,11 +95,19 @@ class Memory(Protocol):
         to keyword-only says so rather than pretending it ran a vector search.
         """
 
-    async def supersede(self, old_id: str, new: MemoryWrite) -> str:
-        """Write `new` and point `old_id` at it. The old row stays readable via `get`."""
+    async def supersede(self, old_id: str, new: MemoryWrite, *, scope: dict[str, Any] | None = None) -> str:
+        """Write `new` and point `old_id` at it. The old row stays readable via `get`.
 
-    async def delete(self, mid: str) -> None:
-        """Soft-delete a row: `recall` stops returning it, `get` still does."""
+        A row whose metadata does not match `scope` is refused as unknown, so a caller holding the
+        wrong scope cannot learn that the id exists.
+        """
+
+    async def delete(self, mid: str, *, scope: dict[str, Any] | None = None) -> bool:
+        """Soft-delete a row and report whether it is now gone: `recall` stops returning it, `get` still does.
+
+        Never raises: an unknown id and a row whose metadata does not match `scope` both return
+        False, and deleting a row that is already deleted returns True again.
+        """
 
 
 def _tokens(text: str) -> set[str]:
@@ -134,7 +146,7 @@ class _Filter:
             return False
         if self.entity is not None and self.entity not in {name.casefold() for name in row.entities}:
             return False
-        if self.metadata and any(row.metadata.get(key) != value for key, value in self.metadata.items()):
+        if not matches_metadata(row.metadata, self.metadata):
             return False
         return True
 
@@ -202,7 +214,7 @@ class BuiltinMemory:
 
     async def _keyword(self, wanted: set[str], rule: _Filter) -> list[MemoryHit]:
         hits = []
-        for row in await self.store.memory_all():
+        for row in await self.store.memory_all(metadata=rule.metadata):
             if not rule.passes(row):
                 continue
             score = len(wanted & _row_tokens(row)) / len(wanted)
@@ -228,9 +240,9 @@ class BuiltinMemory:
                 hits.append(MemoryHit(memory=row, score=score, mode=VECTOR))
         return hits
 
-    async def supersede(self, old_id: str, new: MemoryWrite) -> str:
+    async def supersede(self, old_id: str, new: MemoryWrite, *, scope: dict[str, Any] | None = None) -> str:
         old = await self.store.memory_get(old_id)
-        if old is None:
+        if old is None or not matches_metadata(old.metadata, scope):
             raise TantraError(f"unknown memory {old_id!r}")
         if old.deleted:
             raise TantraError(f"memory {old_id!r} is deleted and cannot be superseded")
@@ -241,21 +253,18 @@ class BuiltinMemory:
         await self.store.memory_put(old)
         return new_id
 
-    async def delete(self, mid: str) -> None:
+    async def delete(self, mid: str, *, scope: dict[str, Any] | None = None) -> bool:
         row = await self.store.memory_get(mid)
-        if row is None:
-            raise TantraError(f"unknown memory {mid!r}")
+        if row is None or not matches_metadata(row.metadata, scope):
+            return False
         row.deleted = True
         await self.store.memory_put(row)
+        return True
 
     async def backfill(self) -> int:
         if self.embedder is None:
             raise TantraError("backfill needs an embedder; this BuiltinMemory was built without one")
-        rows = [
-            row
-            for row in await self.store.memory_all()
-            if row.embedding is None and not row.deleted and row.superseded_by is None
-        ]
+        rows = [row for row in await self.store.memory_all() if row.embedding is None]
         if not rows:
             return 0
         vectors = await self.embedder.embed([_embed_text(row) for row in rows])
@@ -266,65 +275,78 @@ class BuiltinMemory:
         return len(repaired)
 
 
-@tool
-async def memory_write(
-    kind: str,
-    title: str,
-    body: str,
-    ctx: Context,
-    tags: list[str] | None = None,
-    entities: list[str] | None = None,
-) -> str:
-    """Save one durable memory and return its id.
+def memory_tools(scope: MemoryScope | None = None) -> tuple[Tool, Tool]:
+    @tool
+    async def memory_write(
+        kind: str,
+        title: str,
+        body: str,
+        ctx: Context,
+        tags: list[str] | None = None,
+        entities: list[str] | None = None,
+    ) -> str:
+        """Save one durable memory and return its id.
 
-    Write a single self-contained fact, decision or preference per call: `title` is a one-line
-    summary, `body` carries the detail worth re-reading months later. `kind` groups rows for
-    filtered recall — pick a short lowercase label and reuse it ("preference", "decision", "fact").
-    `tags` and `entities` are recall filters, so put the names of people, services, files or
-    projects the memory is about into `entities`. Do not save anything you can look up again.
-    """
-    if ctx.memory is None:
-        raise TantraError(NO_MEMORY)
-    return await ctx.memory.write(
-        MemoryWrite(
-            kind=kind,
-            title=title,
-            body=body,
-            tags=list(tags or []),
-            entities=list(entities or []),
+        Write a single self-contained fact, decision or preference per call: `title` is a one-line
+        summary, `body` carries the detail worth re-reading months later. `kind` groups rows for
+        filtered recall — pick a short lowercase label and reuse it ("preference", "decision", "fact").
+        `tags` and `entities` are recall filters, so put the names of people, services, files or
+        projects the memory is about into `entities`. Do not save anything you can look up again.
+        """
+        if ctx.memory is None:
+            raise TantraError(NO_MEMORY)
+        return await ctx.memory.write(
+            MemoryWrite(
+                kind=kind,
+                title=title,
+                body=body,
+                tags=list(tags or []),
+                entities=list(entities or []),
+                metadata=dict(scope(ctx)) if scope else {},
+            )
         )
-    )
+
+    @tool
+    async def memory_recall(
+        query: str,
+        ctx: Context,
+        k: int = 5,
+        kind: str | None = None,
+        tags: list[str] | None = None,
+        entity: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search saved memories and return the best matches, highest score first.
+
+        Matching is keyword overlap against each memory's title, body, tags and entities, so query with
+        the words you expect to find written there — a short phrase beats a single word. `kind`, `tags`
+        and `entity` narrow the search; `tags` requires every tag listed. Deleted and superseded
+        memories are never returned, and an empty list means nothing was saved about this yet.
+        """
+        if ctx.memory is None:
+            raise TantraError(NO_MEMORY)
+        hits = await ctx.memory.recall(
+            query,
+            k=k,
+            kind=kind,
+            tags=list(tags) if tags else None,
+            entity=entity,
+            metadata=scope(ctx) if scope else None,
+        )
+        return [
+            {
+                "id": hit.memory.id,
+                "kind": hit.memory.kind,
+                "title": hit.memory.title,
+                "body": hit.memory.body,
+                "tags": list(hit.memory.tags),
+                "entities": list(hit.memory.entities),
+                "score": hit.score,
+                "mode": hit.mode,
+            }
+            for hit in hits
+        ]
+
+    return memory_write, memory_recall
 
 
-@tool
-async def memory_recall(
-    query: str,
-    ctx: Context,
-    k: int = 5,
-    kind: str | None = None,
-    tags: list[str] | None = None,
-    entity: str | None = None,
-) -> list[dict[str, Any]]:
-    """Search saved memories and return the best matches, highest score first.
-
-    Matching is keyword overlap against each memory's title, body, tags and entities, so query with
-    the words you expect to find written there — a short phrase beats a single word. `kind`, `tags`
-    and `entity` narrow the search; `tags` requires every tag listed. Deleted and superseded
-    memories are never returned, and an empty list means nothing was saved about this yet.
-    """
-    if ctx.memory is None:
-        raise TantraError(NO_MEMORY)
-    hits = await ctx.memory.recall(query, k=k, kind=kind, tags=list(tags) if tags else None, entity=entity)
-    return [
-        {
-            "id": hit.memory.id,
-            "kind": hit.memory.kind,
-            "title": hit.memory.title,
-            "body": hit.memory.body,
-            "tags": list(hit.memory.tags),
-            "entities": list(hit.memory.entities),
-            "score": hit.score,
-            "mode": hit.mode,
-        }
-        for hit in hits
-    ]
+memory_write, memory_recall = memory_tools()

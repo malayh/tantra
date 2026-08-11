@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterable, Sequence
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from tantra.events import SessionEvent, SessionHeader, Stamped
+
+if TYPE_CHECKING:
+    from tantra.memory import MemoryRecord
+
+_MISSING = object()
+
+
+def matches_metadata(metadata: dict[str, Any], wanted: dict[str, Any] | None) -> bool:
+    if not wanted:
+        return True
+    return all(metadata.get(key, _MISSING) == value for key, value in wanted.items())
 
 
 class Store(Protocol):
@@ -61,6 +72,28 @@ class Store(Protocol):
     async def release_lease(self, sid: str, holder: str) -> None:
         """Drop the lease when `holder` owns it, otherwise do nothing."""
 
+    async def memory_put(self, row: MemoryRecord) -> None:
+        """Store a memory row, overwriting any row already held under its id."""
+
+    async def memory_get(self, mid: str) -> MemoryRecord | None:
+        """Return one memory row by id, deleted and superseded ones included, or None when unknown."""
+
+    async def memory_all(
+        self,
+        *,
+        metadata: dict[str, Any] | None = None,
+        include_dead: bool = False,
+    ) -> list[MemoryRecord]:
+        """Return memory rows. `metadata` matches as a subset; a key the row lacks never matches.
+
+        Deleted and superseded rows are left out unless `include_dead`. Keep the filter values
+        scalar: `PostgresStore` matches with jsonb containment, which reads a list or dict value as
+        a recursive subset rather than an equality test.
+        """
+
+    async def memory_search(self, vector: list[float], k: int) -> list[tuple[MemoryRecord, float]] | None:
+        """Return up to `k` live rows nearest `vector` with their distances, or None without a vector path."""
+
 
 def select_headers(
     headers: Iterable[SessionHeader],
@@ -80,3 +113,13 @@ def select_headers(
     if metadata:
         rows = [h for h in rows if all(h.metadata.get(k) == v for k, v in metadata.items())]
     return rows[:limit]
+
+
+def select_memories(
+    rows: Iterable[MemoryRecord],
+    *,
+    metadata: dict[str, Any] | None = None,
+    include_dead: bool = False,
+) -> list[MemoryRecord]:
+    live = list(rows) if include_dead else [r for r in rows if not r.deleted and r.superseded_by is None]
+    return [row for row in live if matches_metadata(row.metadata, metadata)]

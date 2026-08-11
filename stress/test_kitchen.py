@@ -302,7 +302,7 @@ async def test_before_tool_denial_is_a_guardrail() -> None:
     assert denied.is_error
     assert "denied by hook: drafts are never published unattended" in str(denied.result)
     assert [event.call_id for event in picks(events, "tool_call_started")] == [
-        event.call_id for event in picks(events, "tool_call_requested") if event.name == "lookup"
+        event.call_id for event in picks(events, "tool_call_completed")
     ]
     assert [event.stop_reason for event in picks(events, "turn_completed")] == ["completed"]
     check_pairs(provider.requests)
@@ -357,7 +357,7 @@ async def test_permission_matrix() -> None:
     assert outcome["tally"].is_error
     assert "denied by user" in str(outcome["tally"].result)
     assert LEDGER.tallied == []
-    assert sorted(names[call_id] for call_id in started) == ["memory_recall", "publish"]
+    assert sorted(names[call_id] for call_id in started) == ["memory_recall", "memory_write", "publish", "tally"]
     assert [event.stop_reason for event in picks(events, "turn_completed")] == ["completed"]
     check_pairs(provider.requests)
     await check_log(store, sid)
@@ -652,7 +652,9 @@ async def test_max_steps_answers_every_orphaned_call() -> None:
     assert len(picks(events, "tool_call_requested")) == 2
     assert all(event.is_error for event in picks(events, "tool_call_completed"))
     assert all("not executed: max steps reached" in str(event.result) for event in picks(events, "tool_call_completed"))
-    assert picks(events, "tool_call_started") == []
+    assert [event.call_id for event in picks(events, "tool_call_started")] == [
+        event.call_id for event in picks(events, "tool_call_completed")
+    ]
     assert LEDGER.lookups == []
     assert pairs_intact(events) == 2
     await check_log(store, sid)
@@ -675,7 +677,7 @@ async def test_invalid_tool_json_becomes_an_error_result() -> None:
     assert rejected.is_error
     assert "invalid JSON arguments" in str(rejected.result)
     assert LEDGER.lookups == []
-    assert picks(events, "tool_call_started") == []
+    assert [event.call_id for event in picks(events, "tool_call_started")] == [rejected.call_id]
     assert [event.stop_reason for event in picks(events, "turn_completed")] == ["completed"]
     assert len(provider.requests) == 2
     check_pairs(provider.requests)

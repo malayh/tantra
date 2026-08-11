@@ -13,7 +13,7 @@ from tantra.agent import Agent
 from tantra.errors import CorruptLog, TantraError
 from tantra.events import ToolCallCompleted, TurnCompleted
 from tantra.harness import Harness
-from tantra.memory import BuiltinMemory, MemoryRecord, MemoryWrite, memory_recall, memory_write
+from tantra.memory import BuiltinMemory, MemoryRecord, MemoryWrite, memory_recall, memory_tools, memory_write
 from tantra.providers.base import ToolCall
 from tantra.providers.fake import FakeProvider, Sample
 from tantra.stores.fs import FileSystemStore
@@ -42,6 +42,7 @@ POSTGRES = MemoryWrite(
 )
 
 QUERY = "where does the p99 panel get its latency data"
+WRITE_ARGS = json.dumps({"kind": "fact", "title": MIMIR.title, "body": MIMIR.body})
 
 
 class FakeEmbedder:
@@ -74,6 +75,11 @@ class Bare:
 class Librarian(Agent):
     prompt = "You remember things."
     tools = [memory_write, memory_recall]
+
+
+class Scribe(Agent):
+    prompt = "You remember things for one user at a time."
+    tools = list(memory_tools(lambda ctx: {"user": ctx.deps["user"]}))
 
 
 @pytest.fixture(params=["memory", "fs"])
@@ -256,11 +262,9 @@ async def test_delete_hides_a_row_from_recall_while_get_still_reports_it(store: 
     assert row.deleted is True
 
 
-async def test_deleting_or_superseding_an_unknown_id_raises(store: Any) -> None:
+async def test_superseding_an_unknown_id_raises(store: Any) -> None:
     memory = BuiltinMemory(store)
 
-    with pytest.raises(TantraError, match="unknown memory 'ghost'"):
-        await memory.delete("ghost")
     with pytest.raises(TantraError, match="unknown memory 'ghost'"):
         await memory.supersede("ghost", MIMIR)
 
@@ -279,7 +283,7 @@ async def test_a_dead_row_may_not_be_superseded_into_a_forked_chain(store: Any) 
     with pytest.raises(TantraError, match="is deleted and cannot be superseded"):
         await memory.supersede(dropped, replacement)
 
-    assert len([row for row in await store.memory_all() if not row.deleted and row.superseded_by is None]) == 1
+    assert len(await store.memory_all()) == 1
 
 
 async def test_filters_narrow_recall_by_kind_tags_entity_and_metadata(store: Any) -> None:
@@ -305,6 +309,58 @@ async def test_filters_narrow_recall_by_kind_tags_entity_and_metadata(store: Any
     assert [hit.memory.kind for hit in await memory.recall(QUERY, metadata={"company": 42})] == ["fact"]
     assert [hit.memory.kind for hit in await memory.recall(QUERY, metadata={"company": 42, "user": 7})] == ["fact"]
     assert await memory.recall(QUERY, metadata={"company": 42, "user": 9}) == []
+
+
+async def test_a_metadata_filter_never_matches_rows_missing_the_key(store: Any) -> None:
+    memory = BuiltinMemory(store)
+    await memory.write(MIMIR)
+    mine = await memory.write(MemoryWrite(**MIMIR.model_dump() | {"metadata": {"user": "a"}}))
+
+    assert [hit.memory.id for hit in await memory.recall(QUERY, metadata={"user": "a"})] == [mine]
+    assert await memory.recall(QUERY, metadata={"user": "b"}) == []
+    assert await memory.recall(QUERY, metadata={"user": None}) == []
+    assert [row.id for row in await store.memory_all(metadata={"user": "a"})] == [mine]
+    assert await store.memory_all(metadata={"user": None}) == []
+
+
+async def test_a_none_valued_metadata_filter_matches_only_rows_storing_explicit_none(store: Any) -> None:
+    memory = BuiltinMemory(store)
+    await memory.write(MIMIR)
+    await memory.write(MemoryWrite(**MIMIR.model_dump() | {"metadata": {"user": "a"}}))
+    shared = await memory.write(MemoryWrite(**MIMIR.model_dump() | {"metadata": {"user": None}}))
+
+    assert [hit.memory.id for hit in await memory.recall(QUERY, metadata={"user": None})] == [shared]
+    assert [row.id for row in await store.memory_all(metadata={"user": None})] == [shared]
+
+
+async def test_delete_returns_false_for_unknown_id_and_scope_mismatch_and_true_twice_for_an_owned_row(
+    store: Any,
+) -> None:
+    memory = BuiltinMemory(store)
+    mid = await memory.write(MemoryWrite(**MIMIR.model_dump() | {"metadata": {"user": "a"}}))
+
+    assert await memory.delete("ghost") is False
+    assert await memory.delete(mid, scope={"user": "b"}) is False
+    assert await memory.delete(mid, scope={"company": 42}) is False
+    assert (await memory.get(mid)).deleted is False
+
+    assert await memory.delete(mid, scope={"user": "a"}) is True
+    assert await memory.delete(mid, scope={"user": "a"}) is True
+    assert (await memory.get(mid)).deleted is True
+    assert await memory.recall(QUERY) == []
+
+
+async def test_supersede_with_a_scope_mismatch_raises_the_unknown_memory_error(store: Any) -> None:
+    memory = BuiltinMemory(store)
+    mid = await memory.write(MemoryWrite(**MIMIR.model_dump() | {"metadata": {"user": "a"}}))
+    replacement = MemoryWrite(kind="fact", title="Thanos serves p99", body="Moved off Mimir.")
+
+    with pytest.raises(TantraError, match=f"unknown memory '{mid}'"):
+        await memory.supersede(mid, replacement, scope={"user": "b"})
+    assert (await memory.get(mid)).superseded_by is None
+
+    new_id = await memory.supersede(mid, replacement, scope={"user": "a"})
+    assert (await memory.get(mid)).superseded_by == new_id
 
 
 async def test_kind_tag_and_entity_filters_ignore_case(store: Any) -> None:
@@ -423,6 +479,60 @@ async def test_the_tools_write_and_recall_through_a_turn_without_leaking_vectors
     assert recalled[0]["mode"] == "keyword"
     assert set(recalled[0]) == {"id", "kind", "title", "body", "tags", "entities", "score", "mode"}
     assert picks(events, TurnCompleted)[0].stop_reason == "completed"
+
+
+async def test_memory_tools_factory_stamps_scope_metadata_and_recall_stays_in_scope() -> None:
+    store = MemoryStore()
+    memory = BuiltinMemory(store)
+    samples = [
+        Sample(tool_calls=[call("memory_write", WRITE_ARGS, cid="w1")]),
+        Sample(text="saved"),
+        Sample(tool_calls=[call("memory_recall", json.dumps({"query": QUERY}), cid="r1")]),
+        Sample(text="nothing here"),
+        Sample(tool_calls=[call("memory_recall", json.dumps({"query": QUERY}), cid="r2")]),
+        Sample(text="found it"),
+    ]
+    harness = Harness(
+        FakeProvider(samples),
+        store,
+        [Scribe],
+        default_model="fake/model",
+        memory=memory,
+        deps_factory=lambda header: {"user": header.metadata["user"]},
+    )
+    alice = await harness.create_session(Scribe, {"user": "alice"})
+    bob = await harness.create_session(Scribe, {"user": "bob"})
+
+    written = results(await collect(harness.run(alice.id, "remember where p99 comes from")))["w1"]
+    theirs = results(await collect(harness.run(bob.id, "what do you know about p99")))["r1"]
+    ours = results(await collect(harness.run(alice.id, "what do you know about p99")))["r2"]
+
+    assert not written.is_error
+    assert (await memory.get(written.result)).metadata == {"user": "alice"}
+    assert theirs.result == []
+    assert [row["id"] for row in ours.result] == [written.result]
+
+    writer, reader = Scribe.tools
+    assert "metadata" not in writer.schema.parameters["properties"]
+    assert "metadata" not in reader.schema.parameters["properties"]
+
+
+async def test_unscoped_memory_tools_behave_as_before() -> None:
+    harness, memory, sid = await build(
+        [
+            Sample(tool_calls=[call("memory_write", WRITE_ARGS, cid="w1")]),
+            Sample(tool_calls=[call("memory_recall", json.dumps({"query": QUERY}), cid="r1")]),
+            Sample(text="noted"),
+        ]
+    )
+    fresh_write, fresh_recall = memory_tools()
+
+    completed = results(await collect(harness.run(sid, "remember where p99 comes from")))
+
+    mid = completed["w1"].result
+    assert (await memory.get(mid)).metadata == {}
+    assert [row["id"] for row in completed["r1"].result] == [mid]
+    assert (fresh_write.schema, fresh_recall.schema) == (memory_write.schema, memory_recall.schema)
 
 
 async def test_a_harness_without_memory_turns_a_write_into_an_error_result_not_a_failed_turn() -> None:

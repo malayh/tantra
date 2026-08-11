@@ -22,6 +22,7 @@ from tantra.events import (
     TurnStarted,
     Usage,
 )
+from tantra.memory import MemoryRecord
 from tantra.stores.base import Store
 
 StoreFactory = Callable[[], Store]
@@ -44,6 +45,9 @@ async def store_conformance(store_factory: StoreFactory) -> None:
     interval while it runs, so that a backend whose critical section is unguarded actually loses.
 
     `setup()` is called twice on purpose: it must be idempotent.
+
+    Memory rows are part of the `Store` protocol, so they are checked too; a store predating them —
+    one without `memory_put` — skips those checks rather than failing them.
     """
     await store_factory().setup()
     await store_factory().setup()
@@ -58,12 +62,21 @@ async def store_conformance(store_factory: StoreFactory) -> None:
     await _check_lease(store_factory)
     await _check_lease_expiry(store_factory)
     await _check_lease_contention(store_factory)
+    await _check_memory_rows(store_factory)
 
 
 def _header(**kwargs: Any) -> SessionHeader:
     kwargs.setdefault("id", uuid.uuid4().hex)
     kwargs.setdefault("agent", "build")
     return SessionHeader(**kwargs)
+
+
+def _memory(**kwargs: Any) -> MemoryRecord:
+    kwargs.setdefault("id", uuid.uuid4().hex)
+    kwargs.setdefault("kind", "fact")
+    kwargs.setdefault("title", "The p99 panel reads from Mimir")
+    kwargs.setdefault("body", "Latency percentiles for the checkout service come from Mimir.")
+    return MemoryRecord(**kwargs)
 
 
 async def _expect(error: type[Exception], coro: Awaitable[Any], message: str) -> None:
@@ -317,6 +330,42 @@ async def _check_lease_expiry(factory: StoreFactory) -> None:
 
     assert await worker_a.acquire_lease(header.id, "worker-a", 30) is False
     await worker_b.release_lease(header.id, "worker-b")
+
+
+async def _check_memory_rows(factory: StoreFactory) -> None:
+    store = factory()
+    if not hasattr(store, "memory_put"):
+        return
+    tag = uuid.uuid4().hex
+    named = _memory(metadata={"tag": tag, "user": "u1"}, tags=["dashboard"], entities=["mimir"], embedding=[1.0, 0.0])
+    absent = _memory(metadata={"tag": tag})
+    explicit = _memory(metadata={"tag": tag, "user": None})
+    gone = _memory(metadata={"tag": tag, "user": "u1"}, deleted=True)
+    replaced = _memory(metadata={"tag": tag, "user": "u1"}, superseded_by=named.id)
+    for row in (named, absent, explicit, gone, replaced):
+        await store.memory_put(row)
+
+    reader = factory()
+    loaded = await reader.memory_get(named.id)
+    assert loaded is not None
+    assert loaded.model_dump() == named.model_dump()
+    assert await reader.memory_get(uuid.uuid4().hex) is None
+
+    live = {row.id for row in await reader.memory_all(metadata={"tag": tag})}
+    assert live == {named.id, absent.id, explicit.id}, "memory_all returned a deleted or superseded row"
+    dead = {row.id for row in await reader.memory_all(metadata={"tag": tag}, include_dead=True)}
+    assert dead == live | {gone.id, replaced.id}, "memory_all(include_dead=True) dropped a dead row"
+
+    assert {row.id for row in await reader.memory_all(metadata={"tag": tag, "user": "u1"})} == {named.id}
+    assert {row.id for row in await reader.memory_all(metadata={"tag": tag, "user": None})} == {explicit.id}
+    assert await reader.memory_all(metadata={"tag": tag, "user": "nobody"}) == []
+
+    found = await reader.memory_search([1.0, 0.0], 5)
+    if found is not None:
+        distances = [distance for _, distance in found]
+        assert distances == sorted(distances), "memory_search returned rows out of distance order"
+        alive = all(not row.deleted and row.superseded_by is None for row, _ in found)
+        assert alive, "memory_search returned a deleted or superseded row"
 
 
 def _acquire_in_thread(factory: StoreFactory, sid: str, holder: str, barrier: threading.Barrier) -> bool:

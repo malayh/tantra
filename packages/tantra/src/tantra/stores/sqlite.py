@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from tantra.errors import CorruptLog, SeqConflict, SessionExists, SessionNotFound
 from tantra.events import Lease, SessionEvent, SessionHeader, Stamped
 from tantra.memory import MemoryRecord
-from tantra.stores.base import select_headers
+from tantra.stores.base import select_headers, select_memories
 
 BUSY_TIMEOUT_MS = 30000
 
@@ -173,10 +173,19 @@ class SQLiteStore:
             row = conn.execute("SELECT row FROM memories WHERE id = ?", (mid,)).fetchone()
         return _parse_row(mid, row[0]) if row is not None else None
 
-    async def memory_all(self) -> list[MemoryRecord]:
+    async def memory_all(
+        self,
+        *,
+        metadata: dict[str, Any] | None = None,
+        include_dead: bool = False,
+    ) -> list[MemoryRecord]:
         with self._connect() as conn:
             rows = conn.execute("SELECT id, row FROM memories ORDER BY id").fetchall()
-        return [_parse_row(mid, raw) for mid, raw in rows]
+        parsed = [_parse_row(mid, raw) for mid, raw in rows]
+        return select_memories(parsed, metadata=metadata, include_dead=include_dead)
+
+    async def memory_search(self, vector: list[float], k: int) -> list[tuple[MemoryRecord, float]] | None:
+        return None
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:

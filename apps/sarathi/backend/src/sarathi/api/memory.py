@@ -19,15 +19,11 @@ def _out(row: MemoryRecord) -> MemoryOut:
     )
 
 
-def _owned(row: MemoryRecord, uid: str) -> bool:
-    return not row.deleted and row.superseded_by is None and row.metadata.get("user") == uid
-
-
 @router.get("", response_model=list[MemoryOut])
 async def list_memory(user: CurrentUser, factory: FactoryDep) -> list[MemoryOut]:
     harness = factory(None)
     try:
-        rows = [row for row in await harness.store.memory_all() if _owned(row, str(user.id))]
+        rows = await harness.store.memory_all(metadata={"user": str(user.id)})
         rows.sort(key=lambda row: row.created_at, reverse=True)
         return [_out(row) for row in rows]
     finally:
@@ -38,9 +34,7 @@ async def list_memory(user: CurrentUser, factory: FactoryDep) -> list[MemoryOut]
 async def delete_memory(memory_id: str, user: CurrentUser, factory: FactoryDep) -> None:
     harness = factory(None)
     try:
-        row = await harness.store.memory_get(memory_id)
-        if row is None or not _owned(row, str(user.id)):
+        if not await BuiltinMemory(harness.store).delete(memory_id, scope={"user": str(user.id)}):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory not found")
-        await BuiltinMemory(harness.store).delete(memory_id)
     finally:
         await close_harness(harness)

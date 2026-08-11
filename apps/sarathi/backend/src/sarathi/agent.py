@@ -9,64 +9,22 @@ from sarathi.provider import ReasoningCompat
 from tantra import (
     Agent,
     BuiltinMemory,
-    Context,
     Harness,
-    MemoryWrite,
     ModelLimits,
     OpenAICompatibleEmbedder,
     PostgresStore,
     PruneThenSummarize,
     SessionHeader,
-    tool,
+    memory_tools,
 )
 from tantra.extratools.doc import read_doc
 from tantra.extratools.web import web_fetch, web_search
 
 MAX_OUTPUT = 8192
-TITLE_CHARS = 80
 
 HarnessFactory = Callable[[str | None], Harness]
 
-
-@tool
-async def memory_write(content: str, kind: str, ctx: Context) -> str:
-    """Save one durable fact about this user and return its id.
-
-    Write a single self-contained fact, decision or preference per call: `content` is the whole
-    memory in one sentence, written so it still reads clearly months later. `kind` groups rows for
-    filtered recall — pick a short lowercase label and reuse it ("preference", "decision", "fact").
-    Do not save anything you can look up again. The user is asked to approve every write.
-    """
-    return await ctx.memory.write(
-        MemoryWrite(
-            kind=kind,
-            title=content[:TITLE_CHARS],
-            body=content,
-            metadata={"user": ctx.deps["user_id"]},
-        )
-    )
-
-
-@tool
-async def memory_recall(query: str, ctx: Context) -> list[dict[str, Any]]:
-    """Search what you have saved about this user and return the best matches, highest score first.
-
-    Matching is keyword overlap against each memory's title and body, so query with the words you
-    expect to find written there — a short phrase beats a single word. Deleted memories are never
-    returned, and an empty list means nothing was saved about this yet.
-    """
-    hits = await ctx.memory.recall(query, metadata={"user": ctx.deps["user_id"]})
-    return [
-        {
-            "id": hit.memory.id,
-            "kind": hit.memory.kind,
-            "title": hit.memory.title,
-            "body": hit.memory.body,
-            "score": hit.score,
-            "mode": hit.mode,
-        }
-        for hit in hits
-    ]
+memory_write, memory_recall = memory_tools(lambda ctx: {"user": ctx.deps["user_id"]})
 
 
 class Researcher(Agent):

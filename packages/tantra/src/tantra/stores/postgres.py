@@ -53,6 +53,10 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         )
         """,
     ),
+    (
+        "CREATE INDEX IF NOT EXISTS memories_metadata_idx"
+        " ON {schema}.memories USING gin ((row->'metadata') jsonb_path_ops)",
+    ),
 )
 
 
@@ -271,10 +275,27 @@ class PostgresStore:
             row = await cursor.fetchone()
         return _parse_row(mid, row[0]) if row is not None else None
 
-    async def memory_all(self) -> list[MemoryRecord]:
+    async def memory_all(
+        self,
+        *,
+        metadata: dict[str, Any] | None = None,
+        include_dead: bool = False,
+    ) -> list[MemoryRecord]:
+        conditions = [sql.SQL("TRUE")]
+        params: dict[str, Any] = {}
+        if not include_dead:
+            conditions.append(
+                sql.SQL("NOT COALESCE((row->>'deleted')::boolean, false) AND row->>'superseded_by' IS NULL")
+            )
+        if metadata:
+            conditions.append(sql.SQL("row->'metadata' @> %(metadata)s"))
+            params["metadata"] = Jsonb(metadata)
+        query = sql.SQL("SELECT id, row FROM {schema}.memories WHERE {conditions} ORDER BY id").format(
+            schema=self._ident, conditions=sql.SQL(" AND ").join(conditions)
+        )
         async with self._lock:
             conn = await self._connection()
-            cursor = await conn.execute(self._sql("SELECT id, row FROM {schema}.memories ORDER BY id"))
+            cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
         return [_parse_row(mid, raw) for mid, raw in rows]
 

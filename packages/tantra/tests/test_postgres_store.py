@@ -118,12 +118,15 @@ async def test_setup_is_versioned_and_running_it_twice_leaves_the_version_unchan
 ) -> None:
     store = await _store(postgres_dsn, pg_schema)
     versions = _query(postgres_dsn, pg_schema, "SELECT version FROM {schema}.schema_version ORDER BY version")
-    assert versions == [(1,)]
+    assert versions == [(1,), (2,)]
 
     await store.setup()
     await PostgresStore(postgres_dsn, schema=pg_schema).setup()
 
-    assert _query(postgres_dsn, pg_schema, "SELECT version FROM {schema}.schema_version ORDER BY version") == [(1,)]
+    assert _query(postgres_dsn, pg_schema, "SELECT version FROM {schema}.schema_version ORDER BY version") == [
+        (1,),
+        (2,),
+    ]
 
 
 async def test_a_second_store_instance_sees_the_first_ones_writes(postgres_dsn: str, pg_schema: str) -> None:
@@ -284,7 +287,10 @@ async def test_racing_setups_on_a_fresh_schema_all_succeed(postgres_dsn: str, pg
         *(asyncio.to_thread(_setup_in_thread, postgres_dsn, pg_schema, barrier) for _ in range(SETUP_RACERS))
     )
 
-    assert _query(postgres_dsn, pg_schema, "SELECT version FROM {schema}.schema_version ORDER BY version") == [(1,)]
+    assert _query(postgres_dsn, pg_schema, "SELECT version FROM {schema}.schema_version ORDER BY version") == [
+        (1,),
+        (2,),
+    ]
 
 
 async def test_listing_orders_ids_exactly_the_way_select_headers_does(postgres_dsn: str, pg_schema: str) -> None:

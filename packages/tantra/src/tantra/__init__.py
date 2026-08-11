@@ -37,8 +37,10 @@ from tantra.memory import (
     Memory,
     MemoryHit,
     MemoryRecord,
+    MemoryScope,
     MemoryWrite,
     memory_recall,
+    memory_tools,
     memory_write,
 )
 from tantra.providers.base import Embedder, ModelLimits, Provider, ProviderEvent, SampleRequest
@@ -80,6 +82,7 @@ __all__ = [
     "Memory",
     "MemoryHit",
     "MemoryRecord",
+    "MemoryScope",
     "MemoryStore",
     "MemoryWrite",
     "ModelLimits",
@@ -114,6 +117,7 @@ __all__ = [
     "build_name_table",
     "collect",
     "memory_recall",
+    "memory_tools",
     "memory_write",
     "tool",
 ]

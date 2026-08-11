@@ -71,7 +71,7 @@ async def test_deleting_an_own_row_drops_it_from_the_list(
     assert [row["id"] for row in await _list(client, token)] == [kept]
 
     again = await client.delete(f"/api/memory/{doomed}", headers={"Authorization": f"Bearer {token}"})
-    assert again.status_code == 404
+    assert again.status_code == 204
 
 
 async def test_deleting_an_unknown_row_is_a_404(client: httpx.AsyncClient, signup: Signup) -> None:

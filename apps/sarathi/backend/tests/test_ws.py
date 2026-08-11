@@ -70,7 +70,8 @@ def _message(text: str) -> dict[str, Any]:
 
 
 def _write_call(content: str) -> ToolCall:
-    return ToolCall(id="m1", name="memory_write", args=json.dumps({"content": content, "kind": "preference"}))
+    args = json.dumps({"kind": "preference", "title": content, "body": content})
+    return ToolCall(id="m1", name="memory_write", args=args)
 
 
 async def _answer(ws: AsyncWebSocketSession, frames: list[dict[str, Any]], response: str) -> None:

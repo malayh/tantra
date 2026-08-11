@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from tantra.errors import CorruptLog, SeqConflict, SessionExists, SessionNotFound
 from tantra.events import Lease, SessionEvent, SessionHeader, Stamped
 from tantra.memory import MemoryRecord
-from tantra.stores.base import select_headers
+from tantra.stores.base import select_headers, select_memories
 
 HEADER_FILE = "session.json"
 EVENTS_FILE = "events.jsonl"
@@ -158,11 +158,20 @@ class FileSystemStore:
             return None
         return _parse_row(path, raw)
 
-    async def memory_all(self) -> list[MemoryRecord]:
+    async def memory_all(
+        self,
+        *,
+        metadata: dict[str, Any] | None = None,
+        include_dead: bool = False,
+    ) -> list[MemoryRecord]:
         directory = self.root / MEMORY_DIR
         if not directory.is_dir():
             return []
-        return [_parse_row(path, path.read_text(encoding="utf-8")) for path in sorted(directory.glob("*.json"))]
+        rows = [_parse_row(path, path.read_text(encoding="utf-8")) for path in sorted(directory.glob("*.json"))]
+        return select_memories(rows, metadata=metadata, include_dead=include_dead)
+
+    async def memory_search(self, vector: list[float], k: int) -> list[tuple[MemoryRecord, float]] | None:
+        return None
 
     @contextmanager
     def _flock(self, sid: str, mode: int) -> Iterator[int]:

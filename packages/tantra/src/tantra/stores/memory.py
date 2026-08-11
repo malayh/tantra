@@ -8,7 +8,7 @@ from typing import Any
 from tantra.errors import SeqConflict, SessionExists, SessionNotFound
 from tantra.events import Lease, SessionEvent, SessionHeader, Stamped
 from tantra.memory import MemoryRecord
-from tantra.stores.base import select_headers
+from tantra.stores.base import select_headers, select_memories
 
 
 class MemoryStore:
@@ -113,9 +113,18 @@ class MemoryStore:
             row = self._memories.get(mid)
             return row.model_copy(deep=True) if row is not None else None
 
-    async def memory_all(self) -> list[MemoryRecord]:
+    async def memory_all(
+        self,
+        *,
+        metadata: dict[str, Any] | None = None,
+        include_dead: bool = False,
+    ) -> list[MemoryRecord]:
         with self._lock:
-            return [row.model_copy(deep=True) for row in self._memories.values()]
+            rows = select_memories(self._memories.values(), metadata=metadata, include_dead=include_dead)
+            return [row.model_copy(deep=True) for row in rows]
+
+    async def memory_search(self, vector: list[float], k: int) -> list[tuple[MemoryRecord, float]] | None:
+        return None
 
     def _with_lease(self, header: SessionHeader) -> SessionHeader:
         snapshot = header.model_copy(deep=True)

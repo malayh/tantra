@@ -302,7 +302,11 @@ Linear: P0 → P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8. P3/P4/P5 loo
   - Other PASS highlights: thoughts stream + collapse on glm-5.2; PDF grounding recovered all page-2/3 facts + page-1 from history without a second `read_doc`; durable ask survived `docker compose restart backend` with exactly one card; user-B isolation clean (3 empty recalls); model switch proven via `sample_started.model`; mid-turn reload replayed completed items only and re-sampled to a coherent finish.
   - Minor deviations logged in the report: sidebar `New chat` click intermittently doesn't navigate from a session page; theme verified via DOM/localStorage because the tester's Chrome runs Dark Reader (repaints the app dark regardless of app theme).
 
-### Phase 8 — tantra fixes + release · deps: P7 · —
+### Phase 8 — tantra fixes + release · deps: P7 · ⏳ code done 2026-08-11, publish pending
+- Status: all fixes landed in three commits (`cc92722` cancel cluster, `67c9dd6` memory cluster, `913fecf` patch_header + provider + release). Triage with user chose **fix everything**: cancel cluster + all 4 memory items + resume seq + ToolCallStarted pairing + put_header patch op + reasoning_content. Replay-depth issue proven stale (child headers persist depth) — regression test added, entry annotated.
+- Suites: tantra 628, stress 82, sarathi backend 68, UI lint+tsc — all green. Each chunk went through opus implementer → opus reviewer → fix round (reviewers caught: cancel-absorption single-retry wedge, submit-output cancel drop, MemoryStore Usage aliasing, a vacuous livelock test — all fixed with empirical negatives).
+- Live S8 re-run **PASS** (report `e2e/reports/2026-08-11.md`): stop-to-idle ~6s (was 50–75s), child log shows `cancel_requested` → `turn_completed cancelled` (P7: zero cancel events, child ran to completion), follow-up message in the same thread works. Spot-checks S2/S5/S6 PASS incl. scoped `memory_tools` stamping `{"user": ...}` live.
+- issues.md now: 11 fixed, 1 stale, 1 open by design (boundary-only cancel), 2 new (session `list()` None-wildcard; unscoped `memory_search` vector pass).
 The `packages/tantra` freeze is lifted for this phase only. Fix the `docs/issues.md` backlog in tantra core, ship `tantra-harness` 0.2.0, prove the cancel fixes with the runbook. Publishing to PyPI is manual — pause and ask the user when the release commit is ready.
 
 Cancel cluster (caused the S8 FAIL; runbook-verifiable):
@@ -317,11 +321,11 @@ Remaining `docs/issues.md` entries (unit-test-verifiable only; triage with user 
 Deliverables: fixes + unit tests in `packages/tantra`; `docs/issues.md` entries struck/annotated; sarathi updated to drop app-side workarounds that the lib now covers (recursive cancel; possibly `ReasoningCompat`); version bump to 0.2.0 + changelog; compose image rebuild (stack builds from workspace source — runbook re-test does NOT wait on PyPI).
 - **Verify:** tantra + sarathi test suites green; S8 re-run PASSes live (child log shows `cancel_requested`, child `stop_reason="cancelled"`, stop-to-idle bounded by the in-flight step); no regressions in a spot-check of S2/S5/S6; user confirms publish done.
 - Checklist:
-  - [ ] cancel cluster fixed + unit tests
-  - [ ] remaining issues triaged with user; agreed fixes landed
-  - [ ] sarathi workarounds removed where superseded
-  - [ ] 0.2.0 bump + changelog; user published (manual)
-  - [ ] compose rebuild + S8 runbook re-run PASS
+  - [x] cancel cluster fixed + unit tests
+  - [x] remaining issues triaged with user; agreed fixes landed
+  - [x] sarathi workarounds removed where superseded
+  - [ ] 0.2.0 bump + changelog; user published (manual) — bump+changelog done, publish pending
+  - [x] compose rebuild + S8 runbook re-run PASS
 
 ## Open Decisions
 - **Background sweep daemon** — reconnect-driven resume suffices for the demo; revisit if abandoned turns holding `running` status confuse the sidebar. Resolve by observing runbook runs.

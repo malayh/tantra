@@ -6,9 +6,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from tantra.errors import SeqConflict, SessionExists, SessionNotFound
-from tantra.events import Lease, SessionEvent, SessionHeader, Stamped
+from tantra.events import Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
-from tantra.stores.base import select_headers, select_memories
+from tantra.stores.base import UNSET, apply_patch, select_headers, select_memories
 
 
 class MemoryStore:
@@ -45,6 +45,31 @@ class MemoryStore:
             stored.last_seq = current.last_seq
             stored.lease = None
             self._headers[h.id] = stored
+
+    async def patch_header(
+        self,
+        sid: str,
+        *,
+        title: str | None = UNSET,
+        status: SessionStatus = UNSET,
+        pending_ask: str | None = UNSET,
+        usage: Usage = UNSET,
+        metadata: dict[str, Any] = UNSET,
+    ) -> SessionHeader:
+        with self._lock:
+            current = self._headers.get(sid)
+            if current is None:
+                raise SessionNotFound(sid)
+            stored = apply_patch(
+                current,
+                title=title,
+                status=status,
+                pending_ask=pending_ask,
+                usage=usage,
+                metadata=metadata,
+            )
+            self._headers[sid] = stored
+            return self._with_lease(stored)
 
     async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
         with self._lock:

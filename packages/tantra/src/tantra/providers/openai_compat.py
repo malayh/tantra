@@ -126,7 +126,7 @@ class OpenAICompatible:
                 if delta.content:
                     yield TextDelta(text=delta.content)
 
-                fragment = getattr(delta, "reasoning", None)
+                fragment = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
                 if fragment:
                     reasoning += fragment
                     yield ReasoningDelta(text=fragment)

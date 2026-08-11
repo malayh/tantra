@@ -22,7 +22,7 @@ run(session_id, input):
       resolve tool; hooks.before_tool (may deny/transform/escalate)
       permissions.decide(tool name) -> allow | ask | deny
       if ask: append AskRaised, release lease, RETURN (turn suspended)
-      append ToolCallStarted
+      append ToolCallStarted  (deny and refusal paths write it too, then an is_error result)
       execute; ToolProgress from ctx.emit; exceptions -> is_error result
       hooks.after_tool (may transform)
       append ToolCallCompleted

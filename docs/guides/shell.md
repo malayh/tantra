@@ -98,11 +98,11 @@ asyncio.run(main())
 ```text
 True denied by hook: the command recursively deletes '/' with `rm -r`, which is the filesystem root. ShellGuard refused to run it — do not retry it, take a narrower approach or ask the user to run it themselves
 False ok
-started: ['c2']
+started: ['c1', 'c2']
 ['completed']
 ```
 
-The denied call never produced a `ToolCallStarted` — the tool was never invoked — and the turn carried on.
+The denied call still records a `ToolCallStarted` before its error `ToolCallCompleted` — the pair is what a reader replays; `is_error` is what says the tool never ran — and the turn carried on.
 
 Swap `ShellGuard()` for `ShellGuard(on_trip="ask")` and the same command suspends the turn with the guard's reason in the approval body instead.
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import inspect
 from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from contextlib import aclosing
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -290,13 +289,9 @@ class Harness:
     async def _settle(self, header: SessionHeader, loop: TurnLoop | None, holder: str) -> None:
         if loop is not None and not loop.lease_lost:
             if loop.suspended is not None:
-                header.status = "awaiting_input"
-                header.pending_ask = loop.suspended
+                await self.store.patch_header(header.id, status="awaiting_input", pending_ask=loop.suspended)
             else:
-                header.status = "failed" if loop.failed else "idle"
-                header.pending_ask = None
-            header.updated_at = datetime.now(UTC)
-            await self.store.put_header(header)
+                await self.store.patch_header(header.id, status="failed" if loop.failed else "idle", pending_ask=None)
         await self.store.release_lease(header.id, holder)
 
     async def run(self, sid: str, input: str) -> AsyncIterator[Emitted]:
@@ -319,9 +314,7 @@ class Harness:
             skills_index = await self._skill_index(agent)
             deps = await _resolve(self.deps_factory(header)) if self.deps_factory is not None else None
 
-            header.status = "running"
-            header.updated_at = datetime.now(UTC)
-            await self.store.put_header(header)
+            await self.store.patch_header(sid, status="running")
 
             turn = TurnContext(
                 session_id=sid,
@@ -407,9 +400,7 @@ class Harness:
                 await self._notify(emitted)
                 yield emitted
 
-            header.status = "running"
-            header.updated_at = datetime.now(UTC)
-            await self.store.put_header(header)
+            await self.store.patch_header(sid, status="running")
 
             started = _last_turn(history)
             turn = TurnContext(

@@ -22,8 +22,8 @@ Exception
 | Exception | Raised when |
 |---|---|
 | `TantraError` | Base class, and the catch-all for misconfiguration: unknown agent or skill, a non-`Tool` in `Agent.tools`, an invalid permission value, `max_steps < 1`, duplicate agent or tool names, `max_depth` exceeded, `ctx.spawn` outside a tool call, a resume with a mismatched `ask_id`/`response`, a lease lost mid-turn. |
-| `SeqConflict` | A store `append` was given an `expect_seq` that is not the session's current last seq — another writer got there first. Also raised by `Harness.cancel` after 5 failed attempts. |
-| `SessionNotFound` | The session id is unknown to the store. Raised by `run`, `resume`, `cancel`, `replay`, and by store `append` / `put_header` / `acquire_lease`. |
+| `SeqConflict` | A store `append` was given an `expect_seq` that is not the session's current last seq — another writer got there first. |
+| `SessionNotFound` | The session id is unknown to the store. Raised by `run`, `resume`, `cancel`, `replay`, and by store `append` / `put_header` / `patch_header` / `acquire_lease`. |
 | `SessionExists` | `Store.create` was given an id that is already taken. |
 | `CorruptLog` | A store read hit a stored event it cannot decode. Stores raise rather than skip: a gap in the suffix would silently rewrite history. |
 | `SessionBusy` | `run` or `resume` could not take the single-writer lease — another process holds a live one. Carries `.sid`. |

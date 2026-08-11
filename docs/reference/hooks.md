@@ -64,7 +64,7 @@ Rules the chain follows:
 - **A `Denial` stops the chain immediately.** Later hooks do not run.
 - **An `Escalation` does not stop the chain.** The first escalation's reason is kept, later hooks still run, and a later `Denial` still wins. The result is one merged verdict — `strictest(verdict, "ask")` — so an already-`ask` tool raises one approval, not two.
 - **Hooks re-fire on resume.** A suspended turn re-executes the tool call from the start, and `before_tool` runs again for it. Keep it a pure decision; put side effects in `after_tool` or `on_event`.
-- Denial and escalation both happen **before** permission resolution and before `ToolCallStarted` is written.
+- Denial and escalation both happen **before** permission resolution. A denial still writes `ToolCallStarted` ahead of the error `ToolCallCompleted` — the tool never runs, but the pair stays intact for readers.
 
 ## See also
 

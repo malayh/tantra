@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterable, Sequence
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
-from tantra.events import SessionEvent, SessionHeader, Stamped
+from pydantic import BaseModel
+
+from tantra.events import SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 
 if TYPE_CHECKING:
     from tantra.memory import MemoryRecord
 
 _MISSING = object()
+
+UNSET: Any = object()
 
 
 def matches_metadata(metadata: dict[str, Any], wanted: dict[str, Any] | None) -> bool:
@@ -35,6 +40,24 @@ class Store(Protocol):
 
     async def put_header(self, h: SessionHeader) -> None:
         """Overwrite the session header. `last_seq` and `lease` are store-owned and preserved."""
+
+    async def patch_header(
+        self,
+        sid: str,
+        *,
+        title: str | None = UNSET,
+        status: SessionStatus = UNSET,
+        pending_ask: str | None = UNSET,
+        usage: Usage = UNSET,
+        metadata: dict[str, Any] = UNSET,
+    ) -> SessionHeader:
+        """Apply one atomic edit to the header and return the result.
+
+        Only the fields passed change, so a concurrent writer touching other fields is not lost.
+        `metadata` merges shallowly — the given keys overwrite, the rest survive, nothing is
+        deleted. `updated_at` is stamped on every patch; `last_seq` and `lease` are store-owned and
+        left alone. Raises `SessionNotFound` when the session is unknown.
+        """
 
     async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
         """Append events and return the new last seq.
@@ -93,6 +116,17 @@ class Store(Protocol):
 
     async def memory_search(self, vector: list[float], k: int) -> list[tuple[MemoryRecord, float]] | None:
         """Return up to `k` live rows nearest `vector` with their distances, or None without a vector path."""
+
+
+def apply_patch(header: SessionHeader, **fields: Any) -> SessionHeader:
+    updated = header.model_copy(deep=True)
+    for name, value in fields.items():
+        if value is UNSET:
+            continue
+        patched = {**updated.metadata, **value} if name == "metadata" else value
+        setattr(updated, name, patched.model_copy(deep=True) if isinstance(patched, BaseModel) else patched)
+    updated.updated_at = datetime.now(UTC)
+    return updated
 
 
 def select_headers(

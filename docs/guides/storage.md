@@ -79,7 +79,16 @@ The factory must return a store over the same underlying storage on every call �
 
 ## Memory rows
 
-Session storage and [memory](memory.md) rows are separate concerns. Memory rows live on the concrete stores through duck-typed `memory_put` / `memory_get` / `memory_all` methods that sit **outside** the frozen `Store` protocol; Postgres adds `memory_search` for pgvector. All four shipped backends implement the first three. A custom store that does not is still a perfectly good session store — `BuiltinMemory` just refuses it at construction.
+Session storage and [memory](memory.md) rows are separate concerns, but the row methods are **part of** the `Store` protocol:
+
+```python
+async def memory_put(self, row: MemoryRecord) -> None
+async def memory_get(self, mid: str) -> MemoryRecord | None
+async def memory_all(self, *, metadata=None, include_dead=False) -> list[MemoryRecord]
+async def memory_search(self, vector: list[float], k: int) -> list[tuple[MemoryRecord, float]] | None
+```
+
+`memory_all` filters on `metadata` as a subset and leaves out deleted and superseded rows unless `include_dead`. Only Postgres has a real `memory_search`; the others return `None` and recall degrades to keyword-only. A custom store that skips the row methods is still a perfectly good session store — `BuiltinMemory` just refuses it at construction.
 
 ## Next
 

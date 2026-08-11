@@ -10,9 +10,9 @@ from typing import Any
 from pydantic import ValidationError
 
 from tantra.errors import CorruptLog, SeqConflict, SessionExists, SessionNotFound
-from tantra.events import Lease, SessionEvent, SessionHeader, Stamped
+from tantra.events import Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
-from tantra.stores.base import select_headers, select_memories
+from tantra.stores.base import UNSET, apply_patch, select_headers, select_memories
 
 BUSY_TIMEOUT_MS = 30000
 
@@ -92,6 +92,34 @@ class SQLiteStore:
                 "UPDATE sessions SET header = ?, created_at = ?, parent_id = ? WHERE id = ?",
                 (stored.model_dump_json(), stored.created_at.isoformat(), stored.parent_id, stored.id),
             )
+
+    async def patch_header(
+        self,
+        sid: str,
+        *,
+        title: str | None = UNSET,
+        status: SessionStatus = UNSET,
+        pending_ask: str | None = UNSET,
+        usage: Usage = UNSET,
+        metadata: dict[str, Any] = UNSET,
+    ) -> SessionHeader:
+        with self._write() as conn:
+            row = conn.execute("SELECT header, last_seq, lease FROM sessions WHERE id = ?", (sid,)).fetchone()
+            if row is None:
+                raise SessionNotFound(sid)
+            current = SessionHeader.model_validate_json(row[0])
+            current.last_seq = row[1]
+            stored = apply_patch(
+                current,
+                title=title,
+                status=status,
+                pending_ask=pending_ask,
+                usage=usage,
+                metadata=metadata,
+            )
+            conn.execute("UPDATE sessions SET header = ? WHERE id = ?", (stored.model_dump_json(), sid))
+            stored.lease = _lease(row[2])
+            return stored
 
     async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
         with self._write() as conn:

@@ -145,8 +145,7 @@ class Connection:
         header = await self.harness.store.header(self.sid)
         if header is None or header.title is not None:
             return
-        header.title = title
-        await self.harness.store.put_header(header)
+        await self.harness.store.patch_header(self.sid, title=title)
         await self.send(TitleUpdatedFrame(title=title))
 
     async def pump_loop(self) -> None:

@@ -58,8 +58,7 @@ async def patch_session(
         header = await harness.store.header(session_id)
         if header is None or header.metadata.get("user") != str(user.id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
-        header.metadata["model"] = _resolve_model(body.model)
-        await harness.store.put_header(header)
-        return _out(header)
+        patched = await harness.store.patch_header(session_id, metadata={"model": _resolve_model(body.model)})
+        return _out(patched)
     finally:
         await close_harness(harness)

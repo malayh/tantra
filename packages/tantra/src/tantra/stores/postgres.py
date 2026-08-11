@@ -9,8 +9,9 @@ from typing import Any
 from pydantic import ValidationError
 
 from tantra.errors import CorruptLog, SeqConflict, SessionExists, SessionNotFound, TantraError
-from tantra.events import Lease, SessionEvent, SessionHeader, Stamped
+from tantra.events import Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
+from tantra.stores.base import UNSET, apply_patch
 
 try:
     import psycopg
@@ -144,6 +145,42 @@ class PostgresStore:
                     ),
                     (_json(stored), Jsonb(stored.metadata), stored.parent_id, stored.created_at, stored.id),
                 )
+
+    async def patch_header(
+        self,
+        sid: str,
+        *,
+        title: str | None = UNSET,
+        status: SessionStatus = UNSET,
+        pending_ask: str | None = UNSET,
+        usage: Usage = UNSET,
+        metadata: dict[str, Any] = UNSET,
+    ) -> SessionHeader:
+        async with self._lock:
+            conn = await self._connection()
+            async with conn.transaction():
+                cursor = await conn.execute(
+                    self._sql("SELECT header, last_seq, lease FROM {schema}.sessions WHERE id = %s FOR UPDATE"), (sid,)
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise SessionNotFound(sid)
+                current = SessionHeader.model_validate(row[0])
+                current.last_seq = row[1]
+                stored = apply_patch(
+                    current,
+                    title=title,
+                    status=status,
+                    pending_ask=pending_ask,
+                    usage=usage,
+                    metadata=metadata,
+                )
+                await conn.execute(
+                    self._sql("UPDATE {schema}.sessions SET header = %s, metadata = %s WHERE id = %s"),
+                    (_json(stored), Jsonb(stored.metadata), sid),
+                )
+                stored.lease = Lease.model_validate(row[2]) if row[2] is not None else None
+                return stored
 
     async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
         async with self._lock:

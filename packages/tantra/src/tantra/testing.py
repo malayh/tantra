@@ -57,6 +57,7 @@ async def store_conformance(store_factory: StoreFactory) -> None:
     await _check_stale_expect_seq(store_factory)
     await _check_blind_append(store_factory)
     await _check_put_header(store_factory)
+    await _check_patch_header(store_factory)
     await _check_unknown_session(store_factory)
     await _check_list(store_factory)
     await _check_lease(store_factory)
@@ -239,6 +240,67 @@ async def _check_put_header(factory: StoreFactory) -> None:
     await store.release_lease(header.id, "worker-a")
 
 
+async def _check_patch_header(factory: StoreFactory) -> None:
+    store = factory()
+    header = _header(title="p99", metadata={"company": 42, "user": 7}, usage=Usage(input_tokens=9))
+    await store.create(header)
+    await store.append(header.id, [TextPart(sample_id="s1", text="one")], expect_seq=0)
+    assert await store.acquire_lease(header.id, "worker-a", 30) is True
+
+    before = await store.header(header.id)
+    assert before is not None
+
+    patched = await store.patch_header(header.id, title="renamed")
+    assert patched.title == "renamed"
+    assert patched.status == "idle", "patch_header changed a field it was not given"
+    assert patched.pending_ask is None, "patch_header changed a field it was not given"
+    assert patched.metadata == {"company": 42, "user": 7}, "patch_header changed a field it was not given"
+    assert patched.usage.input_tokens == 9, "patch_header changed a field it was not given"
+    assert patched.updated_at > before.updated_at, "patch_header did not stamp updated_at"
+    assert patched.last_seq == 1, "patch_header rewrote last_seq"
+    assert patched.lease is not None and patched.lease.holder == "worker-a", "patch_header dropped the lease"
+    stored = await factory().header(header.id)
+    assert stored is not None
+    assert stored.model_dump() == patched.model_dump(), "patch_header returned something other than what it stored"
+
+    merged = await store.patch_header(header.id, status="running", metadata={"user": 8, "team": "sre"})
+    assert merged.status == "running"
+    assert merged.title == "renamed"
+    assert merged.metadata == {"company": 42, "user": 8, "team": "sre"}, "patch_header did not merge metadata"
+
+    loaded = await factory().header(header.id)
+    assert loaded is not None
+    assert loaded.metadata == {"company": 42, "user": 8, "team": "sre"}
+    assert loaded.last_seq == 1
+    assert loaded.lease is not None and loaded.lease.holder == "worker-a"
+
+    usage = Usage(input_tokens=21, output_tokens=4)
+    filled = await store.patch_header(header.id, usage=usage, pending_ask="ask-1")
+    assert filled.usage == usage, "patch_header did not store usage"
+    assert filled.pending_ask == "ask-1", "patch_header did not store pending_ask"
+    assert filled.title == "renamed"
+
+    usage.input_tokens = 99
+    loaded = await factory().header(header.id)
+    assert loaded is not None
+    assert loaded.usage.input_tokens == 21, "patch_header kept a reference to the caller's usage"
+    assert loaded.pending_ask == "ask-1"
+
+    cleared = await store.patch_header(header.id, title=None, pending_ask=None)
+    assert cleared.title is None, "patch_header(title=None) did not clear the title"
+    assert cleared.pending_ask is None, "patch_header(pending_ask=None) did not clear the pending ask"
+    assert cleared.usage.input_tokens == 21, "clearing one field disturbed another"
+    assert cleared.status == "running", "clearing one field disturbed another"
+    assert cleared.metadata == {"company": 42, "user": 8, "team": "sre"}, "clearing one field disturbed another"
+
+    loaded = await factory().header(header.id)
+    assert loaded is not None
+    assert loaded.title is None
+    assert loaded.pending_ask is None
+
+    await store.release_lease(header.id, "worker-a")
+
+
 async def _check_unknown_session(factory: StoreFactory) -> None:
     store = factory()
     sid = uuid.uuid4().hex
@@ -256,6 +318,11 @@ async def _check_unknown_session(factory: StoreFactory) -> None:
         SessionNotFound,
         store.put_header(_header(id=sid)),
         "put_header on an unknown session did not raise SessionNotFound",
+    )
+    await _expect(
+        SessionNotFound,
+        store.patch_header(sid, title="renamed"),
+        "patch_header on an unknown session did not raise SessionNotFound",
     )
     await _expect(
         SessionNotFound,

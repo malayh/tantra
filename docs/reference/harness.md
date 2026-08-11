@@ -82,7 +82,7 @@ On exit the header is settled: `status` becomes `idle`, `failed`, or `awaiting_i
 
 Re-drives the session's incomplete turn. Three shapes:
 
-- **`resume(sid)` with an unanswered ask** — yields the pending `AskRaised` again and returns without running anything. Use it to re-present a question after a reconnect. The exception is a session that was cancelled while suspended: the replay is skipped and the turn is re-driven straight to `TurnCompleted(stop_reason="cancelled")`.
+- **`resume(sid)` with an unanswered ask** — yields the pending `AskRaised` again and returns without running anything. Use it to re-present a question after a reconnect. The re-emitted frame carries `seq=None`, marking it a replay of an event already in the log rather than a new one. The exception is a session that was cancelled while suspended: the replay is skipped and the turn is re-driven straight to `TurnCompleted(stop_reason="cancelled")`.
 - **`resume(sid, ask_id, response)`** — appends `AskAnswered`, then continues the turn. The tool that asked is **re-executed from its first line**; already-answered asks return their recorded responses without prompting.
 - **`resume(sid)` with no pending ask** — re-drives a turn abandoned mid-flight (dropped stream, dead worker, cancelled session).
 
@@ -90,9 +90,11 @@ Raises `SessionNotFound`, `SessionBusy`, or `TantraError` when there is no incom
 
 `before_turn` hooks do **not** fire on resume; `before_sample` does.
 
-## `async cancel(sid: str) -> bool`
+## `async cancel(sid: str, *, recursive: bool = False) -> bool`
 
-Appends `CancelRequested` for the running turn and returns `True`. Returns `False` when there is no incomplete turn. Raises `SessionNotFound`, or `SeqConflict` if it loses the append race five times.
+Appends `CancelRequested` for the running turn and returns `True`. Returns `False` when there is no incomplete turn. With `recursive=True`, every descendant session is flagged deepest-first before the target, and the return is `True` when at least one of them had a turn to cancel. Raises `SessionNotFound`.
+
+The append is **blind** (`expect_seq=None`), so it lands in one attempt against a log the running turn is still writing to — a busy session cannot livelock the race and refuse to be cancelled.
 
 Cancellation is a persisted flag, not `task.cancel()` — the loop notices at its next store boundary (before a sample, between tool calls) and ends the turn with `stop_reason="cancelled"`, synthesizing error results for any tool calls left unanswered. A **suspended** turn takes the flag at the next `resume`, which completes it without sampling.
 

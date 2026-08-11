@@ -5,12 +5,12 @@ from typing import Annotated, Any
 from fastapi import Depends
 
 from sarathi.config import get_settings
-from sarathi.provider import ReasoningCompat
 from tantra import (
     Agent,
     BuiltinMemory,
     Harness,
     ModelLimits,
+    OpenAICompatible,
     OpenAICompatibleEmbedder,
     PostgresStore,
     PruneThenSummarize,
@@ -85,7 +85,7 @@ def make_harness(model: str | None = None) -> Harness:
         embedder = OpenAICompatibleEmbedder(settings.OPENAI_BASE_URL, settings.OPENAI_API_KEY, settings.EMBEDDING_MODEL)
     store = make_store()
     return Harness(
-        ReasoningCompat(settings.OPENAI_BASE_URL, settings.OPENAI_API_KEY, limits=limits),
+        OpenAICompatible(settings.OPENAI_BASE_URL, settings.OPENAI_API_KEY, limits=limits),
         store,
         [Sarathi],
         default_model=model or settings.default_model,

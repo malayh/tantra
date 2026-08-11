@@ -5,7 +5,6 @@ import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
@@ -787,8 +786,7 @@ class TurnLoop:
             for emitted in await self._append(self._parts(sample_id, end)):
                 yield emitted
             self.header.usage = accumulate(self.header.usage, end.usage)
-            self.header.updated_at = datetime.now(UTC)
-            await self.store.put_header(self.header)
+            await self.store.patch_header(self.header.id, usage=self.header.usage)
 
             if not end.tool_calls:
                 if state.cancelled:

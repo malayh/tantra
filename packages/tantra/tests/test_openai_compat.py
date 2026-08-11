@@ -153,6 +153,28 @@ async def test_text_and_reasoning_stream_live_and_accumulate(provider) -> None:
     ]
 
 
+@pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
+async def test_reasoning_arrives_under_either_delta_field(tmp_path: Path, provider, field: str) -> None:
+    chunks = [
+        frame({"role": "assistant", "content": ""}),
+        frame({field: "think "}),
+        frame({field: "hard"}),
+        frame({"content": "hello "}),
+        frame({"content": "world"}),
+        frame({}, finish="stop"),
+        "data: [DONE]\n\n",
+    ]
+
+    events = await collect(provider(replay(tmp_path, chunks)).stream(REQ))
+
+    assert [event.text for event in events if isinstance(event, ReasoningDelta)] == ["think ", "hard"]
+    assert [event.text for event in events if isinstance(event, TextDelta)] == ["hello ", "world"]
+    end = events[-1]
+    assert end.text == "hello world"
+    assert [block.text for block in end.reasoning] == ["think hard"]
+    assert end.finish_reason == "stop"
+
+
 async def test_usage_splits_cached_tokens_out_of_the_input_count(provider) -> None:
     events = await collect(provider(cassette_transport(CASSETTE)).stream(REQ))
 

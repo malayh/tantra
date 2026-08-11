@@ -27,7 +27,7 @@ export default function SessionPage() {
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="border-border flex items-center gap-2 border-b px-6 py-3">
           <h1 className="truncate text-sm font-medium">{current?.title ?? "New chat"}</h1>
-          <ModelPicker sessionId={sessionId} model={current?.model} running={running} />
+          <ModelPicker sessionId={sessionId} model={current?.model} />
           <span
             title={connected ? "Connected" : "Disconnected"}
             className={cn("ml-auto size-2 rounded-full", connected ? "bg-green-500" : "bg-muted-foreground")}

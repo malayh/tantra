@@ -23,6 +23,7 @@ from tantra.events import (
     Usage,
 )
 from tantra.harness import Harness
+from tantra.hooks import Hook
 from tantra.loop import Emitted
 from tantra.providers.base import SystemBlock, ToolCall
 from tantra.providers.fake import FakeProvider, Sample
@@ -419,6 +420,39 @@ async def test_usage_accumulates_onto_the_header() -> None:
     assert [s.usage.input_tokens for s in picks(events, SampleCompleted)] == [10, 20]
     header = await store.header(sid)
     assert header.usage == Usage(input_tokens=30, output_tokens=7, cache_read_tokens=3)
+    assert header.status == "idle"
+
+
+async def test_a_mid_turn_header_patch_is_not_clobbered_by_the_loops_own_writes() -> None:
+    store = MemoryStore()
+    patched: list[str] = []
+
+    class Swapper(Hook):
+        async def on_event(self, emitted: Emitted) -> None:
+            if isinstance(emitted.event, SampleCompleted) and not patched:
+                patched.append(emitted.session_id)
+                await store.patch_header(emitted.session_id, metadata={"model": "swapped"})
+
+    harness = Harness(
+        FakeProvider(
+            [
+                Sample(tool_calls=[call("search_metrics", '{"query": "x"}')], usage=Usage(input_tokens=10)),
+                Sample(text="done", usage=Usage(input_tokens=20, output_tokens=5)),
+            ]
+        ),
+        store,
+        [Bot],
+        default_model="fake/model",
+        hooks=[Swapper()],
+    )
+    sid = (await harness.create_session(Bot, {"model": "original", "user": "u1"})).id
+
+    await collect(harness.run(sid, "go"))
+
+    assert patched == [sid]
+    header = await store.header(sid)
+    assert header.metadata == {"model": "swapped", "user": "u1"}, "a later loop write reverted the mid-turn patch"
+    assert header.usage == Usage(input_tokens=30, output_tokens=5)
     assert header.status == "idle"
 
 

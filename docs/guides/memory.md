@@ -22,7 +22,7 @@ Listing the tools without `Harness(memory=)` gives an `is_error` result the mode
 
 Thin by design: `kind`, `title`, `body`, plus `tags`, `entities` and `metadata`. Rows are soft-deleted and superseded, never mutated in place — `recall` stops returning a dead row while `get(id)` still does. `supersede` of a deleted or already-superseded row raises, so chains cannot fork. No document ingestion, no extraction, no reconcile: that is your application's job.
 
-`BuiltinMemory(store, embedder=None)` keeps rows on the **concrete store**, via duck-typed `memory_put` / `memory_get` / `memory_all` methods that `MemoryStore`, `FileSystemStore`, `SQLiteStore` and `PostgresStore` all implement. A store without them is refused at construction. Sessions and memories need not share a backend — sessions on SQLite with memories on the filesystem is a normal setup.
+`BuiltinMemory(store, embedder=None)` keeps rows on the **concrete store**, via the `memory_put` / `memory_get` / `memory_all` protocol methods that `MemoryStore`, `FileSystemStore`, `SQLiteStore` and `PostgresStore` all implement. A store without them is refused at construction. Sessions and memories need not share a backend — sessions on SQLite with memories on the filesystem is a normal setup.
 
 ## Recall
 
@@ -36,10 +36,20 @@ memory = BuiltinMemory(store, embedder=OpenAICompatibleEmbedder(base_url=..., ap
 
 Embedding is best-effort: a failed embed never fails the write (the row lands with `embedding=None`), and `await memory.backfill()` repairs the gaps later.
 
-## Multi-tenancy gotcha
+## Multi-tenancy
 
-!!! warning "The shipped tools always write `metadata={}`"
-    `MemoryRecord.metadata` is the scoping field `recall` filters on, but `memory_write` exposes no `metadata` parameter, and `ctx.memory` cannot see the session's metadata. A multi-tenant app must either construct one `Memory` per tenant or write its own thin tools over `ctx.memory` that stamp the tenant in. Nothing enforces isolation for you.
+`MemoryRecord.metadata` is the scoping field `recall` filters on, and the model never sets it. Build the tools with a scope instead of shipping the unscoped pair:
+
+```python
+from tantra import memory_tools
+
+memory_write, memory_recall = memory_tools(lambda ctx: {"user": ctx.deps["user_id"]})
+```
+
+The callable runs per invocation: its result is stamped onto every row the agent writes and used as the recall filter, so one tenant's tools cannot reach another's rows. `memory_write` and `memory_recall` imported straight from `tantra` are the unscoped pair — they write `{}` and filter on nothing.
+
+!!! warning "Keep scope values scalar and always set"
+    Matching fails closed on a missing key, so a scope that sometimes omits its key simply matches nothing. `PostgresStore` matches with jsonb containment, so a list or dict value is read as a recursive subset rather than an equality test. Nothing enforces isolation beyond the filter you supply.
 
 ## A turn
 

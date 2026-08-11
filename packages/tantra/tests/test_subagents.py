@@ -112,6 +112,33 @@ async def test_child_tool_events_ride_the_parent_stream_but_never_the_parent_log
     assert [header.id for header in await store.list(parent_id=sid)] == [child_sid]
 
 
+async def test_replaying_a_child_session_keeps_its_depth() -> None:
+    store = MemoryStore()
+    harness = Harness(
+        FakeProvider(
+            [
+                Sample(tool_calls=[call("researcher", '{"task": "dig"}', cid="p1")]),
+                Sample(tool_calls=[call("look", '{"q": "a"}', cid="k1")]),
+                Sample(text="child answer"),
+                Sample(text="parent answer"),
+            ]
+        ),
+        store,
+        [Boss],
+        default_model="fake/model",
+    )
+    sid = (await harness.create_session(Boss)).id
+
+    events = await collect(harness.run(sid, "go"))
+    child_sid = picks(events, ChildSessionSpawned)[0].child_session_id
+
+    replayed = await collect(harness.replay(child_sid))
+
+    assert replayed
+    assert all(event.session_id == child_sid for event in replayed)
+    assert all(event.depth == 1 for event in replayed), "replay flattened a child session to depth 0"
+
+
 async def test_the_subagent_tool_is_named_after_the_agent_and_takes_a_task() -> None:
     store = MemoryStore()
     harness = Harness(FakeProvider([]), store, [Boss], default_model="fake/model")

@@ -101,7 +101,7 @@ There is no public "is this turn incomplete?" helper. Catching `TurnIncomplete` 
 
 ## Cancel
 
-`await harness.cancel(sid)` appends `CancelRequested` and returns; it is a persisted flag, not `task.cancel()`. The loop may be running in another process, so it checks the store at sample and tool-call boundaries, synthesizes results for unexecuted calls, and appends `TurnCompleted(stop_reason="cancelled")`. Cancelling a *suspended* turn takes effect at the next `resume`, which ends the turn without sampling.
+`await harness.cancel(sid)` appends `CancelRequested` and returns; it is a persisted flag, not `task.cancel()`. The loop may be running in another process, so it checks the store at sample and tool-call boundaries, synthesizes results for unexecuted calls, and appends `TurnCompleted(stop_reason="cancelled")`. Cancelling a *suspended* turn takes effect at the next `resume`, which ends the turn without sampling. The flag is appended blind, so it never has to win a seq race against the turn it is stopping; `cancel(sid, recursive=True)` flags the whole session tree, deepest-first.
 
 ## Wiring a server
 

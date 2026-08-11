@@ -8,15 +8,7 @@ import { useListModels } from "@/generated/api/meta/meta";
 import { getListSessionsQueryKey, usePatchSession } from "@/generated/api/sessions/sessions";
 import { errorMessage } from "@/lib/errors";
 
-export function ModelPicker({
-  sessionId,
-  model,
-  running,
-}: {
-  sessionId: string;
-  model: string | null | undefined;
-  running: boolean;
-}) {
+export function ModelPicker({ sessionId, model }: { sessionId: string; model: string | null | undefined }) {
   const queryClient = useQueryClient();
   const { data: models } = useListModels();
 
@@ -30,7 +22,7 @@ export function ModelPicker({
   return (
     <Select
       value={model ?? undefined}
-      disabled={running || patch.isPending}
+      disabled={patch.isPending}
       onValueChange={(value) => patch.mutate({ sessionId, data: { model: value } })}
     >
       <SelectTrigger

@@ -19,7 +19,7 @@ All seventeen are pydantic models carrying `version: int = 1` and a literal `typ
 | `TextPart` | `text_part` | `sample_id`, `text` | Assistant text from one sample. |
 | `ReasoningPart` | `reasoning_part` | `sample_id`, `text`, `signature` | Reasoning block, replayed back to providers that want it. |
 | `ToolCallRequested` | `tool_call_requested` | `sample_id`, `call_id`, `name`, `args` | The model asked for a tool. `args` is the parsed object. |
-| `ToolCallStarted` | `tool_call_started` | `call_id` | The call passed hooks and permissions and is now executing. |
+| `ToolCallStarted` | `tool_call_started` | `call_id` | The call left the requested state. Always paired with the `ToolCallCompleted` that follows it — a denial, a refusal or unparseable arguments get one too, so a reader never sees a completion for a call it never saw start. |
 | `ToolProgress` | `tool_progress` | `call_id`, `message` | One `ctx.emit` from inside the tool. |
 | `ToolCallCompleted` | `tool_call_completed` | `call_id`, `result`, `is_error` | The call's outcome. Denials, refusals and interruptions are also this, with `is_error=True`. |
 | `ChildSessionSpawned` | `child_session_spawned` | `call_id`, `child_session_id`, `agent` | A `spawn`/`fan_out` child was created. This is the record a resume re-attaches to. |
@@ -78,7 +78,7 @@ The mutable summary beside the log.
 | `title` | `str \| None` | `None` | Free for the application; tantra never sets it. |
 | `status` | `SessionStatus` | `"idle"` | See below. |
 | `metadata` | `dict[str, Any]` | `{}` | Your scoping keys. `store.list(metadata=...)` matches it as a subset. |
-| `last_seq` | `int` | `0` | Store-owned. Preserved across `put_header`. |
+| `last_seq` | `int` | `0` | Store-owned. Preserved across `put_header` and `patch_header`. |
 | `usage` | `Usage` | zeros | Accumulated across every sample of the session. |
 | `lease` | `Lease \| None` | `None` | Store-owned; reported as stored, expired or not. |
 | `pending_ask` | `str \| None` | `None` | The `ask_id` the session waits on while `awaiting_input`. |

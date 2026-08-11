@@ -46,12 +46,12 @@ class MemoryStore:
             stored.lease = None
             self._headers[h.id] = stored
 
-    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int) -> int:
+    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
         with self._lock:
             header = self._headers.get(sid)
             if header is None:
                 raise SessionNotFound(sid)
-            if expect_seq != header.last_seq:
+            if expect_seq is not None and expect_seq != header.last_seq:
                 raise SeqConflict(f"{sid}: expected seq {header.last_seq}, got {expect_seq}")
             log = self._events.setdefault(sid, [])
             seq = header.last_seq

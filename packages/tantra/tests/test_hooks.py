@@ -145,7 +145,7 @@ async def test_a_denial_blocks_the_invocation_and_the_loop_continues() -> None:
     completed = picks(events, ToolCallCompleted)[0]
     assert completed.is_error
     assert completed.result == "denied by hook: writes are off in this run"
-    assert not picks(events, ToolCallStarted)
+    assert [event.call_id for event in picks(events, ToolCallStarted)] == [completed.call_id]
     assert len(picks(events, SampleStarted)) == 2
     assert picks(events, TurnCompleted)[0].stop_reason == "completed"
 

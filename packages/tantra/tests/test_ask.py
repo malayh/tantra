@@ -391,7 +391,7 @@ async def test_an_invalid_json_call_stays_rejected_across_a_suspend() -> None:
     results = [event for event in logged if isinstance(event, ToolCallCompleted) and event.call_id == "c2"]
     assert len(results) == 1
     assert results[0].is_error
-    assert not [event for event in logged if isinstance(event, ToolCallStarted) and event.call_id == "c2"]
+    assert len([event for event in logged if isinstance(event, ToolCallStarted) and event.call_id == "c2"]) == 1
 
 
 async def test_a_bare_resume_replays_the_pending_ask_without_re_running_the_tool() -> None:
@@ -425,7 +425,7 @@ async def test_a_bare_resume_replays_the_pending_ask_without_re_running_the_tool
         assert len(replayed) == 1
         assert isinstance(replayed[0].event, AskRaised)
         assert replayed[0].event.ask_id == raised.ask_id
-        assert replayed[0].seq == before.last_seq
+        assert replayed[0].seq is None
 
     assert len(runs) == 1
     after = await store.header(sid)
@@ -436,6 +436,36 @@ async def test_a_bare_resume_replays_the_pending_ask_without_re_running_the_tool
     resumed = await collect(harness.resume(sid, raised.ask_id, ApprovalResponse(allow=True)))
     assert len(runs) == 2
     assert picks(resumed, TurnCompleted)[0].stop_reason == "completed"
+
+
+async def test_bare_resume_re_emits_the_pending_ask_with_seq_none() -> None:
+    @tool
+    async def confirm(ctx: Context) -> str:
+        """Asks for approval."""
+        reply = await ctx.ask(Approval(title="proceed?"))
+        return f"allowed={reply.allow}"
+
+    class Asker(Agent):
+        tools = [confirm]
+
+    store = MemoryStore()
+    harness = Harness(
+        FakeProvider([Sample(tool_calls=[call("confirm", "{}")])]),
+        store,
+        [Asker],
+        default_model="fake/model",
+    )
+    sid = (await harness.create_session(Asker)).id
+
+    opening = await collect(harness.run(sid, "go"))
+    raised = picks(opening, AskRaised)[0]
+
+    replayed = await collect(harness.resume(sid))
+
+    assert len(replayed) == 1
+    assert replayed[0].seq is None
+    assert isinstance(replayed[0].event, AskRaised)
+    assert replayed[0].event.ask_id == raised.ask_id
 
 
 async def test_resume_rejects_an_ask_from_an_earlier_terminated_turn() -> None:

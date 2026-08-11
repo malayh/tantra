@@ -141,7 +141,7 @@ class PostgresStore:
                     (_json(stored), Jsonb(stored.metadata), stored.parent_id, stored.created_at, stored.id),
                 )
 
-    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int) -> int:
+    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
         async with self._lock:
             conn = await self._connection()
             async with conn.transaction():
@@ -152,7 +152,7 @@ class PostgresStore:
                 if row is None:
                     raise SessionNotFound(sid)
                 last_seq = row[1]
-                if expect_seq != last_seq:
+                if expect_seq is not None and expect_seq != last_seq:
                     raise SeqConflict(f"{sid}: expected seq {last_seq}, got {expect_seq}")
                 header = SessionHeader.model_validate(row[0])
                 seq = last_seq

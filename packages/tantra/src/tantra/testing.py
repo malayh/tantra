@@ -51,6 +51,7 @@ async def store_conformance(store_factory: StoreFactory) -> None:
     await _check_create_rejects_a_duplicate(store_factory)
     await _check_append_and_read(store_factory)
     await _check_stale_expect_seq(store_factory)
+    await _check_blind_append(store_factory)
     await _check_put_header(store_factory)
     await _check_unknown_session(store_factory)
     await _check_list(store_factory)
@@ -173,6 +174,26 @@ async def _check_stale_expect_seq(factory: StoreFactory) -> None:
     loaded = await factory().header(header.id)
     assert loaded is not None
     assert loaded.last_seq == 1
+
+
+async def _check_blind_append(factory: StoreFactory) -> None:
+    store = factory()
+    header = _header()
+    await store.create(header)
+    await store.append(header.id, [TextPart(sample_id="s1", text="one")], expect_seq=0)
+
+    await _expect(
+        SeqConflict,
+        store.append(header.id, [TextPart(sample_id="s1", text="two")], expect_seq=0),
+        "append with a stale expect_seq did not raise SeqConflict",
+    )
+    assert await store.append(header.id, [TextPart(sample_id="s1", text="two")], expect_seq=None) == 2
+
+    stamped = await _drain(factory(), header.id)
+    assert [s.seq for s in stamped] == [1, 2]
+    loaded = await factory().header(header.id)
+    assert loaded is not None
+    assert loaded.last_seq == 2
 
 
 async def _check_put_header(factory: StoreFactory) -> None:

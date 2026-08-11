@@ -124,7 +124,7 @@ async def test_a_deny_rule_errors_the_call_without_invoking_the_tool() -> None:
     completed = picks(events, ToolCallCompleted)[0]
     assert completed.is_error
     assert completed.result == "denied by permissions: write_dashboard"
-    assert not picks(events, ToolCallStarted)
+    assert [event.call_id for event in picks(events, ToolCallStarted)] == [completed.call_id]
     assert len(picks(events, SampleStarted)) == 2
     assert picks(events, TurnCompleted)[0].stop_reason == "completed"
 

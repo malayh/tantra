@@ -251,13 +251,14 @@ class TurnLoop:
         return absorbed
 
     async def _append(self, events: Sequence[SessionEvent]) -> list[Emitted]:
-        try:
-            last = await self.store.append(self.header.id, events, expect_seq=self.header.last_seq)
-        except SeqConflict:
-            absorbed = await self._absorb()
-            if not absorbed or any(not isinstance(event, CancelRequested) for event in absorbed):
-                raise
-            last = await self.store.append(self.header.id, events, expect_seq=self.header.last_seq)
+        while True:
+            try:
+                last = await self.store.append(self.header.id, events, expect_seq=self.header.last_seq)
+                break
+            except SeqConflict:
+                absorbed = await self._absorb()
+                if not absorbed or any(not isinstance(event, CancelRequested) for event in absorbed):
+                    raise
         first = last - len(events) + 1
         self.header.last_seq = last
         self.history.extend(events)
@@ -269,7 +270,10 @@ class TurnLoop:
         ]
 
     async def _completed(self, call_id: str, result: Any, *, is_error: bool = False) -> list[Emitted]:
-        return await self._append([ToolCallCompleted(call_id=call_id, result=result, is_error=is_error)])
+        completed = ToolCallCompleted(call_id=call_id, result=result, is_error=is_error)
+        if call_id in self.state.started:
+            return await self._append([completed])
+        return await self._append([ToolCallStarted(call_id=call_id), completed])
 
     def _live(self, event: TextDelta | ReasoningDelta | ToolCallDelta) -> Emitted:
         return Emitted(session_id=self.header.id, depth=self.header.depth, seq=None, event=event)
@@ -536,6 +540,8 @@ class TurnLoop:
                     raise ValueError("arguments must be a JSON object")
             except ValueError as exc:
                 args = {}
+                if call.id not in self.state.started:
+                    rejected.append(ToolCallStarted(call_id=call.id))
                 rejected.append(
                     ToolCallCompleted(call_id=call.id, result=f"invalid JSON arguments: {exc}", is_error=True)
                 )
@@ -566,7 +572,11 @@ class TurnLoop:
         pending = self.state.unanswered()
         if not pending:
             return
-        events = [ToolCallCompleted(call_id=call.call_id, result=reason, is_error=True) for call in pending]
+        events: list[SessionEvent] = []
+        for call in pending:
+            if call.call_id not in self.state.started:
+                events.append(ToolCallStarted(call_id=call.call_id))
+            events.append(ToolCallCompleted(call_id=call.call_id, result=reason, is_error=True))
         for emitted in await self._append(events):
             yield emitted
 
@@ -706,6 +716,10 @@ class TurnLoop:
                 async with aclosing(self._synthesize(COMPLETED_RESULT)) as orphans:
                     async for emitted in orphans:
                         yield emitted
+                if state.cancelled:
+                    async for emitted in self._cancel():
+                        yield emitted
+                    return
                 async for emitted in self._terminal("output", output):
                     yield emitted
                 return
@@ -777,6 +791,10 @@ class TurnLoop:
             await self.store.put_header(self.header)
 
             if not end.tool_calls:
+                if state.cancelled:
+                    async for emitted in self._cancel():
+                        yield emitted
+                    return
                 async for emitted in self._terminal("completed", None):
                     yield emitted
                 return

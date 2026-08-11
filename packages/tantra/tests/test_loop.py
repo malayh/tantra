@@ -6,7 +6,9 @@ from pydantic import BaseModel
 
 from tantra.adapters.collect import collect
 from tantra.agent import Agent
+from tantra.ask import ApprovalResponse
 from tantra.events import (
+    AskRaised,
     ReasoningPart,
     SampleCompleted,
     SampleStarted,
@@ -203,7 +205,7 @@ async def test_unknown_tool_names_never_crash_the_loop() -> None:
     completed = picks(events, ToolCallCompleted)[0]
     assert completed.is_error
     assert completed.result == "unknown tool 'nope'"
-    assert not picks(events, ToolCallStarted)
+    assert [event.call_id for event in picks(events, ToolCallStarted)] == ["c1"]
 
 
 async def test_invalid_json_arguments_are_requested_empty_and_never_executed() -> None:
@@ -220,7 +222,7 @@ async def test_invalid_json_arguments_are_requested_empty_and_never_executed() -
     completed = picks(events, ToolCallCompleted)[0]
     assert completed.is_error
     assert completed.result.startswith("invalid JSON arguments")
-    assert not picks(events, ToolCallStarted)
+    assert [event.call_id for event in picks(events, ToolCallStarted)] == ["c1"]
 
 
 async def test_max_steps_synthesizes_results_for_every_orphaned_call() -> None:
@@ -241,7 +243,7 @@ async def test_max_steps_synthesizes_results_for_every_orphaned_call() -> None:
     completed = picks(events, ToolCallCompleted)
     assert [c.call_id for c in completed] == ["c1", "c2"]
     assert all(c.is_error and c.result == "not executed: max steps reached" for c in completed)
-    assert not picks(events, ToolCallStarted)
+    assert [event.call_id for event in picks(events, ToolCallStarted)] == ["c1", "c2"]
     assert picks(events, TurnCompleted)[0].stop_reason == "max_steps"
 
 
@@ -318,7 +320,7 @@ async def test_submit_output_ends_the_turn_with_the_parsed_output() -> None:
     turn = picks(events, TurnCompleted)[0]
     assert turn.stop_reason == "output"
     assert turn.output == {"title": "p99", "panels": 2}
-    assert not picks(events, ToolCallStarted)
+    assert [event.call_id for event in picks(events, ToolCallStarted)] == ["c1"]
 
     offered = harness.provider.requests[0].tools
     assert [t.name for t in offered] == ["search_metrics", "submit_output"]
@@ -458,6 +460,66 @@ async def test_an_async_callable_prompt_is_awaited() -> None:
     await collect(harness.run(sid, "hi"))
 
     assert harness.provider.requests[0].system == [SystemBlock(text="agent async_prompt")]
+
+
+async def test_every_error_path_completion_is_preceded_by_a_started_for_the_same_call() -> None:
+    ran: list[str] = []
+
+    @tool
+    async def blocked() -> str:
+        """Refused by permissions."""
+        ran.append("blocked")
+        return "ran"
+
+    @tool
+    async def gated() -> str:
+        """Refused by the user."""
+        ran.append("gated")
+        return "ran"
+
+    class Guarded(Agent):
+        tools = [blocked, gated, search_metrics]
+        permissions = {"blocked": "deny", "gated": "ask"}
+
+    harness, store, sid = await build(
+        [
+            Sample(
+                tool_calls=[
+                    call("nope", "{}", cid="c1"),
+                    call("blocked", "{}", cid="c2"),
+                    call("gated", "{}", cid="c3"),
+                    call("search_metrics", "{not json", cid="c4"),
+                ]
+            ),
+            Sample(text="recovered"),
+        ],
+        agent=Guarded,
+    )
+
+    opening = await collect(harness.run(sid, "go"))
+    ask_id = picks(opening, AskRaised)[0].ask_id
+    resumed = await collect(harness.resume(sid, ask_id, ApprovalResponse(allow=False)))
+
+    logged = [stamped.event async for stamped in store.read(sid)]
+    assert [
+        (type(event).__name__, event.call_id)
+        for event in logged
+        if isinstance(event, ToolCallStarted | ToolCallCompleted)
+    ] == [
+        ("ToolCallStarted", "c4"),
+        ("ToolCallCompleted", "c4"),
+        ("ToolCallStarted", "c1"),
+        ("ToolCallCompleted", "c1"),
+        ("ToolCallStarted", "c2"),
+        ("ToolCallCompleted", "c2"),
+        ("ToolCallStarted", "c3"),
+        ("ToolCallCompleted", "c3"),
+    ]
+    assert ran == []
+    completions = [event for event in logged if isinstance(event, ToolCallCompleted)]
+    assert all(event.is_error for event in completions)
+    assert {event.call_id: event.result for event in completions}["c3"] == "denied by user"
+    assert picks(resumed, TurnCompleted)[0].stop_reason == "completed"
 
 
 async def test_turn_started_is_persisted_and_yielded_first() -> None:

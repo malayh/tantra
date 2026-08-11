@@ -25,11 +25,12 @@ class Store(Protocol):
     async def put_header(self, h: SessionHeader) -> None:
         """Overwrite the session header. `last_seq` and `lease` are store-owned and preserved."""
 
-    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int) -> int:
+    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
         """Append events and return the new last seq.
 
         Optimistic concurrency: raises `SeqConflict` unless `expect_seq` equals the session's
-        current last seq. The first event of a session gets seq 1.
+        current last seq. `expect_seq=None` skips the check and appends onto whatever the current
+        last seq is. The first event of a session gets seq 1.
         """
 
     def read(self, sid: str, *, from_seq: int = 0) -> AsyncIterator[Stamped]:

@@ -60,7 +60,7 @@ class FileSystemStore:
             stored.lease = None
             self._write_header(stored)
 
-    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int) -> int:
+    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
         if not (self.root / sid).is_dir():
             raise SessionNotFound(sid)
         with self._flock(sid, fcntl.LOCK_EX):
@@ -71,7 +71,7 @@ class FileSystemStore:
             if tail > header.last_seq:
                 header.last_seq = tail
                 self._write_header(header)
-            if expect_seq != header.last_seq:
+            if expect_seq is not None and expect_seq != header.last_seq:
                 raise SeqConflict(f"{sid}: expected seq {header.last_seq}, got {expect_seq}")
             seq = header.last_seq
             lines = []

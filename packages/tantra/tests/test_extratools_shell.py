@@ -441,7 +441,7 @@ async def test_a_tripped_guard_denies_the_call_and_the_turn_completes() -> None:
     assert completed.is_error
     assert completed.result.startswith("denied by hook: ")
     assert "filesystem root" in completed.result
-    assert not picks(events, ToolCallStarted)
+    assert [event.call_id for event in picks(events, ToolCallStarted)] == [completed.call_id]
     assert picks(events, TurnCompleted)[0].stop_reason == "completed"
 
 
@@ -477,7 +477,7 @@ async def test_an_escalating_guard_suspends_with_the_reason_and_the_user_can_ref
     completed = picks(resumed, ToolCallCompleted)[0]
     assert completed.is_error
     assert completed.result == "denied by user"
-    assert not picks(resumed, ToolCallStarted)
+    assert [event.call_id for event in picks(resumed, ToolCallStarted)] == [completed.call_id]
     assert picks(resumed, TurnCompleted)[0].stop_reason == "completed"
 
 

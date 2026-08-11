@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import subprocess
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 
 import pytest
+
+from tantra.providers.base import ProviderEvent, SampleRequest, TextDelta
+from tantra.providers.fake import FakeProvider, Sample
 
 try:
     import psycopg
@@ -20,6 +24,26 @@ IMAGE = "pgvector/pgvector:pg17"
 PASSWORD = "tantra"
 STARTUP_DEADLINE = 60.0
 DOCKER_TIMEOUT = 120
+
+
+class GatedProvider(FakeProvider):
+    """A FakeProvider that holds mid-sample until `gate` is set, so a test can interleave a cancel."""
+
+    def __init__(self, samples: list[Sample]) -> None:
+        super().__init__(samples)
+        self.gate = asyncio.Event()
+        self.gate.set()
+
+    async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+        async for event in super().stream(req):
+            yield event
+            if isinstance(event, TextDelta):
+                await self.gate.wait()
+
+
+@pytest.fixture
+def gated_provider() -> Callable[[list[Sample]], GatedProvider]:
+    return GatedProvider
 
 
 @pytest.fixture(scope="session")

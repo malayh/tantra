@@ -432,7 +432,7 @@ async def test_unknown_tool_completes_with_an_error_and_the_turn_continues(
         turn = await _turn(ws, sid)
 
     started = [frame for frame in turn if _kind(frame) == "tool_call_started"]
-    assert [frame["event"]["call_id"] for frame in started] == []
+    assert [frame["event"]["call_id"] for frame in started] == ["u1"]
 
     failed = next(
         frame for frame in turn if _kind(frame) == "tool_call_completed" and frame["event"]["call_id"] == "u1"
@@ -472,7 +472,7 @@ async def test_cancel_mid_sample_ends_the_turn_cancelled_without_running_the_chi
     kinds = [_kind(frame) for frame in turn]
     assert turn[-1]["event"]["stop_reason"] == "cancelled"
     assert "child_session_spawned" not in kinds
-    assert "tool_call_started" not in kinds
+    assert kinds.index("tool_call_started") < kinds.index("tool_call_completed")
     assert all(frame["session_id"] == sid for frame in turn)
 
 
@@ -602,7 +602,8 @@ async def test_denying_the_memory_ask_completes_the_turn_without_writing(
         await _answer(ws, raised, "deny")
         turn = await _turn(ws, sid)
 
-    assert "tool_call_started" not in [_kind(frame) for frame in turn]
+    kinds = [_kind(frame) for frame in turn]
+    assert kinds.index("tool_call_started") < kinds.index("tool_call_completed")
     completed = next(frame for frame in turn if _kind(frame) == "tool_call_completed")
     assert completed["event"]["is_error"] is True
     assert completed["event"]["result"] == "denied by user"

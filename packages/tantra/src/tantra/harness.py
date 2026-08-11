@@ -15,6 +15,7 @@ from tantra.events import (
     AskAnswered,
     AskRaised,
     CancelRequested,
+    ChildSessionSpawned,
     SampleStarted,
     SessionCreated,
     SessionEvent,
@@ -38,8 +39,6 @@ if TYPE_CHECKING:
     from tantra.memory import Memory
 
 TYPED_KEYS = frozenset({"type", "anyOf", "allOf", "oneOf", "$ref", "enum", "const"})
-
-CANCEL_ATTEMPTS = 5
 
 
 def _check_schema(label: str, entry: Tool) -> None:
@@ -383,7 +382,7 @@ class Harness:
             cancelled = any(isinstance(item.event, CancelRequested) for item in turn_log)
 
             if ask_id is None and pending is not None and not cancelled:
-                replayed = Emitted(session_id=sid, depth=header.depth, seq=pending.seq, event=pending.event)
+                replayed = Emitted(session_id=sid, depth=header.depth, seq=None, event=pending.event)
                 await self._notify(replayed)
                 yield replayed
                 return
@@ -402,7 +401,7 @@ class Harness:
                         f"ask {ask_id!r} is a permission request and needs an ApprovalResponse, got {response!r}"
                     )
                 answered = AskAnswered(ask_id=ask_id, response=response)
-                header.last_seq = await self.store.append(sid, [answered], expect_seq=header.last_seq)
+                header.last_seq = await self._append_absorbing(header, history, answered)
                 history.append(answered)
                 emitted = Emitted(session_id=sid, depth=header.depth, seq=header.last_seq, event=answered)
                 await self._notify(emitted)
@@ -438,25 +437,50 @@ class Harness:
         finally:
             await self._settle(header, loop, holder)
 
-    async def cancel(self, sid: str) -> bool:
-        """Flag the running turn for cancellation. The loop stops at its next store boundary."""
+    async def _append_absorbing(self, header: SessionHeader, history: list[SessionEvent], event: SessionEvent) -> int:
+        while True:
+            try:
+                return await self.store.append(header.id, [event], expect_seq=header.last_seq)
+            except SeqConflict:
+                absorbed: list[SessionEvent] = []
+                async for stamped in self.store.read(header.id, from_seq=header.last_seq):
+                    header.last_seq = stamped.seq
+                    history.append(stamped.event)
+                    absorbed.append(stamped.event)
+                if not absorbed or any(not isinstance(item, CancelRequested) for item in absorbed):
+                    raise
+
+    async def _cancel_one(self, sid: str) -> bool:
+        history = [stamped.event async for stamped in self.store.read(sid)]
+        if not _turn_incomplete(history):
+            return False
+        request = CancelRequested(turn_id=_last_turn(history).turn_id)
+        await self.store.append(sid, [request], expect_seq=None)
+        return True
+
+    async def _descendants(self, sid: str) -> list[str]:
+        found: list[str] = []
+        async for stamped in self.store.read(sid):
+            if isinstance(stamped.event, ChildSessionSpawned):
+                child = stamped.event.child_session_id
+                found.extend(await self._descendants(child))
+                found.append(child)
+        return found
+
+    async def cancel(self, sid: str, *, recursive: bool = False) -> bool:
+        """Flag the running turn for cancellation. The loop stops at its next store boundary.
+
+        The request is appended blind, so it lands in one attempt against a log the running turn is
+        still writing to. With `recursive`, every descendant session is flagged deepest-first before
+        the target; returns True when at least one session had a turn to cancel.
+        """
         if await self.store.header(sid) is None:
             raise SessionNotFound(sid)
-        for _ in range(CANCEL_ATTEMPTS):
-            last_seq = 0
-            history: list[SessionEvent] = []
-            async for stamped in self.store.read(sid):
-                last_seq = stamped.seq
-                history.append(stamped.event)
-            if not _turn_incomplete(history):
-                return False
-            request = CancelRequested(turn_id=_last_turn(history).turn_id)
-            try:
-                await self.store.append(sid, [request], expect_seq=last_seq)
-            except SeqConflict:
-                continue
-            return True
-        raise SeqConflict(f"{sid}: could not append CancelRequested after {CANCEL_ATTEMPTS} attempts")
+        targets = [*await self._descendants(sid), sid] if recursive else [sid]
+        flagged = False
+        for target in targets:
+            flagged = await self._cancel_one(target) or flagged
+        return flagged
 
     async def replay(self, sid: str, *, from_seq: int = 0) -> AsyncIterator[Emitted]:
         header = await self.store.header(sid)

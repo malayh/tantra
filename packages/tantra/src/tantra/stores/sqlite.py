@@ -93,13 +93,13 @@ class SQLiteStore:
                 (stored.model_dump_json(), stored.created_at.isoformat(), stored.parent_id, stored.id),
             )
 
-    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int) -> int:
+    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
         with self._write() as conn:
             row = conn.execute("SELECT header, last_seq FROM sessions WHERE id = ?", (sid,)).fetchone()
             if row is None:
                 raise SessionNotFound(sid)
             last_seq = row[1]
-            if expect_seq != last_seq:
+            if expect_seq is not None and expect_seq != last_seq:
                 raise SeqConflict(f"{sid}: expected seq {last_seq}, got {expect_seq}")
             header = SessionHeader.model_validate_json(row[0])
             seq = last_seq

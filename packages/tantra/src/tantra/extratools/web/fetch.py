@@ -14,8 +14,9 @@ try:
     import trafilatura
     from curl_cffi import requests as cffi
     from curl_cffi.requests import exceptions as cffi_exc
+    from tenacity import AsyncRetrying, RetryCallState, RetryError, retry_if_exception_type, stop_after_attempt
 except ImportError as exc:
-    raise ImportError("curl-cffi/trafilatura not installed: install tantra-harness[web]") from exc
+    raise ImportError("web extras not installed: install tantra-harness[web]") from exc
 
 MAX_BYTES = 5_000_000
 MAX_HOPS = 5
@@ -96,42 +97,57 @@ async def _get(url: str, timeout: float, ssrf_guard: bool) -> tuple[str, str, by
     )
 
 
+class _Retry(Exception):
+    def __init__(self, failure: str, delay: float | None = None) -> None:
+        super().__init__(failure)
+        self.failure = failure
+        self.delay = delay
+
+
 async def _attempt(session: Any, url: str, timeout: float) -> tuple[str, bytes, str | None]:
-    failure = ""
-    delay = 0.0
-    for attempt in range(MAX_ATTEMPTS):
-        if attempt:
-            await asyncio.sleep(delay)
-        try:
-            response = await session.get(url, headers=HEADERS, stream=True)
-        except cffi_exc.Timeout:
-            failure = f"timed out after {timeout}s — the site is slow or unreachable; try another source"
-            delay = _backoff(attempt)
-            continue
-        except cffi_exc.RequestException as exc:
-            failure = f"could not be reached ({exc}) — try another source"
-            delay = _backoff(attempt)
-            continue
-        status = response.status_code
-        if status >= 400:
-            await response.aclose()
-            if status not in RETRY_STATUSES:
-                raise RuntimeError(f"web_fetch got HTTP {status} for {url}{_hint(status)}")
-            failure = f"returned HTTP {status}{_hint(status)}"
-            delay = _retry_after(response.headers) or _backoff(attempt)
-            continue
-        location = response.headers.get("Location")
-        if 300 <= status < 400 and location:
-            await response.aclose()
-            return "", b"", location
-        try:
-            body = await _body(response, url)
-        except cffi_exc.RequestException as exc:
-            failure = f"dropped the connection mid-download ({exc}) — try again or use another source"
-            delay = _backoff(attempt)
-            continue
-        return response.headers.get("Content-Type", ""), body, None
-    raise RuntimeError(f"web_fetch gave up on {url} after {MAX_ATTEMPTS} attempts: it {failure}")
+    retrying = AsyncRetrying(
+        stop=stop_after_attempt(MAX_ATTEMPTS),
+        retry=retry_if_exception_type(_Retry),
+        wait=_wait,
+        sleep=asyncio.sleep,
+    )
+    try:
+        async for attempt in retrying:
+            with attempt:
+                return await _once(session, url, timeout)
+    except RetryError as exc:
+        raise RuntimeError(
+            f"web_fetch gave up on {url} after {MAX_ATTEMPTS} attempts: it {exc.last_attempt.exception().failure}"
+        ) from None
+
+
+def _wait(retry_state: RetryCallState) -> float:
+    exc = retry_state.outcome.exception()
+    return exc.delay or _backoff(retry_state.attempt_number - 1)
+
+
+async def _once(session: Any, url: str, timeout: float) -> tuple[str, bytes, str | None]:
+    try:
+        response = await session.get(url, headers=HEADERS, stream=True)
+    except cffi_exc.Timeout as exc:
+        raise _Retry(f"timed out after {timeout}s — the site is slow or unreachable; try another source") from exc
+    except cffi_exc.RequestException as exc:
+        raise _Retry(f"could not be reached ({exc}) — try another source") from exc
+    status = response.status_code
+    if status >= 400:
+        await response.aclose()
+        if status not in RETRY_STATUSES:
+            raise RuntimeError(f"web_fetch got HTTP {status} for {url}{_hint(status)}")
+        raise _Retry(f"returned HTTP {status}{_hint(status)}", _retry_after(response.headers))
+    location = response.headers.get("Location")
+    if 300 <= status < 400 and location:
+        await response.aclose()
+        return "", b"", location
+    try:
+        body = await _body(response, url)
+    except cffi_exc.RequestException as exc:
+        raise _Retry(f"dropped the connection mid-download ({exc}) — try again or use another source") from exc
+    return response.headers.get("Content-Type", ""), body, None
 
 
 async def _body(response: Any, url: str) -> bytes:

@@ -38,7 +38,7 @@ def test_shell_needs_no_extras(monkeypatch: pytest.MonkeyPatch) -> None:
     assert callable(module.ShellGuard)
 
 
-@pytest.mark.parametrize("missing", ["curl_cffi", "trafilatura"])
+@pytest.mark.parametrize("missing", ["curl_cffi", "trafilatura", "tenacity"])
 def test_web_import_error_names_web_extra(monkeypatch: pytest.MonkeyPatch, missing: str) -> None:
     monkeypatch.setitem(sys.modules, missing, None)
 

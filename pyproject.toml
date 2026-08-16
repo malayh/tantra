@@ -23,6 +23,7 @@ dev = [
     "psycopg[binary]>=3.2",
     "curl-cffi>=0.15",
     "trafilatura>=2.0",
+    "tenacity>=9",
     "pypdf>=6",
     "python-docx>=1.1",
     "mkdocs-material>=9.5",

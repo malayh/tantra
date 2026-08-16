@@ -15,7 +15,7 @@ Documentation = "https://malayh.github.io/tantra/docs/"
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2"]
-web = ["curl-cffi>=0.15", "trafilatura>=2.0"]
+web = ["curl-cffi>=0.15", "trafilatura>=2.0", "tenacity>=9"]
 doc = ["pypdf>=6", "python-docx>=1.1"]
 
 [build-system]

@@ -12,7 +12,7 @@
 - **Config is a factory kwarg only.** Matches 002's "factories return `Tool`, the library never reads env" rule. Sarathi reads `WEB_PROXY` and passes it in.
 - **No fallback to direct when the proxy fails.** A paid gateway blip must not silently leak the real IP or hide the outage. Rejected: fail-immediately (loses resilience against transient gateway errors, which rotating providers do have).
 - **Proxy failures retry inside the existing 3-attempt budget, then raise a proxy-specific message.** `cffi_exc.ProxyError` → "could not reach the configured proxy … tell the user; another URL will not help". Because a refused connection *to the proxy* surfaces as plain `ConnectionError` (curl code 7), not `ProxyError`, connection/timeout failures also get a trailing hint when a proxy is configured: "a proxy is configured — if every URL fails the same way, the proxy is the problem; tell the user". Without the hint the model would burn its turn trying other sources through a dead proxy.
-- **Invalid proxy URL fails at `web_fetch(...)` construction** with `ValueError` naming the accepted schemes (`http`, `https`, `socks4`, `socks4a`, `socks5`, `socks5h`) and requiring a host. `proxy=""` is treated as `None` so apps pass `settings.WEB_PROXY` straight through. Same posture as `web_search`'s empty-key check. The message names the scheme it received, never the URL — the URL carries credentials.
+- **Invalid proxy URL fails at `web_fetch(...)` construction** with `ValueError` naming the accepted schemes (`http`, `https`, `socks4`, `socks4a`, `socks5`, `socks5h`) and requiring a host. `proxy=""` is treated as `None` so apps pass `settings.WEB_PROXY` straight through. Same posture as `web_search`'s empty-key check. The message names the scheme it received, never the URL — the URL carries credentials. ~~Always echo `urlparse(proxy).scheme`~~ **Amended in P2.** `urlparse("user:pass@gw:823").scheme == "user"`, so the scheme is echoed only when the value contains `://`; otherwise the message says `got scheme ''`.
 - **No message, ours or curl's, is allowed to include the proxy URL.** libcurl's own error text names at most the proxy hostname ("Could not resolve proxy: gw…"); accepted. Our strings say "the configured proxy".
 - **SSRF guard unchanged: resolve locally, reject private targets; the proxy is trusted egress.** The guard does not inspect the proxy's own address (a local `127.0.0.1:8080` egress proxy stays usable). Known consequence: `socks5h://`/remote-DNS setups whose target hosts do not resolve locally get the existing "could not resolve the host" error. Rejected: skipping address checks when proxied (a proxy inside the LAN reopens SSRF); guarding the proxy address (blocks the common local egress proxy).
 - **Env-var proxying stays as it is today when `proxy=None`.** curl_cffi's `trust_env` is dead code (declared, never read); libcurl itself honours lowercase `http_proxy`, `HTTPS_PROXY`/`https_proxy`, `ALL_PROXY`, `NO_PROXY` whenever `CURLOPT_PROXY` is unset. Not disableable from Python, so it is documented as a sharp edge rather than fought.
@@ -54,7 +54,7 @@ async def _attempt(session, url, timeout, proxy) -> tuple[str, bytes, str | None
 ## Proxy (P2)
 
 - `web_fetch(*, max_chars=64_000, timeout=20.0, ssrf_guard=True, proxy: str | None = None) -> Tool`.
-- Construction: `proxy = proxy or None`; if set, `urlparse(proxy)` must have `scheme in PROXY_SCHEMES` and a `hostname`, else `ValueError("web_fetch(proxy=...) must be a URL with scheme http, https, socks4, socks4a, socks5 or socks5h and a host; got scheme {scheme!r}")`.
+- Construction: `proxy = proxy or None`; if set, `scheme = urlparse(proxy).scheme if "://" in proxy else ""` must be in `PROXY_SCHEMES` and `urlparse(proxy).hostname` truthy, else `ValueError("web_fetch(proxy=...) must be a URL with scheme http, https, socks4, socks4a, socks5 or socks5h and a host; got scheme {scheme!r}")`. ~~`urlparse(proxy)` must have `scheme in PROXY_SCHEMES`~~ **Amended in P2:** a scheme-less paste parses its username as the scheme; the `://` guard keeps credentials out of the message.
 - Seams grow a trailing param: `_get(url, timeout, ssrf_guard, proxy)`, `_session(timeout, proxy)` → `cffi.AsyncSession(impersonate="chrome", timeout=timeout, allow_redirects=False, proxy=proxy)`. `proxy=None` → curl_cffi sets no `CURLOPT_PROXY` → libcurl env behaviour, unchanged from today. Every test fake of `_get`/`_session` updates its signature.
 - Session-level `proxy` covers all redirect hops (one session per `_get`).
 - Failure text (all inside `_once`, all still `_Retry` so they share the budget):
@@ -113,16 +113,17 @@ Strictly sequential: P2 writes the proxy branches against the tenacity structure
   - [x] existing retry tests pass unmodified
 - Landed notes: tenacity runs `wait` before `stop`, so `_wait` is also evaluated on the final failed attempt (delay discarded, no extra sleep) — keep `_wait` side-effect free. `test_extratools_imports.py` parametrize gained `tenacity`; the guard's ImportError text is now "web extras not installed".
 
-### Phase 2 — proxy kwarg · deps: P1 · —
+### Phase 2 — proxy kwarg · deps: P1 · ✅ DONE (live gateway smoke pending — needs a real `TANTRA_TEST_PROXY`)
 - `web_fetch(..., proxy=None)`, `PROXY_SCHEMES`, construction-time validation, `_session(timeout, proxy)`, `_get(..., proxy)`, `ProxyError` branch + proxied hint in `_once`.
 - Tests (same file): `web_fetch(proxy="gw:823")` → `ValueError` naming schemes, message excludes the URL; `web_fetch(proxy="")` constructs; `_session` receives `proxy=` (fake it and assert); `ExplodingSession(cffi_exc.ProxyError(...))` → 3 requests, message contains "configured proxy" and "do not try other URLs"; `ConnectionError` with proxy set → message contains "a proxy is configured"; without proxy → unchanged message; a redirect chain with proxy set makes every hop on the one session.
 - `stress/live_fetch_proxy.py` + `stress/README.md` row.
 - **Verify:** unit tests above green. Live: `TANTRA_TEST_PROXY=<your DataImpulse URL> uv run python stress/live_fetch_proxy.py` prints two different IPs and exits 0; with a bogus host in the URL it exits non-zero within ~3 attempts and the message says "configured proxy" and does not contain the URL.
 - Checklist:
-  - [ ] kwarg + validation + seams
-  - [ ] ProxyError branch + proxied hint
-  - [ ] test matrix
-  - [ ] live smoke script, run once against a real gateway
+  - [x] kwarg + validation + seams
+  - [x] ProxyError branch + proxied hint
+  - [x] test matrix (12 tests added; 641 total)
+  - [ ] live smoke script, run once against a real gateway — script landed; failure path verified live (bogus host → exit 1 after 3 attempts, "configured proxy", no URL); positive path awaits the user's gateway URL
+- Landed notes: `web_fetch(proxy="http://[::1")` raises urlparse's own `ValueError("Invalid IPv6 URL")` before our check — still construction-time, still URL-free, but it does not name the accepted schemes.
 
 ### Phase 3 — sarathi wiring, docs, release prep · deps: P2 · —
 - Sarathi: `WEB_PROXY` setting, `agent.py` wiring, `.env.example`, README line, `>=0.3` pin, `test_agent.py` case.

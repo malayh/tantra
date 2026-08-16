@@ -27,12 +27,14 @@ Capability stress harness for tantra — synthetic long-horizon scenarios that p
 | `test_kitchen.py` | raw-library adopter app: six hooks, permission matrix, `ctx.ask` re-execution, memory incl. backfill + hybrid recall, skills, `output_schema`, cross-harness cancel, `max_steps`, retries |
 | `test_scale.py` | stores at scale: 10k events, 200-session paging, 1k memory rows, cross-instance handoff, lease contention |
 | `live_raw.py` | manual live smoke, never collected by pytest |
+| `live_fetch_proxy.py` | manual live smoke of `web_fetch(proxy=...)`, never collected by pytest |
 
 ## Live smoke (manual, network)
 
 - Needs `OPENAI_API_KEY`, `OPENAI_ENDPOINT`, `AGNI_MODELS` exported; refuses to run without them.
 - `uv run python stress/live_raw.py` — one real turn: subagent delegation, one interactive approval on stdin, structured output printed.
 - `uv run python stress/live_raw.py check` — builds the harness and exits, no network.
+- `TANTRA_TEST_PROXY=http://user:pass@host:port uv run python stress/live_fetch_proxy.py` — fetches an IP echo directly and through the proxy, prints both IPs, non-zero if the proxied fetch fails or matches the direct IP. Refuses to run without `TANTRA_TEST_PROXY`.
 
 ## Rules
 

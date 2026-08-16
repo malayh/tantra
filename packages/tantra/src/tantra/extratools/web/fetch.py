@@ -23,6 +23,7 @@ MAX_HOPS = 5
 MAX_ATTEMPTS = 3
 RETRY_AFTER_CAP = 30.0
 RETRY_STATUSES = frozenset({403, 429, 500, 502, 503, 504})
+PROXY_SCHEMES = frozenset({"http", "https", "socks4", "socks4a", "socks5", "socks5h"})
 BLOCKED_STATUSES = frozenset({403, 429})
 AUTH_STATUS = 401
 HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
@@ -45,7 +46,19 @@ HEADERS = {
 Address = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 
-def web_fetch(*, max_chars: int = 64_000, timeout: float = 20.0, ssrf_guard: bool = True) -> Tool:
+def web_fetch(
+    *, max_chars: int = 64_000, timeout: float = 20.0, ssrf_guard: bool = True, proxy: str | None = None
+) -> Tool:
+    proxy = proxy or None
+    if proxy is not None:
+        parsed = urlparse(proxy)
+        scheme = parsed.scheme if "://" in proxy else ""
+        if scheme not in PROXY_SCHEMES or not parsed.hostname:
+            raise ValueError(
+                "web_fetch(proxy=...) must be a URL with scheme http, https, socks4, socks4a, socks5 or socks5h "
+                f"and a host; got scheme {scheme!r}"
+            )
+
     @tool
     async def web_fetch(url: str) -> str:
         """Fetch one web page and return its readable text.
@@ -71,23 +84,23 @@ def web_fetch(*, max_chars: int = 64_000, timeout: float = 20.0, ssrf_guard: boo
         - Pages that build their content with JavaScript come back with no extractable text. Look for
           an article, documentation, print or plain-text version of the same material instead.
         """
-        final_url, content_type, body = await _get(url, timeout, ssrf_guard)
+        final_url, content_type, body = await _get(url, timeout, ssrf_guard, proxy)
         title, text = await _extract(final_url, content_type, body)
         return _cap(f"{title}\n{final_url}\n\n{text}", max_chars)
 
     return web_fetch
 
 
-def _session(timeout: float) -> cffi.AsyncSession:
-    return cffi.AsyncSession(impersonate="chrome", timeout=timeout, allow_redirects=False)
+def _session(timeout: float, proxy: str | None) -> cffi.AsyncSession:
+    return cffi.AsyncSession(impersonate="chrome", timeout=timeout, allow_redirects=False, proxy=proxy)
 
 
-async def _get(url: str, timeout: float, ssrf_guard: bool) -> tuple[str, str, bytes]:
+async def _get(url: str, timeout: float, ssrf_guard: bool, proxy: str | None) -> tuple[str, str, bytes]:
     current = url
-    async with _session(timeout) as session:
+    async with _session(timeout, proxy) as session:
         for _ in range(MAX_HOPS + 1):
             await _ssrf_check(current, ssrf_guard)
-            content_type, body, location = await _attempt(session, current, timeout)
+            content_type, body, location = await _attempt(session, current, timeout, proxy)
             if location is None:
                 return current, content_type, body
             current = urljoin(current, location)
@@ -104,7 +117,7 @@ class _Retry(Exception):
         self.delay = delay
 
 
-async def _attempt(session: Any, url: str, timeout: float) -> tuple[str, bytes, str | None]:
+async def _attempt(session: Any, url: str, timeout: float, proxy: str | None) -> tuple[str, bytes, str | None]:
     retrying = AsyncRetrying(
         stop=stop_after_attempt(MAX_ATTEMPTS),
         retry=retry_if_exception_type(_Retry),
@@ -114,7 +127,7 @@ async def _attempt(session: Any, url: str, timeout: float) -> tuple[str, bytes, 
     try:
         async for attempt in retrying:
             with attempt:
-                return await _once(session, url, timeout)
+                return await _once(session, url, timeout, proxy)
     except RetryError as exc:
         raise RuntimeError(
             f"web_fetch gave up on {url} after {MAX_ATTEMPTS} attempts: it {exc.last_attempt.exception().failure}"
@@ -126,13 +139,20 @@ def _wait(retry_state: RetryCallState) -> float:
     return exc.delay or _backoff(retry_state.attempt_number - 1)
 
 
-async def _once(session: Any, url: str, timeout: float) -> tuple[str, bytes, str | None]:
+async def _once(session: Any, url: str, timeout: float, proxy: str | None) -> tuple[str, bytes, str | None]:
     try:
         response = await session.get(url, headers=HEADERS, stream=True)
+    except cffi_exc.ProxyError as exc:
+        raise _Retry(
+            f"could not reach the configured proxy ({exc}) — this is a proxy or network problem, "
+            "not a problem with the page; tell the user and do not try other URLs"
+        ) from exc
     except cffi_exc.Timeout as exc:
-        raise _Retry(f"timed out after {timeout}s — the site is slow or unreachable; try another source") from exc
+        raise _Retry(
+            f"timed out after {timeout}s — the site is slow or unreachable; try another source{_proxied(proxy)}"
+        ) from exc
     except cffi_exc.RequestException as exc:
-        raise _Retry(f"could not be reached ({exc}) — try another source") from exc
+        raise _Retry(f"could not be reached ({exc}) — try another source{_proxied(proxy)}") from exc
     status = response.status_code
     if status >= 400:
         await response.aclose()
@@ -146,8 +166,16 @@ async def _once(session: Any, url: str, timeout: float) -> tuple[str, bytes, str
     try:
         body = await _body(response, url)
     except cffi_exc.RequestException as exc:
-        raise _Retry(f"dropped the connection mid-download ({exc}) — try again or use another source") from exc
+        raise _Retry(
+            f"dropped the connection mid-download ({exc}) — try again or use another source{_proxied(proxy)}"
+        ) from exc
     return response.headers.get("Content-Type", ""), body, None
+
+
+def _proxied(proxy: str | None) -> str:
+    if proxy is None:
+        return ""
+    return " (a proxy is configured — if every URL fails the same way, the proxy is the problem; tell the user)"
 
 
 async def _body(response: Any, url: str) -> bytes:

@@ -37,6 +37,7 @@ Set in `.env`:
 - `SECRET_KEY`, `NEXTAUTH_SECRET` — any random strings.
 - `BRAVE_API_KEY` — optional; without it web search is disabled and deep-search prompts degrade.
 - `EMBEDDING_MODEL` — optional; enables vector memory recall.
+- `WEB_PROXY` — optional; routes `web_fetch` through an HTTP/SOCKS proxy.
 
 ```bash
 docker compose up --build -d

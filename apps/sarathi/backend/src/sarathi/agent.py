@@ -59,8 +59,8 @@ class Sarathi(Agent):
 def _wire_tools() -> None:
     settings = get_settings()
     search = [web_search(settings.BRAVE_API_KEY)] if settings.BRAVE_API_KEY else []
-    Sarathi.tools = [*search, web_fetch(), read_doc(), memory_write, memory_recall]
-    Researcher.tools = [*search, web_fetch()]
+    Sarathi.tools = [*search, web_fetch(proxy=settings.WEB_PROXY), read_doc(), memory_write, memory_recall]
+    Researcher.tools = [*search, web_fetch(proxy=settings.WEB_PROXY)]
 
 
 def deps_factory(header: SessionHeader) -> dict[str, Any]:

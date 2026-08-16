@@ -1450,7 +1450,7 @@ wheels = [
 
 [[package]]
 name = "tantra-harness"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/tantra" }
 dependencies = [
     { name = "httpx" },

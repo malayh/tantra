@@ -1,6 +1,6 @@
 [project]
 name = "tantra-harness"
-version = "0.2.0"
+version = "0.3.0"
 description = "Agent harness framework — the turn loop as a library"
 readme = "README.md"
 requires-python = ">=3.13"

@@ -68,7 +68,7 @@ Brave Search. Raises `ValueError` at construction for an empty key.
 - Snippets are stripped of tags, unescaped, then stripped again, so `&lt;b&gt;` never reaches the model as markup.
 - `http_client` is the test seam (`httpx.MockTransport`). Left `None`, a client is built per call with a 15s timeout.
 
-## `web_fetch(*, max_chars=64_000, timeout=20.0, ssrf_guard=True) -> Tool`
+## `web_fetch(*, max_chars=64_000, timeout=20.0, ssrf_guard=True, proxy=None) -> Tool`
 
 One hardened page fetch, returning readable text.
 
@@ -79,6 +79,7 @@ One hardened page fetch, returning readable text.
 - 3 attempts on 403/429/500/502/503/504 and transport failures, including mid-stream drops; the size-cap error never burns a retry.
 - Output is capped at `max_chars` with a `[truncated at N chars]` marker. Empty extraction raises the "may be JS-rendered, a login wall, or genuinely empty — try another source" error.
 - Without `[doc]` installed, a PDF or Word response returns an error naming `pip install tantra-harness[doc]`.
+- `proxy` is one URL used for every hop and every retry — `http`, `https`, `socks4`, `socks4a`, `socks5` or `socks5h`, credentials in the URL. An invalid value raises `ValueError` at construction naming only the scheme, never the URL; `""` means no proxy. There is no fallback to a direct connection. A `ProxyError` raises an error telling the model to stop fetching and tell the user; other connection and timeout failures raise the unproxied message plus a trailing "a proxy is configured" hint, because a connection refused by the proxy is indistinguishable from a dead target.
 
 ## `read_doc() -> Tool`
 

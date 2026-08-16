@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     SARATHI_MODELS: str
     DATABASE_URL: str = "postgresql+psycopg://sarathi:sarathi@localhost:5432/sarathi"
     BRAVE_API_KEY: str = ""
+    WEB_PROXY: str = ""
     EMBEDDING_MODEL: str | None = None
     SARATHI_CONTEXT_WINDOW: int | None = None
     UPLOAD_DIR: str = "/data/uploads"

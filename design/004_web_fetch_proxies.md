@@ -125,16 +125,17 @@ Strictly sequential: P2 writes the proxy branches against the tenacity structure
   - [ ] live smoke script, run once against a real gateway — script landed; failure path verified live (bogus host → exit 1 after 3 attempts, "configured proxy", no URL); positive path awaits the user's gateway URL
 - Landed notes: `web_fetch(proxy="http://[::1")` raises urlparse's own `ValueError("Invalid IPv6 URL")` before our check — still construction-time, still URL-free, but it does not name the accepted schemes.
 
-### Phase 3 — sarathi wiring, docs, release prep · deps: P2 · —
+### Phase 3 — sarathi wiring, docs, release prep · deps: P2 · ✅ DONE (tag/publish manual, pending)
 - Sarathi: `WEB_PROXY` setting, `agent.py` wiring, `.env.example`, README line, `>=0.3` pin, `test_agent.py` case.
-- Docs: `docs/guides/web-fetch.md` (signature, a `## Proxy` section: single URL, creds in URL, schemes, no fallback, SSRF note, env-var behaviour when unset, `NO_PROXY` caveat), `docs/reference/extratools.md` (signature + one bullet), `docs/sharp-edges.md` (env-proxy edge under Writing tools or a new web bullet), `docs/getting-started/install.md` if it lists `[web]` contents.
+- Docs: `docs/guides/web-fetch.md` (signature, a `## Proxy` section: single URL, creds in URL, schemes, no fallback, SSRF note, env-var behaviour when unset, `NO_PROXY` caveat), `docs/reference/extratools.md` (signature + one bullet), `docs/sharp-edges.md` (env-proxy edge under Writing tools or a new web bullet), ~~`docs/getting-started/install.md` if it lists `[web]` contents~~ **Skipped in P3.** It lists the tools an extra provides, not the packages; nothing there to update.
 - `packages/tantra/pyproject.toml` version `0.3.0`; `CHANGELOG.md` `## 0.3.0` — Added: `web_fetch(proxy=...)`; Changed: `[web]` extra pulls tenacity, fetch retry restructured with unchanged behaviour.
 - **Verify:** `cd apps/sarathi/backend && just lint && just test` green; `WEB_PROXY=http://x:y@h:1 uv run python -c "from sarathi.agent import _wire_tools; _wire_tools()"`-style construction succeeds and `WEB_PROXY=nonsense` raises `ValueError` at wiring; `uv run mkdocs build --strict` clean; `grep -rn "ssrf_guard=True)" docs/` shows the new signature everywhere it is quoted.
 - Checklist:
-  - [ ] sarathi setting + wiring + test
-  - [ ] docs pages
-  - [ ] version + CHANGELOG
+  - [x] sarathi setting + wiring + test (2 tests added; sarathi 70 total)
+  - [x] docs pages (`## Proxy` in the guide, reference bullet, sharp-edges bullet; `mkdocs build --strict` clean)
+  - [x] version + CHANGELOG (`uv.lock` re-locked to 0.3.0)
   - [ ] (manual, user) tag `tantra-v0.3.0` → publish
+- Landed: the docs distinguish the two dead-proxy paths — curl_cffi `ProxyError` gets the stop-and-tell-the-user message, a connection refused *by* the proxy (curl code 7) gets the plain connection error plus the "a proxy is configured" hint. Both `test_agent.py` proxy tests `setenv` rather than `delenv`, because `Settings` reads `.env` and a developer's local file would otherwise win.
 
 ## Open Decisions
 - **`verify=`/custom CA for `https://` proxies** — needed only for TLS-terminating corporate proxies; add a `verify: str | bool` kwarg when someone hits it.

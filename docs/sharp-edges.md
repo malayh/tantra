@@ -45,6 +45,9 @@ Injection tests whether the annotation *is* the `Context` class, so only the bar
 **`ctx.emit` progress is persisted.**
 Each call is a real store append that shows up in `replay` — which is the point, live-only progress is lost on reconnect. It also means a chatty tool writes to the store on every message. Emit milestones, not a log stream.
 
+**libcurl reads proxy environment variables on its own, whether or not you passed `proxy=`.**
+`web_fetch()` without `proxy=` still routes through lowercase `http_proxy`, `HTTPS_PROXY`/`https_proxy` or `ALL_PROXY` if the process has them set — uppercase `HTTP_PROXY` is ignored, for CGI safety, which makes the asymmetry easy to misdiagnose. `NO_PROXY`/`no_proxy` cuts the other way and applies whether or not you passed `proxy=`, bypassing even an explicit one. None of it is disableable from Python; if the egress path matters, control the environment.
+
 ## Permissions, hooks and skills
 
 **A rule-less ancestor's harness default beats a child's explicit `allow`.**

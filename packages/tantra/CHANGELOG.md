@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+Added:
+
+- `web_fetch(proxy=...)` takes one proxy URL (`http`, `https`, `socks4`, `socks4a`, `socks5`, `socks5h`; credentials go in the URL) and applies it to every redirect hop and every retry. An invalid value raises `ValueError` at construction, naming the scheme it received and never the URL. Proxy failures retry inside the existing 3-attempt budget and then raise a proxy-specific message; there is no fallback to a direct connection.
+
+Changed:
+
+- The `[web]` extra now pulls `tenacity>=9`.
+- `web_fetch`'s retry loop is restructured on tenacity, with unchanged behaviour.
+
 ## 0.2.0
 
 Breaking:

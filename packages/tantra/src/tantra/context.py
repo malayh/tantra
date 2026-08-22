@@ -31,6 +31,7 @@ from tantra.providers.base import (
     UserMessage,
 )
 from tantra.skills import SkillInfo
+from tantra.tracing import NULL_TRACER, Tracer
 
 SKILLS_PREAMBLE = "Skills available via the skill(name) tool:"
 
@@ -48,6 +49,7 @@ class TurnContext:
     model: str | None = None
     limits: ModelLimits | None = None
     provider: Provider | None = None
+    tracer: Tracer = NULL_TRACER
 
 
 def _as_content(result: Any) -> str:

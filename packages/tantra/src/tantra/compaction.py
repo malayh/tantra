@@ -18,6 +18,7 @@ from tantra.events import (
 )
 from tantra.providers.base import ModelLimits, SampleRequest, StreamEnd, UserMessage
 from tantra.skills import SKILL_TOOL
+from tantra.tracing import current_span
 
 STRATEGY = "prune_then_summarize"
 
@@ -195,10 +196,19 @@ class PruneThenSummarize:
             model=self.model or ctx.model,
             messages=[*assemble_messages(summary, prefix), UserMessage(content=self.instruction)],
         )
-        text = ""
-        async for event in ctx.provider.stream(req):
-            if isinstance(event, StreamEnd):
-                text = event.text
+        span = ctx.tracer.start_sample(current_span.get(), req, sample_id=None, provider=ctx.provider, compacted=False)
+        end: StreamEnd | None = None
+        error: BaseException | None = None
+        try:
+            async for event in ctx.provider.stream(req):
+                if isinstance(event, StreamEnd):
+                    end = event
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            ctx.tracer.end_sample(span, end=end, error=error, attempts=1)
+        text = end.text if end is not None else ""
         if not text:
             raise ProviderError("compaction summary came back empty; the prefix was left intact")
         return text

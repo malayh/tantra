@@ -32,6 +32,7 @@ from tantra.providers.base import Provider
 from tantra.skills import SKILL_TOOL, SkillInfo, Skills
 from tantra.stores.base import Store
 from tantra.tools import Context, Tool
+from tantra.tracing import NULL_TRACER, Tracer, current_span
 
 if TYPE_CHECKING:
     from tantra.compaction import Compactor
@@ -178,6 +179,7 @@ class Harness:
         skills: Skills | None = None,
         memory: Memory | None = None,
         compactor: Compactor | None = None,
+        telemetry: Tracer | None = None,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -190,6 +192,7 @@ class Harness:
         self.skills = skills
         self.memory = memory
         self.compactor = compactor
+        self.tracer = telemetry if telemetry is not None else NULL_TRACER
         self.default_permission = check_permission("harness default_permission", default_permission)
         self.agents = build_name_table(agents)
         self.tools = {name: _tool_table(agent) for name, agent in self.agents.items()}
@@ -260,6 +263,7 @@ class Harness:
         holder: str,
         chain: Sequence[dict[str, str]],
         skills_index: Sequence[SkillInfo],
+        turn_span: Any,
     ) -> TurnLoop:
         return TurnLoop(
             store=self.store,
@@ -280,11 +284,35 @@ class Harness:
             skills_index=skills_index,
             memory=self.memory,
             compactor=self.compactor,
+            tracer=self.tracer,
+            turn_span=turn_span,
         )
 
     async def _notify(self, emitted: Emitted) -> None:
         for hook in self.hooks:
             await hook.on_event(emitted)
+
+    def _end_turn(self, span: Any, loop: TurnLoop | None, raised: BaseException | None) -> None:
+        terminal = loop.terminal if loop is not None else None
+        outcome_error: BaseException | str | None
+        if isinstance(terminal, TurnCompleted):
+            outcome, stop_reason, output = terminal.stop_reason, terminal.stop_reason, terminal.output
+            outcome_error, ask_id = None, None
+        elif isinstance(terminal, TurnFailed):
+            outcome, stop_reason, output, outcome_error, ask_id = "failed", None, None, terminal.error, None
+        elif loop is not None and loop.suspended is not None:
+            outcome, stop_reason, output, outcome_error, ask_id = "suspended", None, None, None, loop.suspended
+        else:
+            outcome, stop_reason, output, outcome_error, ask_id = "aborted", None, None, raised, None
+        self.tracer.end_turn(
+            span,
+            outcome=outcome,
+            stop_reason=stop_reason,
+            output=output,
+            final_text=_final_text(_turn_tail(loop.history)) if loop is not None else None,
+            error=outcome_error,
+            ask_id=ask_id,
+        )
 
     async def _settle(self, header: SessionHeader, loop: TurnLoop | None, holder: str) -> None:
         if loop is not None and not loop.lease_lost:
@@ -303,6 +331,9 @@ class Harness:
             raise SessionBusy(sid)
 
         loop: TurnLoop | None = None
+        span: Any = None
+        traced = False
+        raised: BaseException | None = None
         try:
             history = [stamped.event async for stamped in self.store.read(sid)]
             if _turn_incomplete(history):
@@ -325,6 +356,8 @@ class Harness:
                 metadata=header.metadata,
                 deps=deps,
             )
+            span = self.tracer.start_turn(turn, resumed=False, ask_id=None, parent=current_span.get())
+            traced = True
             started = TurnStarted(turn_id=turn.turn_id, input=input)
             header.last_seq = await self.store.append(sid, [started], expect_seq=header.last_seq)
             history.append(started)
@@ -344,12 +377,18 @@ class Harness:
                 holder=holder,
                 chain=chain,
                 skills_index=skills_index,
+                turn_span=span,
             )
             async with aclosing(loop.run()) as turn_stream:
                 async for emitted in turn_stream:
                     yield emitted
+        except BaseException as exc:
+            raised = exc
+            raise
         finally:
             await self._settle(header, loop, holder)
+            if traced:
+                self._end_turn(span, loop, raised)
 
     async def resume(
         self, sid: str, ask_id: str | None = None, response: AskResponse | None = None
@@ -362,6 +401,9 @@ class Harness:
             raise SessionBusy(sid)
 
         loop: TurnLoop | None = None
+        span: Any = None
+        traced = False
+        raised: BaseException | None = None
         try:
             stamped = [item async for item in self.store.read(sid)]
             history = [item.event for item in stamped]
@@ -412,6 +454,8 @@ class Harness:
                 metadata=header.metadata,
                 deps=deps,
             )
+            span = self.tracer.start_turn(turn, resumed=True, ask_id=ask_id, parent=current_span.get())
+            traced = True
             loop = self._build_loop(
                 header=header,
                 agent=agent,
@@ -421,12 +465,18 @@ class Harness:
                 holder=holder,
                 chain=chain,
                 skills_index=skills_index,
+                turn_span=span,
             )
             async with aclosing(loop.run()) as turn_stream:
                 async for emitted in turn_stream:
                     yield emitted
+        except BaseException as exc:
+            raised = exc
+            raise
         finally:
             await self._settle(header, loop, holder)
+            if traced:
+                self._end_turn(span, loop, raised)
 
     async def _append_absorbing(self, header: SessionHeader, history: list[SessionEvent], event: SessionEvent) -> int:
         while True:

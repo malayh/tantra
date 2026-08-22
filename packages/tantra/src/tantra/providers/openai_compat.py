@@ -55,6 +55,8 @@ def _usage_payload(raw: dict[str, Any]) -> Usage:
 
 
 class OpenAICompatible:
+    provider_name = "openai"
+
     def __init__(
         self,
         base_url: str,

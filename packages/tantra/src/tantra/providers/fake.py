@@ -40,6 +40,8 @@ def _split(text: str) -> list[str]:
 
 
 class FakeProvider:
+    provider_name = "fake"
+
     def __init__(self, samples: list[Sample]) -> None:
         self.samples = list(samples)
         self.requests: list[SampleRequest] = []

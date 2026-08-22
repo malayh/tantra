@@ -53,6 +53,7 @@ from tantra.stores.memory import MemoryStore
 from tantra.stores.postgres import PostgresStore
 from tantra.stores.sqlite import SQLiteStore
 from tantra.tools import Context, Tool, tool
+from tantra.tracing import NullTracer, Tracer
 
 __all__ = [
     "Agent",
@@ -86,6 +87,7 @@ __all__ = [
     "MemoryStore",
     "MemoryWrite",
     "ModelLimits",
+    "NullTracer",
     "OpenAICompatible",
     "OpenAICompatibleEmbedder",
     "PostgresStore",
@@ -110,6 +112,7 @@ __all__ = [
     "Store",
     "TantraError",
     "Tool",
+    "Tracer",
     "TurnContext",
     "TurnIncomplete",
     "Usage",

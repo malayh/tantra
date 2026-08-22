@@ -19,6 +19,7 @@ from tantra.events import (
     AskRaised,
     CancelRequested,
     ChildSessionSpawned,
+    CompactionApplied,
     ReasoningPart,
     SampleCompleted,
     SampleStarted,
@@ -48,6 +49,7 @@ from tantra.providers.base import (
 from tantra.skills import SkillInfo
 from tantra.stores.base import Store
 from tantra.tools import Context, Tool
+from tantra.tracing import NULL_TRACER, Tracer, current_span
 
 if TYPE_CHECKING:
     from tantra.compaction import Compactor
@@ -205,6 +207,8 @@ class TurnLoop:
         skills_index: Sequence[SkillInfo] = (),
         memory: Memory | None = None,
         compactor: Compactor | None = None,
+        tracer: Tracer = NULL_TRACER,
+        turn_span: Any = None,
     ) -> None:
         self.store = store
         self.provider = provider
@@ -224,10 +228,15 @@ class TurnLoop:
         self.skills_index = list(skills_index)
         self.memory = memory
         self.compactor = compactor
+        self.tracer = tracer
+        self.turn_span = turn_span
+        self.tool_spans: dict[str, Any] = {}
+        self.terminal: TurnCompleted | TurnFailed | None = None
         self.turn.history = self.history
         self.turn.model = model
         self.turn.limits = provider.limits(model)
         self.turn.provider = provider
+        self.turn.tracer = tracer
         self.failed = False
         self.lease_lost = False
         self.suspended: str | None = None
@@ -268,7 +277,45 @@ class TurnLoop:
             for offset, event in enumerate(events)
         ]
 
-    async def _completed(self, call_id: str, result: Any, *, is_error: bool = False) -> list[Emitted]:
+    def _stub_span(self, call: ToolCallRequested, result: Any, *, is_error: bool, error_type: str | None) -> None:
+        span = self.tracer.start_tool(
+            self.turn_span,
+            call,
+            args=call.args,
+            tool=self.tools.get(call.name),
+            replayed=call.call_id in self.state.started,
+        )
+        self.tracer.end_tool(
+            span,
+            result=result,
+            is_error=is_error,
+            outcome="error" if is_error else "completed",
+            error_type=error_type,
+            ask_id=None,
+        )
+
+    async def _completed(
+        self,
+        call_id: str,
+        result: Any,
+        *,
+        is_error: bool = False,
+        error_type: str | None = None,
+        call: ToolCallRequested | None = None,
+    ) -> list[Emitted]:
+        if is_error and error_type is None:
+            error_type = "_OTHER"
+        if call_id in self.tool_spans:
+            self.tracer.end_tool(
+                self.tool_spans.pop(call_id),
+                result=result,
+                is_error=is_error,
+                outcome="error" if is_error else "completed",
+                error_type=error_type,
+                ask_id=None,
+            )
+        elif call is not None:
+            self._stub_span(call, result, is_error=is_error, error_type=error_type)
         completed = ToolCallCompleted(call_id=call_id, result=result, is_error=is_error)
         if call_id in self.state.started:
             return await self._append([completed])
@@ -318,6 +365,8 @@ class TurnLoop:
         if error is not None:
             future.set_exception(error)
             return
+        previous = current_span.get()
+        current_span.set(self.tool_spans.get(call_id))
         try:
             async with aclosing(self.spawner.drive(child, input)) as stream:
                 async for emitted in stream:
@@ -328,6 +377,8 @@ class TurnLoop:
         except Exception as exc:
             future.set_exception(exc)
             return
+        finally:
+            current_span.set(previous)
         if outcome.pending_ask is not None:
             self.suspended = outcome.pending_ask
         elif outcome.error is not None:
@@ -405,32 +456,52 @@ class TurnLoop:
             else:
                 plan.append((index, child, task_input))
         waiting: dict[int, str] = {}
-        async with aclosing(self._merge(plan, max_concurrency, slots, waiting)) as merged:
-            async for emitted in merged:
-                yield emitted
+        previous = current_span.get()
+        current_span.set(self.tool_spans.get(call_id))
+        try:
+            async with aclosing(self._merge(plan, max_concurrency, slots, waiting)) as merged:
+                async for emitted in merged:
+                    yield emitted
+        finally:
+            current_span.set(previous)
         if waiting:
             self.suspended = waiting[min(waiting)]
             return
         future.set_result(slots)
 
-    async def _sample(self, req: SampleRequest) -> AsyncIterator[Emitted | StreamEnd]:
-        for attempt in range(self.retry.max_attempts):
-            end: StreamEnd | None = None
-            try:
-                async for event in self.provider.stream(req):
-                    if isinstance(event, TextDelta | ReasoningDelta | ToolCallDelta):
-                        yield self._live(event)
-                    elif isinstance(event, StreamEnd):
-                        end = event
-                if end is None:
-                    raise ProviderError("provider stream ended without a StreamEnd")
-            except ProviderError as exc:
-                if attempt + 1 >= self.retry.max_attempts or not is_retryable(exc):
-                    raise
-                await asyncio.sleep(min(self.retry.base_delay * 2**attempt, self.retry.max_delay))
-                continue
-            yield end
-            return
+    async def _sample(
+        self, req: SampleRequest, *, sample_id: str, compacted: bool
+    ) -> AsyncIterator[Emitted | StreamEnd]:
+        span = self.tracer.start_sample(
+            self.turn_span, req, sample_id=sample_id, provider=self.provider, compacted=compacted
+        )
+        end: StreamEnd | None = None
+        error: BaseException | None = None
+        attempts = 0
+        try:
+            for attempt in range(self.retry.max_attempts):
+                attempts = attempt + 1
+                end = None
+                try:
+                    async for event in self.provider.stream(req):
+                        if isinstance(event, TextDelta | ReasoningDelta | ToolCallDelta):
+                            yield self._live(event)
+                        elif isinstance(event, StreamEnd):
+                            end = event
+                    if end is None:
+                        raise ProviderError("provider stream ended without a StreamEnd")
+                except ProviderError as exc:
+                    if attempt + 1 >= self.retry.max_attempts or not is_retryable(exc):
+                        raise
+                    await asyncio.sleep(min(self.retry.base_delay * 2**attempt, self.retry.max_delay))
+                    continue
+                yield end
+                return
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            self.tracer.end_sample(span, end=end, error=error, attempts=attempts)
 
     async def _execute(self, tool: Tool, call: ToolCallRequested, args: dict[str, Any]) -> AsyncIterator[Emitted]:
         call_id = call.call_id
@@ -510,13 +581,14 @@ class TurnLoop:
             try:
                 result: Any = await task
                 is_error = False
+                error_type: str | None = None
             except Exception as exc:
-                result, is_error = str(exc), True
+                result, is_error, error_type = str(exc), True, type(exc).__qualname__
             for hook in self.hooks:
                 transformed = await hook.after_tool(call, result, is_error, self.turn)
                 if transformed is not None:
                     result = transformed
-            for emitted in await self._completed(call_id, result, is_error=is_error):
+            for emitted in await self._completed(call_id, result, is_error=is_error, error_type=error_type, call=call):
                 yield emitted
         finally:
             pending = [future for future in (task, getter) if future is not None]
@@ -539,24 +611,26 @@ class TurnLoop:
                     raise ValueError("arguments must be a JSON object")
             except ValueError as exc:
                 args = {}
+                invalid = f"invalid JSON arguments: {exc}"
+                requested = ToolCallRequested(sample_id=sample_id, call_id=call.id, name=call.name, args=args)
+                self._stub_span(requested, invalid, is_error=True, error_type="_OTHER")
                 if call.id not in self.state.started:
                     rejected.append(ToolCallStarted(call_id=call.id))
-                rejected.append(
-                    ToolCallCompleted(call_id=call.id, result=f"invalid JSON arguments: {exc}", is_error=True)
-                )
+                rejected.append(ToolCallCompleted(call_id=call.id, result=invalid, is_error=True))
             parts.append(ToolCallRequested(sample_id=sample_id, call_id=call.id, name=call.name, args=args))
         parts.append(SampleCompleted(sample_id=sample_id, usage=end.usage, finish_reason=end.finish_reason))
         return parts + rejected
 
-    async def _submit(self, call_id: str, args: dict[str, Any]) -> tuple[list[Emitted], Any, bool]:
+    async def _submit(self, call: ToolCallRequested) -> tuple[list[Emitted], Any, bool]:
         schema = self.agent.output_schema
         assert schema is not None
         try:
-            value = schema.model_validate(args)
+            value = schema.model_validate(call.args)
         except ValidationError as exc:
-            return await self._completed(call_id, f"invalid output: {exc}", is_error=True), None, False
+            events = await self._completed(call.call_id, f"invalid output: {exc}", is_error=True, call=call)
+            return events, None, False
         output = value.model_dump(mode="json")
-        return await self._completed(call_id, output), output, True
+        return await self._completed(call.call_id, output, call=call), output, True
 
     def _submitted_output(self) -> tuple[bool, Any]:
         if self.agent.output_schema is None:
@@ -573,6 +647,7 @@ class TurnLoop:
             return
         events: list[SessionEvent] = []
         for call in pending:
+            self._stub_span(call, reason, is_error=True, error_type="_OTHER")
             if call.call_id not in self.state.started:
                 events.append(ToolCallStarted(call_id=call.call_id))
             events.append(ToolCallCompleted(call_id=call.call_id, result=reason, is_error=True))
@@ -582,14 +657,18 @@ class TurnLoop:
     async def _failed(self, exc: ProviderError) -> AsyncIterator[Emitted]:
         self.failed = True
         failure = TurnFailed(turn_id=self.turn.turn_id, error=str(exc))
-        for emitted in await self._append([failure]):
+        appended = await self._append([failure])
+        self.terminal = failure
+        for emitted in appended:
             yield emitted
         for hook in self.hooks:
             await hook.after_turn(self.turn, failure)
 
     async def _terminal(self, reason: str, output: Any) -> AsyncIterator[Emitted]:
         event = TurnCompleted(turn_id=self.turn.turn_id, stop_reason=reason, output=output)
-        for emitted in await self._append([event]):
+        appended = await self._append([event])
+        self.terminal = event
+        for emitted in appended:
             yield emitted
         for hook in self.hooks:
             await hook.after_turn(self.turn, event)
@@ -612,23 +691,25 @@ class TurnLoop:
                 if self.state.cancelled:
                     return
             if stopped:
-                for emitted in await self._completed(call.call_id, COMPLETED_RESULT, is_error=True):
+                for emitted in await self._completed(call.call_id, COMPLETED_RESULT, is_error=True, call=call):
                     yield emitted
                 continue
             if call.name == SUBMIT_OUTPUT and self.agent.output_schema is not None:
-                events, output, stopped = await self._submit(call.call_id, call.args)
+                events, output, stopped = await self._submit(call)
                 for emitted in events:
                     yield emitted
                 if stopped:
                     self.stop = ("output", output)
                 continue
             if capped:
-                for emitted in await self._completed(call.call_id, "not executed: max steps reached", is_error=True):
+                capped_result = "not executed: max steps reached"
+                for emitted in await self._completed(call.call_id, capped_result, is_error=True, call=call):
                     yield emitted
                 continue
             tool = self.tools.get(call.name)
             if tool is None:
-                for emitted in await self._completed(call.call_id, f"unknown tool {call.name!r}", is_error=True):
+                unknown = f"unknown tool {call.name!r}"
+                for emitted in await self._completed(call.call_id, unknown, is_error=True, call=call):
                     yield emitted
                 continue
             effective = call
@@ -645,7 +726,8 @@ class TurnLoop:
                 if outcome is not None:
                     effective = outcome
             if denial is not None:
-                for emitted in await self._completed(call.call_id, f"denied by hook: {denial.reason}", is_error=True):
+                refused = f"denied by hook: {denial.reason}"
+                for emitted in await self._completed(call.call_id, refused, is_error=True, call=effective):
                     yield emitted
                 continue
             verdict = self._verdict(call.name, tool.permission)
@@ -653,7 +735,7 @@ class TurnLoop:
                 verdict = strictest(verdict, "ask")
             if verdict == "deny":
                 denied = f"denied by permissions: {call.name}"
-                for emitted in await self._completed(call.call_id, denied, is_error=True):
+                for emitted in await self._completed(call.call_id, denied, is_error=True, call=effective):
                     yield emitted
                 continue
             if verdict == "ask":
@@ -671,12 +753,16 @@ class TurnLoop:
                 if response is None:
                     return
                 if not (isinstance(response, ApprovalResponse) and response.allow):
-                    for emitted in await self._completed(call.call_id, "denied by user", is_error=True):
+                    for emitted in await self._completed(call.call_id, "denied by user", is_error=True, call=effective):
                         yield emitted
                     continue
+            replayed = call.call_id in self.state.started
             if call.call_id not in self.state.started:
                 for emitted in await self._append([ToolCallStarted(call_id=call.call_id)]):
                     yield emitted
+            self.tool_spans[call.call_id] = self.tracer.start_tool(
+                self.turn_span, call, args=effective.args, tool=tool, replayed=replayed
+            )
             async with aclosing(self._execute(tool, call, effective.args)) as execution:
                 async for emitted in execution:
                     yield emitted
@@ -745,11 +831,26 @@ class TurnLoop:
             for hook in self.hooks:
                 await hook.before_sample(self.turn)
 
+            compacted: list[SessionEvent] = []
             if self.compactor is not None:
+                span = self.tracer.start_compaction(self.turn_span)
+                previous = current_span.get()
+                current_span.set(span)
+                failure: ProviderError | None = None
+                error: BaseException | None = None
                 try:
                     compacted = await self.compactor.compact(self.turn)
                 except ProviderError as exc:
-                    async for emitted in self._failed(exc):
+                    failure = error = exc
+                except BaseException as exc:
+                    error = exc
+                    raise
+                finally:
+                    current_span.set(previous)
+                    applied = next((event for event in compacted if isinstance(event, CompactionApplied)), None)
+                    self.tracer.end_compaction(span, applied=applied, error=error)
+                if failure is not None:
+                    async for emitted in self._failed(failure):
                         yield emitted
                     return
                 if compacted:
@@ -772,7 +873,7 @@ class TurnLoop:
 
             end: StreamEnd | None = None
             try:
-                async with aclosing(self._sample(req)) as stream:
+                async with aclosing(self._sample(req, sample_id=sample_id, compacted=bool(compacted))) as stream:
                     async for item in stream:
                         if isinstance(item, StreamEnd):
                             end = item
@@ -810,9 +911,22 @@ class TurnLoop:
             yield emitted
 
     async def run(self) -> AsyncIterator[Emitted]:
-        async with aclosing(self._drive()) as stream:
-            async for emitted in stream:
-                if emitted.session_id == self.header.id:
-                    for hook in self.hooks:
-                        await hook.on_event(emitted)
-                yield emitted
+        try:
+            async with aclosing(self._drive()) as stream:
+                async for emitted in stream:
+                    if emitted.session_id == self.header.id:
+                        for hook in self.hooks:
+                            await hook.on_event(emitted)
+                    yield emitted
+        finally:
+            outcome = "suspended" if self.suspended is not None else "aborted"
+            while self.tool_spans:
+                _, span = self.tool_spans.popitem()
+                self.tracer.end_tool(
+                    span,
+                    result=None,
+                    is_error=False,
+                    outcome=outcome,
+                    error_type=None,
+                    ask_id=self.suspended,
+                )

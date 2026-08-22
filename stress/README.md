@@ -28,6 +28,7 @@ Capability stress harness for tantra — synthetic long-horizon scenarios that p
 | `test_scale.py` | stores at scale: 10k events, 200-session paging, 1k memory rows, cross-instance handoff, lease contention |
 | `live_raw.py` | manual live smoke, never collected by pytest |
 | `live_fetch_proxy.py` | manual live smoke of `web_fetch(proxy=...)`, never collected by pytest |
+| `live_telemetry.py` | manual live smoke of `Telemetry` against a real OTLP collector, never collected by pytest |
 
 ## Live smoke (manual, network)
 
@@ -35,6 +36,7 @@ Capability stress harness for tantra — synthetic long-horizon scenarios that p
 - `uv run python stress/live_raw.py` — one real turn: subagent delegation, one interactive approval on stdin, structured output printed.
 - `uv run python stress/live_raw.py check` — builds the harness and exits, no network.
 - `TANTRA_TEST_PROXY=http://user:pass@host:port uv run python stress/live_fetch_proxy.py` — fetches an IP echo directly and through the proxy, prints both IPs, non-zero if the proxied fetch fails or matches the direct IP. Refuses to run without `TANTRA_TEST_PROXY`.
+- `OTEL_EXPORTER_OTLP_ENDPOINT=https://collector.example/otel OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic\ <b64> uv run python stress/live_telemetry.py` — one scripted turn (tool call, subagent spawn, final answer) exported over OTLP with `capture_content=True`; prints the span tree and the trace id. The model is faked, so the collector is the only network hop. `OTEL_SERVICE_NAME` is optional and defaults to `tantra-smoke`. Refuses to run without `OTEL_EXPORTER_OTLP_ENDPOINT`, and exits non-zero if the collector rejects the batch. Then check the backend: an agent observation with input and output, a generation per model call, a tool observation with arguments and result, and a nested agent under the spawning tool.
 
 ## Rules
 

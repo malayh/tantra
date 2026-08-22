@@ -70,6 +70,29 @@ The number driving compaction is the provider's reported usage on the previous s
 **Compaction will stub large tool output, including fetched pages.**
 A `web_fetch` result that survives past `tail_turns` becomes `[pruned: web_fetch output, N chars omitted]`. Only `skill` output is exempt, and no mechanism exists to exempt anything else. If a page's content must persist, have the tool return a summary or write it somewhere durable.
 
+## Telemetry
+
+**Content capture is off by default, so input and output columns start empty.**
+`Telemetry()` and `Telemetry.from_env()` record metadata, usage and timings only — the semconv default, because prompts and results are the sensitive part of a trace. Langfuse and friends show generations with no prompt and no completion until you pass `capture_content=True`. Content attributes are then cut at `max_content_chars` with a plain string slice, which leaves a truncated JSON attribute unparseable; the `…[truncated N chars]` marker is how you spot it. `gen_ai.tool.call.result` and `tantra.compaction.summary` are the raw text the model saw, never JSON — do not write a consumer that parses them.
+
+**A suspended turn is two traces, not one.**
+Nothing is alive while a `ctx.ask` waits, so the span closes with `tantra.turn.outcome="suspended"` and the resumed segment opens a new trace. They share `tantra.turn_id` and `gen_ai.conversation.id` — stitch on either, or use the backend's session view. A turn suspended twice is three traces.
+
+**One `call_id` can produce several `execute_tool` spans.**
+A resumed tool is re-executed from its first line, so the same call is traced again on every resume. The later spans carry `tantra.tool.replayed=true`. Counting tool spans over-counts work done; count distinct `gen_ai.tool.call.id` instead.
+
+**`current_span` stays set in the consumer's task while a spawning turn streams.**
+`ctx.spawn` and `ctx.fan_out` set the enclosing tool handle as the parent for child turns, and it remains set in that task between forwarded child events. Only `start_turn` reads it — but starting an unrelated `harness.run` from the same task while iterating a spawning turn parents that turn under the tool span. Drive independent turns from their own task.
+
+**A custom `Compactor` is untraced unless it says so.**
+The loop opens the `compact` span, but only `PruneThenSummarize` reports its own model call. Yours must call `ctx.tracer.start_sample` / `end_sample` itself. Called with a parent that is not a live handle — outside the loop's `current_span` window — the resulting `chat` span has no `gen_ai.conversation.id` and no `tantra.turn_id`, so it lands orphaned in a trace of its own.
+
+**`gen_ai.usage.input_tokens` from `OpenAICompatible` excludes cached tokens.**
+The provider subtracts cache reads from `input_tokens` before reporting them, which is not what the semantic convention asks for. Tantra records what the provider said rather than adjusting it silently, so a dashboard that wants the semconv reading must add `gen_ai.usage.cache_read.input_tokens` back in.
+
+**Spans read the model from the request, never from `harness.default_model`.**
+That attribute is deliberately mutable at runtime — sarathi reassigns it per session — so reading it at span time would mislabel every in-flight turn. `gen_ai.request.model` is whatever the sample actually asked for.
+
 ## Storage and operations
 
 **`store.setup()` is mandatory for SQLite and Postgres, and nothing calls it.**

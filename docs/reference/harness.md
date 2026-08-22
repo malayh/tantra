@@ -24,6 +24,7 @@ Harness(
     skills: Skills | None = None,
     memory: Memory | None = None,
     compactor: Compactor | None = None,
+    telemetry: Tracer | None = None,
 )
 ```
 
@@ -42,6 +43,7 @@ Harness(
 | `skills` | A [Skills](skills.md) catalogue. Enabling it injects the `skill` tool into every agent that has not opted out with `skills = []`. |
 | `memory` | A [Memory](memory.md) backend, exposed to tools as `ctx.memory`. `None` makes `memory_write` / `memory_recall` raise a self-describing error. |
 | `compactor` | A [Compactor](compaction.md), consulted before every sample. `None` disables compaction. |
+| `telemetry` | A [Tracer](telemetry.md) — normally `Telemetry()` from the `[telemetry]` extra. `None` installs `NullTracer` and records nothing. |
 
 ### Validation at construction
 

@@ -11,6 +11,6 @@ Install name is `tantra-harness`, import name is `tantra`.
 - [Install](getting-started/install.md) — Python version, the extras matrix, store setup.
 - [Quickstart](getting-started/quickstart.md) — a full offline turn with `FakeProvider`, then a real provider.
 - [Concepts](concepts/turn-loop.md) — the turn loop, how `Agent` / session / `Harness` relate, and what durability buys you.
-- [Guides](guides/tools.md) — task-shaped pages: defining tools, the shipped tool pack, permissions and hooks, skills, memory, subagents, storage, providers, compaction.
+- [Guides](guides/tools.md) — task-shaped pages: defining tools, the shipped tool pack, permissions and hooks, skills, memory, subagents, storage, providers, compaction, telemetry.
 - [Reference](reference/agent.md) — the public API surface, one page per module.
 - [Sharp edges](sharp-edges.md) — the behaviours that surprise people. Read this before you ship.

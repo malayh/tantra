@@ -12,6 +12,7 @@ The install name is `tantra-harness`; the import name is `tantra`.
 | `pip install "tantra-harness[web]"` | `web_search` (Brave) + `web_fetch` |
 | `pip install "tantra-harness[doc]"` | `read_doc` for PDF / docx |
 | `pip install "tantra-harness[postgres]"` | the psycopg driver that `PostgresStore` needs at use time; the class itself imports without it |
+| `pip install "tantra-harness[telemetry]"` | `tantra.telemetry.Telemetry` — OpenTelemetry tracing for `Harness(telemetry=...)` |
 | `pip install "tantra-harness[web,doc]"` | combine freely |
 
 The base install pulls only `pydantic`, `httpx` and `openai`. The shell tools are stdlib and need no extra.

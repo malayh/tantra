@@ -19,14 +19,15 @@ The turn-scoped dataclass. Every [Hook](hooks.md) callback receives it, and a ca
 | `model` | `str \| None` | `None` | Model resolved for this turn. |
 | `limits` | `ModelLimits \| None` | `None` | Context window and max output for that model. |
 | `provider` | `Provider \| None` | `None` | The harness's provider, so a compactor can sample. |
+| `tracer` | `Tracer` | `NULL_TRACER` | What `Harness(telemetry=...)` was given, so a compactor can trace its own model call. See [Telemetry](telemetry.md#turncontexttracer). |
 
 ## Who sets what, and when
 
-`Harness` builds the object with the first seven fields. The loop then fills in `history`, `model`, `limits` and `provider` when it is constructed — which happens **after** `before_turn` runs.
+`Harness` builds the object with the first seven fields. The loop then fills in `history`, `model`, `limits`, `provider` and `tracer` when it is constructed — which happens **after** `before_turn` runs.
 
-| Callback | `history` / `model` / `limits` / `provider` |
+| Callback | `history` / `model` / `limits` / `provider` / `tracer` |
 |---|---|
-| `Hook.before_turn` | `None` — the loop does not exist yet |
+| `Hook.before_turn` | defaults — the loop does not exist yet |
 | `Hook.before_sample` | populated |
 | `Hook.before_tool` / `after_tool` | populated |
 | `Hook.after_turn` | populated |

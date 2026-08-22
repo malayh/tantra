@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode
 from pydantic import BaseModel
@@ -665,6 +665,75 @@ async def test_a_swept_tool_span_records_no_result_under_capture() -> None:
     executed = one(exporter, "execute_tool ")
     assert executed.attributes["tantra.tool.outcome"] == "aborted"
     assert "gen_ai.tool.call.result" not in executed.attributes
+
+
+def test_from_env_returns_nothing_without_an_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    installed: list[Any] = []
+    monkeypatch.setattr("tantra.telemetry.trace.set_tracer_provider", installed.append)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", raising=False)
+
+    assert Telemetry.from_env() is None
+    assert installed == []
+
+
+async def test_from_env_builds_an_env_configured_provider_and_installs_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    built: list[dict[str, Any]] = []
+    installed: list[Any] = []
+
+    class Recorder(SpanExporter):
+        def __init__(self, **kwargs: Any) -> None:
+            built.append(kwargs)
+
+        def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+            return SpanExportResult.SUCCESS
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter", Recorder, raising=False
+    )
+    monkeypatch.setattr("tantra.telemetry.trace.set_tracer_provider", installed.append)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.invalid")
+    monkeypatch.setenv("OTEL_SERVICE_NAME", "from-env-agent")
+
+    telemetry = Telemetry.from_env(capture_content=True)
+
+    assert isinstance(telemetry, Telemetry)
+    assert telemetry.capture_content is True
+    assert built == [{}]
+    assert len(installed) == 1
+    assert installed[0].resource.attributes["service.name"] == "from-env-agent"
+
+    exporter = InMemorySpanExporter()
+    installed[0].add_span_processor(SimpleSpanProcessor(exporter))
+    harness = Harness(FakeProvider([Sample(text="hi")]), MemoryStore(), [Bot], default_model=MODEL, telemetry=telemetry)
+    sid = (await harness.create_session(Bot)).id
+
+    await collect(harness.run(sid, "go"))
+
+    assert {span.name for span in exporter.get_finished_spans()} == {"invoke_agent bot", f"chat {MODEL}"}
+    telemetry.shutdown()
+
+
+def test_shutdown_is_a_noop_without_a_provider() -> None:
+    Telemetry().shutdown()
+
+
+def test_shutdown_closes_the_provider_it_was_given() -> None:
+    class StubProvider:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def shutdown(self) -> None:
+            self.closed += 1
+
+    provider = StubProvider()
+
+    Telemetry(provider).shutdown()
+
+    assert provider.closed == 1
 
 
 async def test_a_provider_set_globally_after_construction_still_receives_the_spans() -> None:

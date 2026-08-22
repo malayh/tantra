@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+psycopg://sarathi:sarathi@localhost:5432/sarathi"
     BRAVE_API_KEY: str = ""
     WEB_PROXY: str = ""
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = ""
+    OTEL_EXPORTER_OTLP_HEADERS: str = ""
+    OTEL_RESOURCE_ATTRIBUTES: str = ""
+    OTEL_SERVICE_NAME: str = "sarathi"
+    TELEMETRY_CAPTURE_CONTENT: bool = False
     EMBEDDING_MODEL: str | None = None
     SARATHI_CONTEXT_WINDOW: int | None = None
     UPLOAD_DIR: str = "/data/uploads"

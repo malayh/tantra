@@ -7,11 +7,11 @@
 
 ## Scope
 - **In:** core seam + loop instrumentation; `tantra.telemetry.Telemetry` (OTel impl); extra `[telemetry]`; sarathi env-gated wiring; live smoke script; docs; 0.4.0 release.
-- **Out:** metrics (`gen_ai.client.token.usage` etc.); configuring exporters/SDK inside tantra; agni wiring; embedder/memory spans; per-retry-attempt spans; span Links between run/resume segments; `user.id`/Langfuse-specific attributes; trace ids carried on events.
+- **Out:** metrics (`gen_ai.client.token.usage` etc.); ~~configuring exporters/SDK inside tantra~~ **Reversed in P3.** user wanted a FastAPIInstrumentor-style one-liner → opt-in `Telemetry.from_env()`; agni wiring; embedder/memory spans; per-retry-attempt spans; span Links between run/resume segments; `user.id`/Langfuse-specific attributes; trace ids carried on events.
 
 ## Decisions
 - **Dependency placement:** core gets zero new deps. `tantra/tracing.py` (core) defines `Tracer` protocol + `NullTracer`; `tantra/telemetry.py` (extra) implements it with `opentelemetry-sdk`. User overruled my otel-api-in-core recommendation; reason: keep the base install untouched.
-- **Switch:** `Harness(telemetry: Tracer | None = None)`. `Telemetry(tracer_provider=None, capture_content=False, max_content_chars=32_768)`. `tracer_provider=None` → resolve `opentelemetry.trace.get_tracer_provider()` lazily on first span, so apps may configure the SDK after constructing the harness. Tantra never installs exporters or touches global OTel state.
+- **Switch:** `Harness(telemetry: Tracer | None = None)`. `Telemetry(tracer_provider=None, capture_content=False, max_content_chars=32_768)`. `tracer_provider=None` → resolve `opentelemetry.trace.get_tracer_provider()` lazily on first span, so apps may configure the SDK after constructing the harness. ~~Tantra never installs exporters or touches global OTel state.~~ **Amended in P3.** `Telemetry.from_env()` (opt-in) builds an env-driven provider + OTLP exporter and sets the global; the plain constructor still touches nothing.
 - **Content capture off by default** (semconv default). `capture_content=True` turns on `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, root input/output. Metadata/usage/timing always on.
 - **Trace shape: one trace per `run()`/`resume()` segment, attributes only, no Links.** Root span `invoke_agent {agent}`. Every span carries `gen_ai.conversation.id = session_id` and `tantra.turn_id`. A resumed segment's root adds `tantra.turn.resumed=true` + `tantra.ask_id`. Why: idiomatic, works on every backend, cross-process resume needs no persisted span ids, span durations are real compute time (the human wait is the gap between traces). Langfuse groups by session; filter `tantra.turn_id` for one logical turn.
 - **Tool spans are siblings of `chat` under `invoke_agent`** (semconv agent-spans guidance), not children of the chat that requested them. Subagent turns nest under the spawning `execute_tool` span.
@@ -89,8 +89,8 @@ current_span: ContextVar[Any] = ContextVar("tantra_current_span", default=None)
 - Token mapping: `Usage.input_tokens`→`gen_ai.usage.input_tokens`, `output_tokens`→`gen_ai.usage.output_tokens`, `cache_read_tokens`→`gen_ai.usage.cache_read.input_tokens`, `cache_write_tokens`→`gen_ai.usage.cache_creation.input_tokens`. Note `OpenAICompatible._usage_payload` (`openai_compat.py:47-54`) already subtracts cached tokens from `input_tokens`, which deviates from semconv ("cache_read SHOULD be included in input_tokens") — record as-is, document in sharp edges.
 
 ## Sarathi wiring
-- `config.py`: `OTEL_EXPORTER_OTLP_ENDPOINT: str = ""`, `OTEL_EXPORTER_OTLP_HEADERS: str = ""`, `OTEL_SERVICE_NAME: str = "sarathi"`, `TELEMETRY_CAPTURE_CONTENT: bool = False`. Read through `Settings` (not `os.environ`) because `.env` values never reach the OTel SDK's own env parsing.
-- New `sarathi/telemetry.py`: `@cache get_telemetry() -> Telemetry | None` — `None` when endpoint empty; else `TracerProvider(resource=Resource.create({"service.name": OTEL_SERVICE_NAME}))` + `BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{base}/v1/traces", headers=parse("k=v,k2=v2" via partition("="))))`, `trace.set_tracer_provider(provider)`, return `Telemetry(tracer_provider=provider, capture_content=settings.TELEMETRY_CAPTURE_CONTENT)`. `shutdown_telemetry()` → `provider.shutdown()`.
+- `config.py`: `OTEL_EXPORTER_OTLP_ENDPOINT: str = ""`, `OTEL_EXPORTER_OTLP_HEADERS: str = ""`, `OTEL_RESOURCE_ATTRIBUTES: str = ""` (added in P3, user env set), `OTEL_SERVICE_NAME: str = "sarathi"`, `TELEMETRY_CAPTURE_CONTENT: bool = False`. Read through `Settings` (not `os.environ`) because `.env` values never reach the OTel SDK's own env parsing.
+- ~~New `sarathi/telemetry.py`: `@cache get_telemetry()` builds `TracerProvider` + `BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{base}/v1/traces", headers=parse(...)))`~~ **Replaced in P3.** user wanted FastAPI-instrumentor simplicity; all SDK construction moved into `Telemetry.from_env()`. `sarathi/telemetry.py` only bridges the `Settings` values into `os.environ` via `setdefault` (real env wins, values stripped) and returns `Telemetry.from_env(capture_content=...)`; `shutdown_telemetry()` → `Telemetry.shutdown()`. No OTel imports in sarathi.
 - `main.py` lifespan: call `get_telemetry()` at startup, `shutdown_telemetry()` at teardown (flushes the batch processor).
 - `agent.py make_harness`: `telemetry=get_telemetry()`.
 - `apps/sarathi/backend/pyproject.toml`: `tantra-harness[postgres,web,doc,telemetry]>=0.4`. `.env.example`: four commented-out optional vars with a Langfuse example (`OTEL_EXPORTER_OTLP_ENDPOINT=https://cloud.langfuse.com/api/public/otel`, `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64 pk:sk>`).
@@ -110,7 +110,7 @@ current_span: ContextVar[Any] = ContextVar("tantra_current_span", default=None)
 - **`trace_id = turn_id` (one trace per logical turn)** — needs a phantom remote parent; backend tolerance unverified; trace durations absorb human wait. Parked (Open Decisions) as a possible later opt-in; the span model doesn't change.
 - **Persisting span ids on `TurnStarted` for resume Links** — extra durable state; Langfuse ignores Links; `tantra.turn_id` suffices.
 - **Per-attempt retry child spans** — noise on every LLM call for the rare retry; `tantra.sample.attempts` covers it.
-- **Tantra configuring exporters from `OTEL_*` env** — tantra would own global OTel state and conflict with apps that already configure it; sarathi does it at app level instead.
+- ~~**Tantra configuring exporters from `OTEL_*` env** — tantra would own global OTel state and conflict with apps that already configure it; sarathi does it at app level instead.~~ **Reversed in P3** (user). `Telemetry.from_env()` does exactly this, opt-in; apps with their own SDK setup keep using `Telemetry(tracer_provider=...)`. The two-providers divergence is documented in `docs/reference/telemetry.md`.
 - **Structure-preserving truncation** — more code; whole-string cut is fine for 32 KiB.
 - **Events (`gen_ai.client.inference.operation.details`) for content** — Langfuse only recently added support; span attributes are universally read.
 
@@ -210,18 +210,30 @@ Strictly sequential: P2 implements the P1 protocol; P3 wires P2.
 - Follow-up (core, pre-existing, not P2): a tool result with non-str dict keys makes `assemble_messages`/`_as_content` (`context.py:56`) raise `TypeError` on the next loop iteration, telemetry or not.
 - Unfixed nits: `end_sample` double-call would double-count parent usage (loop never does); `_VERSION` lookup precedes the guard so an uninstalled source tree raises `PackageNotFoundError` instead of the friendly message.
 
-### Phase 3 — sarathi wiring, smoke, docs, 0.4.0 · deps: P2 · —
+### Phase 3 — sarathi wiring, smoke, docs, 0.4.0 · deps: P2 · **done 2026-08-22**
 - Sarathi per the wiring section (`config.py`, `telemetry.py`, `main.py` lifespan, `agent.py`, `pyproject.toml`, `.env.example`). Sarathi tests: `get_telemetry()` is `None` with empty endpoint; with endpoint set and a monkeypatched exporter class, `make_harness().tracer` is a `Telemetry`.
 - `stress/live_telemetry.py` (manual, not collected): `OTEL_EXPORTER_OTLP_ENDPOINT=… OTEL_EXPORTER_OTLP_HEADERS=… uv run python stress/live_telemetry.py` — `MemoryStore` + `FakeProvider` scripted for a tool call + a subagent spawn + final answer, `Telemetry(capture_content=True)` on an explicit SDK provider with OTLP batch exporter, runs one turn, `force_flush()`, prints the trace id and exits non-zero on export failure. Human checks Langfuse: trace with agent → generation (input/output visible) → tool (args/result) → nested agent.
 - Docs: `docs/guides/telemetry.md` (install, `Telemetry(...)`, Langfuse recipe with OTLP endpoint + basic-auth header, generic collector recipe, what each span carries, content opt-in + truncation, suspend/resume shape); `docs/reference/telemetry.md` (`Telemetry` kwargs, `Tracer` protocol, attribute table); extras row in `docs/getting-started/install.md` + root `README.md`; `docs/reference/harness.md` `telemetry` kwarg; `docs/reference/context.md` `tracer` field; `docs/sharp-edges.md` entries from the Sharp edges section; `mkdocs.yml` nav (Guides + Reference).
 - `packages/tantra/CHANGELOG.md` `## 0.4.0` (Added: telemetry extra, `Harness(telemetry=)`, `Tracer` seam, `TurnContext.tracer`; Changed: `PruneThenSummarize` summarizer call now traced); `packages/tantra/pyproject.toml` version `0.4.0`; `uv lock`.
 - **Verify:** `apps/sarathi/backend` `just lint` + `just test` green; `mkdocs build --strict` green; `stress/live_telemetry.py` run once against Langfuse (or an OTel collector) and the four observation types render with content — record the result in this spec's Landed notes.
 - Checklist:
-  - [ ] sarathi config/telemetry/lifespan/harness + tests
-  - [ ] `stress/live_telemetry.py` + live run recorded
-  - [ ] docs + nav + sharp edges
-  - [ ] CHANGELOG + version + lock
-  - [ ] root `just lint` + `just test`
+  - [x] sarathi config/telemetry/lifespan/harness + tests (`sarathi/telemetry.py` 30 lines, no OTel imports; 4 tests)
+  - [x] `stress/live_telemetry.py` + live run recorded (osuite OTLP, exit 0, 10 spans — see landed notes)
+  - [x] docs + nav + sharp edges (guides + reference pages, extras rows, 7 sharp-edge entries)
+  - [x] CHANGELOG + version + lock (0.4.0; sarathi pin `[postgres,web,doc,telemetry]>=0.4`)
+  - [x] root `just lint` + `just test` (691 passed; sarathi 74; `mkdocs build --strict` green)
+  - [ ] tag `tantra-v0.4.0` + publish (manual, user; note: `tantra-v0.3.0` was never tagged/pushed)
+
+#### P3 landed notes / deviations
+- **Mid-phase redirect (user):** the app-level SDK wiring was rejected twice as too complex; landed shape is `Harness(..., telemetry=Telemetry.from_env())`. `from_env(*, capture_content=False, max_content_chars=32_768) -> Telemetry | None` returns `None` unless `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set; else zero-arg `Resource.create()` + `BatchSpanProcessor(OTLPSpanExporter())` (the SDK itself parses `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_HEADERS`, appends `/v1/traces`), one `trace.set_tracer_provider` write, returns a wired `Telemetry`. SDK imports live inside the method — module top stays OTel-API-only. This edits the frozen P2 file, user-directed.
+- `Telemetry.shutdown()` closes whatever provider the instance holds, including a caller-supplied one — hazard documented in the reference.
+- An app that already installed its own global provider ends up with two providers (`from_env`'s second global write is ignored but tantra's spans go to its own) — documented; such apps use `Telemetry(tracer_provider=...)`.
+- Sarathi bridge exists because pydantic reads `.env` and the SDK only reads real env; under docker compose (`env_file: .env`) it is a no-op — it earns its keep for bare `uv run` and the `service.name=sarathi` default. Bridged token enters the process env (inherited by subprocesses).
+- ~~smoke exits 1 when `force_flush()` returns False~~ **Insufficient.** `force_flush` returns True once the queue drains even when the collector is dead; the script wraps the exporter to count non-`SUCCESS` results and also fails on `tantra.turn.outcome != "completed"`. Exit 2 refused / 1 failed / 0 pass.
+- Smoke keeps explicit SDK construction (the checking wrapper needs it); it does not exercise `from_env`.
+- Live run 2026-08-22 against osuite (`https://ingest.us.osuite.io:443`, `service.environment=test`): exit 0, 10 spans, full tree (lead → chat/tool siblings → nested scribe agent), trace ids `a003a1483292a0e3ac9aa0f7da888deb`, `447d4e9d08a1c546f282292dc879be5c`. Rendering check in the osuite UI: user.
+- `from_env` tests stub `tantra.telemetry.trace.set_tracer_provider` — the pre-existing last-in-file global-provider test remains the only real global write. Root suite 687 → 691, sarathi 70 → 74.
+- Unfixed nits: sarathi lifespan `yield` has no `try/finally` (matches file style; an app-scope exception drops the batch tail); `shutdown_telemetry()` leaves `get_telemetry`'s cache populated (later call returns a `Telemetry` on a dead provider; harmless at process end).
 
 ## Open Decisions
 - **`trace_id = turn_id` opt-in** — would make a suspended turn one trace. Needs verification that Langfuse/Tempo tolerate a never-emitted parent span. Add as `Telemetry(trace_per_turn=True)` later if wanted.

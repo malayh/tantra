@@ -5,6 +5,7 @@ from typing import Annotated, Any
 from fastapi import Depends
 
 from sarathi.config import get_settings
+from sarathi.telemetry import get_telemetry
 from tantra import (
     Agent,
     BuiltinMemory,
@@ -92,6 +93,7 @@ def make_harness(model: str | None = None) -> Harness:
         deps_factory=deps_factory,
         memory=BuiltinMemory(store, embedder),
         compactor=PruneThenSummarize(),
+        telemetry=get_telemetry(),
     )
 
 

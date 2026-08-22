@@ -1451,7 +1451,7 @@ dependencies = [
     { name = "pyjwt" },
     { name = "python-multipart" },
     { name = "sqlalchemy", extra = ["asyncio"] },
-    { name = "tantra-harness", extra = ["doc", "postgres", "web"] },
+    { name = "tantra-harness", extra = ["doc", "postgres", "telemetry", "web"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1474,7 +1474,7 @@ requires-dist = [
     { name = "pyjwt", specifier = ">=2.9" },
     { name = "python-multipart", specifier = ">=0.0.12" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
-    { name = "tantra-harness", extras = ["postgres", "web", "doc"], editable = "packages/tantra" },
+    { name = "tantra-harness", extras = ["postgres", "web", "doc", "telemetry"], editable = "packages/tantra" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]
 
@@ -1558,7 +1558,7 @@ wheels = [
 
 [[package]]
 name = "tantra-harness"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "packages/tantra" }
 dependencies = [
     { name = "httpx" },

@@ -38,6 +38,9 @@ Set in `.env`:
 - `BRAVE_API_KEY` — optional; without it web search is disabled and deep-search prompts degrade.
 - `EMBEDDING_MODEL` — optional; enables vector memory recall.
 - `WEB_PROXY` — optional; routes `web_fetch` through an HTTP/SOCKS proxy.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` — optional; setting it turns on OpenTelemetry tracing of every turn. Unset disables telemetry entirely.
+- `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME` (default `sarathi`), `OTEL_RESOURCE_ATTRIBUTES` — optional; the standard OTel variables, parsed by the SDK. Values set here are copied into the environment before the SDK starts, and a real environment variable always wins.
+- `TELEMETRY_CAPTURE_CONTENT` — optional; `true` puts prompts, completions and tool results on the spans. Off by default.
 
 ```bash
 docker compose up --build -d

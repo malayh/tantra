@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any
@@ -146,6 +147,24 @@ class Telemetry:
         self.max_content_chars = max_content_chars
         self._provider = tracer_provider
         self._tracer: Any = None
+
+    @classmethod
+    def from_env(cls, *, capture_content: bool = False, max_content_chars: int = 32_768) -> Telemetry | None:
+        if not (os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")):
+            return None
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        provider = TracerProvider(resource=Resource.create())
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+        trace.set_tracer_provider(provider)
+        return cls(tracer_provider=provider, capture_content=capture_content, max_content_chars=max_content_chars)
+
+    def shutdown(self) -> None:
+        if self._provider is not None:
+            self._provider.shutdown()
 
     def _cut(self, text: str) -> str:
         if len(text) <= self.max_content_chars:

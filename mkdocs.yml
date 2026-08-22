@@ -64,6 +64,7 @@ nav:
       - Storage backends: guides/storage.md
       - Providers: guides/providers.md
       - Compaction: guides/compaction.md
+      - Telemetry: guides/telemetry.md
   - Reference:
       - Agent: reference/agent.md
       - Harness: reference/harness.md
@@ -81,4 +82,5 @@ nav:
       - Providers: reference/providers.md
       - Stores: reference/stores.md
       - Extra tools: reference/extratools.md
+      - Telemetry: reference/telemetry.md
   - Sharp edges: sharp-edges.md

@@ -6,7 +6,7 @@ requires-python = ">=3.13"
 license = "Apache-2.0"
 authors = [{ name = "Malay Hazarika", email = "malay.hazarika@gmail.com" }]
 dependencies = [
-    "tantra-harness[postgres,web,doc]>=0.3",
+    "tantra-harness[postgres,web,doc,telemetry]>=0.4",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "sqlalchemy[asyncio]>=2.0",

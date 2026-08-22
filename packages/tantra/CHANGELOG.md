@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0
+
+Added:
+
+- `Harness(telemetry=...)` takes a `Tracer` and emits one trace per `run()`/`resume()` segment: an `invoke_agent` root, a `chat` span per model call (retries included), an `execute_tool` span per tool call, a `compact` span per compactor consultation, and nested `invoke_agent` spans for subagents under the tool that spawned them. Attributes are OpenTelemetry GenAI semantic conventions only — no vendor keys — so any OTLP backend ingests them.
+- The `[telemetry]` extra (`opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http`) and `tantra.telemetry.Telemetry`, the OpenTelemetry implementation. `Telemetry(tracer_provider=None, *, capture_content=False, max_content_chars=32_768)`; content capture is off by default and content attributes are truncated with a `…[truncated N chars]` marker. On this path tantra configures no exporter, sets no global tracer provider and reads no `OTEL_*` environment variable. Not re-exported from `tantra` — import it from `tantra.telemetry`.
+- `Telemetry.from_env(*, capture_content=False, max_content_chars=32_768)`, the one-line setup: it builds a `TracerProvider` + `BatchSpanProcessor` + OTLP HTTP exporter entirely from the standard OpenTelemetry environment, installs it as the global tracer provider, and returns `None` when neither `OTEL_EXPORTER_OTLP_ENDPOINT` nor `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set — so `Harness(telemetry=Telemetry.from_env())` covers a traced and an untraced deployment with no flag of its own. `Telemetry.shutdown()` flushes and closes the provider the instance holds.
+- `Tracer` and `NullTracer` in `tantra.tracing`, exported from `tantra`. The core seam takes no new dependency; the base install is unchanged.
+- `TurnContext.tracer`, so a custom `Compactor` can trace its own model call.
+- An optional `provider_name` class attribute on providers, read via `getattr` and reported as `gen_ai.provider.name` — `openai` on `OpenAICompatible`, `fake` on `FakeProvider`, `unknown` for a provider that does not set it.
+
+Changed:
+
+- `PruneThenSummarize`'s summarizer call is traced as a `chat` child of the `compact` span, and its usage is now captured rather than discarded.
+
 ## 0.3.0
 
 Added:

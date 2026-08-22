@@ -17,6 +17,7 @@ Documentation = "https://malayh.github.io/tantra/docs/"
 postgres = ["psycopg[binary]>=3.2"]
 web = ["curl-cffi>=0.15", "trafilatura>=2.0", "tenacity>=9"]
 doc = ["pypdf>=6", "python-docx>=1.1"]
+telemetry = ["opentelemetry-sdk>=1.30", "opentelemetry-exporter-otlp-proto-http>=1.30"]
 
 [build-system]
 requires = ["hatchling"]

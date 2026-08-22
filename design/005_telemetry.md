@@ -100,7 +100,7 @@ current_span: ContextVar[Any] = ContextVar("tantra_current_span", default=None)
 - A suspended turn is 2+ traces; stitch via session view or `tantra.turn_id`.
 - Tools replay on resume → one `call_id` can have several `execute_tool` spans (`tantra.tool.replayed=true` on the later ones).
 - `current_span` stays set in the consumer task's context between child events during `ctx.spawn` and `ctx.fan_out`; only `start_turn` reads it, so starting an unrelated `harness.run` in the same task while iterating a spawning turn would mis-parent that turn.
-- Custom `Compactor`s are untraced unless they use `ctx.tracer.start_sample/end_sample`.
+- Custom `Compactor`s are untraced unless they use `ctx.tracer.start_sample/end_sample`; called with a non-handle parent (outside the loop's `current_span` window) the chat span lacks `gen_ai.conversation.id`/`tantra.turn_id`.
 - `gen_ai.usage.input_tokens` from `OpenAICompatible` excludes cached tokens (see token mapping note).
 - `harness.default_model` may be mutated at runtime (sarathi does); spans read the model from the loop/request, never the harness.
 
@@ -174,7 +174,7 @@ Strictly sequential: P2 implements the P1 protocol; P3 wires P2.
 - A configured compactor produces a `start_compaction`/`end_compaction(applied=None)` pair on **every** sample iteration, not only when compaction applies — P2 span volume note.
 - `current_span` for `fan_out` is set in `_fan_out` around the whole merge, so the consumer task sees it set on every forwarded child event (see Sharp edges).
 
-### Phase 2 — `tantra.telemetry.Telemetry` + extra · deps: P1 · —
+### Phase 2 — `tantra.telemetry.Telemetry` + extra · deps: P1 · **done 2026-08-22**
 - `packages/tantra/pyproject.toml`: `telemetry = ["opentelemetry-sdk>=1.30", "opentelemetry-exporter-otlp-proto-http>=1.30"]`; root dev group mirrors both; `uv lock`.
 - `tantra/telemetry.py` per the OTel implementation section: guard, `Telemetry`, `_Handle`, message/tool-definition builders, truncation, usage accumulation, `server.*` parsing.
 - Tests `packages/tantra/tests/test_telemetry.py` (InMemorySpanExporter):
@@ -191,10 +191,24 @@ Strictly sequential: P2 implements the P1 protocol; P3 wires P2.
   - `test_extratools_imports.py` gains a case: `opentelemetry` missing → `import tantra.telemetry` raises `ImportError` matching `tantra-harness\[telemetry\]`.
 - **Verify:** `just test` green; `uv run python -c "import tantra; import tantra.telemetry"` works in the dev env; a fresh `uv venv` with `tantra-harness` only → `import tantra` ok, `import tantra.telemetry` → the guarded ImportError.
 - Checklist:
-  - [ ] extra + dev deps + lock
-  - [ ] `telemetry.py`
-  - [ ] `test_telemetry.py` + import-guard case
-  - [ ] `just lint` + `just test`
+  - [x] extra + dev deps + lock (resolved opentelemetry 1.44.0)
+  - [x] `telemetry.py` (305 lines, OTel API imports only)
+  - [x] `test_telemetry.py` (21 tests) + import-guard case
+  - [x] `just lint` + `just test` (687 passed; 665 pre-existing unchanged)
+
+#### P2 landed notes / deviations
+- ~~`get_tracer("tantra", __version__)`~~ **No `__version__` exists.** Uses `importlib.metadata.version("tantra-harness")` at module top.
+- ~~compact span carries no usage~~ **Added.** `end_compaction` sets `gen_ai.usage.*` from the summarizer chat's accumulated usage (still excluded from turn totals) — otherwise the compactor's tokens appeared on no parent aggregate.
+- Serialization is total: `json.dumps(..., default=str)` still raises on non-scalar dict keys and circular refs; all content paths fall back to `str(value)` via `_dumps`/`_text` helpers.
+- `_server` wraps the whole `urlsplit` in `try/except ValueError` (a malformed `base_url` like `http://[::1]` truncated must not kill the turn — `start_sample` runs outside `_sample`'s try); port from `SplitResult.port`, default 443/80 by scheme.
+- Tool-span ERROR status description is `error_type` — `end_tool` never receives the exception object, only its qualname.
+- `end_turn` output capture: `final_text or _dumps(output)` — `_final_text` returns `""` (never `None`) on `submit_output` turns. When a sample yields both text and `submit_output`, the text wins.
+- Swept (aborted/suspended) tool spans set no `gen_ai.tool.call.result` (`result is None`).
+- `tantra.provider.status_code` only for `isinstance(error, ProviderError)`.
+- `gen_ai.tool.call.result` and `tantra.compaction.summary` are `_as_content` raw text per the table — a str result is NOT JSON-encoded; docs must not claim these parse as JSON.
+- Identity attrs (`gen_ai.conversation.id`, `tantra.turn_id`) flow from the parent `_Handle`; `start_sample` with a non-handle parent (custom compactor outside the loop's `current_span` window) yields a chat span without them — see Sharp edges.
+- Follow-up (core, pre-existing, not P2): a tool result with non-str dict keys makes `assemble_messages`/`_as_content` (`context.py:56`) raise `TypeError` on the next loop iteration, telemetry or not.
+- Unfixed nits: `end_sample` double-call would double-count parent usage (loop never does); `_VERSION` lookup precedes the guard so an uninstalled source tree raises `PackageNotFoundError` instead of the friendly message.
 
 ### Phase 3 — sarathi wiring, smoke, docs, 0.4.0 · deps: P2 · —
 - Sarathi per the wiring section (`config.py`, `telemetry.py`, `main.py` lifespan, `agent.py`, `pyproject.toml`, `.env.example`). Sarathi tests: `get_telemetry()` is `None` with empty endpoint; with endpoint set and a monkeypatched exporter class, `make_harness().tracer` is a `Telemetry`.

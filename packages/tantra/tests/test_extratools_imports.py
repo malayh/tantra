@@ -52,3 +52,11 @@ def test_doc_import_error_names_doc_extra(monkeypatch: pytest.MonkeyPatch, missi
 
     with pytest.raises(ImportError, match=r"tantra-harness\[doc\]"):
         importlib.import_module("tantra.extratools.doc")
+
+
+def test_telemetry_import_error_names_telemetry_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    sys.modules.pop("tantra.telemetry", None)
+    monkeypatch.setitem(sys.modules, "opentelemetry", None)
+
+    with pytest.raises(ImportError, match=r"tantra-harness\[telemetry\]"):
+        importlib.import_module("tantra.telemetry")

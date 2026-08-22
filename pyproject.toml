@@ -26,6 +26,8 @@ dev = [
     "tenacity>=9",
     "pypdf>=6",
     "python-docx>=1.1",
+    "opentelemetry-sdk>=1.30",
+    "opentelemetry-exporter-otlp-proto-http>=1.30",
     "mkdocs-material>=9.5",
 ]
 

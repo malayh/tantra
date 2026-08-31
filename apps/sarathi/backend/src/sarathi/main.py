@@ -9,7 +9,7 @@ from fastapi.routing import APIRoute
 from sarathi.agent import make_store
 from sarathi.api import auth, memory, meta, sessions, uploads, ws
 from sarathi.config import get_settings
-from sarathi.telemetry import get_telemetry, shutdown_telemetry
+from sarathi.telemetry import setup_instrumentation, shutdown_telemetry
 
 
 @asynccontextmanager
@@ -18,7 +18,6 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     store = make_store()
     await store.setup()
     await store.close()
-    get_telemetry()
     yield
     shutdown_telemetry()
 
@@ -56,6 +55,7 @@ def create_app() -> FastAPI:
         meta.models_router,
     ):
         application.include_router(router)
+    setup_instrumentation(application)
     return application
 
 

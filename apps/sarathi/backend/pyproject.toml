@@ -16,6 +16,8 @@ dependencies = [
     "pyjwt>=2.9",
     "passlib>=1.7",
     "python-multipart>=0.0.12",
+    "opentelemetry-instrumentation-fastapi>=0.65b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.65b0",
 ]
 
 [build-system]

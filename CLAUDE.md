@@ -60,16 +60,20 @@ These guidelines are working if: fewer unnecessary changes in diffs, fewer rewri
 
 ## Orchestrating implementation
 
+Models:
+- `PRIMARY_MODEL`: gpt-5.6-sol (native) with xhigh effor.
+- `SECONDARY_MODEL`: gpt-5.6-sol (native) with high effort.
+
 Roles:
-- The main session runs Fable 5. It orchestrates only: plans, spawns subagents, verifies, commits. It does not write implementation code itself.
-- Implementation and review run in general-purpose subagents with `model: "opus"` (cheaper). Never use `fork` — forks inherit Fable.
+- The main session runs `PRIMARY_MODEL`. It orchestrates only: plans, spawns subagents, verifies, commits. It does not write implementation code itself.
+- Implementation and review run in general-purpose subagents with `SECONDARY_MODEL` (cheaper). Never use `fork` — forks inherit `PRIMARY_MODEL`.
 
 For each phase in the spec (`design/001_v1_spec.md`):
 1. Enter plan mode. Plan the phase from the spec: files, approach, verify criteria. Exit plan mode for approval.
-2. Spawn a general-purpose subagent (`model: "opus"`, synchronous) to implement:
+2. Spawn a synchronous general-purpose subagent with `SECONDARY_MODEL` to implement:
    - Prompt must include: spec path, phase number, the approved plan, and "follow the spec's Conventions section".
    - Subagent implements, runs `just lint` + `just test`, reports what passed.
-3. Spawn a second general-purpose subagent (`model: "opus"`, synchronous) to review:
+3. Spawn a second synchronous general-purpose subagent with `SECONDARY_MODEL` to review:
    - Prompt: review the phase diff against the spec's deliverables and Verify criteria; report defects with file:line.
 4. If the review finds real defects, send them back to the implementer subagent (SendMessage) or spawn a fix subagent. Re-review only if changes were large.
 5. Orchestrator verifies: run the phase's Verify criteria from the spec, plus `just lint` + `just test`.

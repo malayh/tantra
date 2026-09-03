@@ -64,26 +64,26 @@ These guidelines are working when diffs contain fewer unnecessary changes, solut
 - Prefer short bullets where they improve readability.
 
 
-## Orchestrating implementation
+## Phase orchestration
 
-Roles:
-- The main session runs `gpt-5.6-sol` with `reasoning_effort: "high"`. It orchestrates only: plans, spawns subagents, verifies, commits. It does not write implementation code itself.
-- Implementation and review run in general-purpose subagents with `gpt-5.6-sol` with `reasoning_effort: "high"`. Never use `fork` — forks inherit main session model.
+These rules apply only when the `phase-orchestrator` skill is invoked for one phase of an existing feature spec.
 
-For each phase in the spec:
-1. Enter plan mode. Plan the phase from the spec: files, approach, verify criteria. Exit plan mode for approval.
-2. Spawn a general-purpose subagent (`gpt-5.6-sol`, synchronous) to implement:
-   - Prompt must include: spec path, phase number, the approved plan, and "follow the spec's Conventions section".
-   - Subagent implements, runs `just lint` + `just test`, reports what passed. (or equivalent commands)
-3. Spawn a second general-purpose subagent (`gpt-5.6-sol`, synchronous) to review:
-   - Prompt: review the phase diff against the spec's deliverables and Verify criteria; report defects with file:line.
-4. If the review finds real defects, send them back to the implementer subagent (SendMessage) or spawn a fix subagent. Re-review only if changes were large.
-5. Orchestrator verifies: run the phase's Verify criteria from the spec, plus `just lint` + `just test`.
-6. Update the spec: status marker, checklist ticks, deviations struck with reasons.
-7. Ask use to run compact
-8. Ask user to commit the phase.
+```yaml
+phase_orchestrator:
+  implementer_model: gpt-5.6-sol
+  implementer_reasoning_effort: high
+  reviewer_model: gpt-5.6-sol
+  reviewer_reasoning_effort: high
+```
 
-Rules:
-- Subagents start with zero context — the prompt and the spec must carry everything.
-- One phase at a time unless the spec's dependency graph says parallel; parallel phases use worktree isolation.
-- Never mark a phase done with failing tests. Report failures honestly.
+- The main session only plans, delegates implementation, verifies, coordinates review fixes, and maintains the phase status in the spec. It does not write implementation code.
+- Make no edits and spawn no subagent until the user explicitly approves a decision-complete phase plan.
+- During planning, stop if the requested numbered phase is missing or malformed, or its Conventions or Verify criteria are missing or unusable.
+- Use zero-context implementation and review agents when the harness supports it. Pass the spec path, phase number, approved plan, and an instruction to follow the spec's Conventions section.
+- Run exactly one implementation agent at a time, followed by a separate read-only reviewer. Route confirmed defects back to the original implementer when possible and allow at most two fix-and-review rounds after the initial review; then stop and report remaining defects without marking the phase done.
+- The reviewer checks the current phase diff against its deliverables and Verify criteria and reports defects with `file:line` references.
+- The orchestrator runs the phase Verify criteria plus `just lint` and `just test`. Never mark a phase done while required checks fail.
+- Make only the spec edits expressly required by its `Keeping this spec current` block: phase status and checklist, explicit deviation notes, surprising post-phase details, and unresolved problems in Open Decisions or a Follow-up note.
+- Do not create worktrees or branches, stage, commit, merge, push, reset, stash, or otherwise mutate Git. Read-only Git checks may establish the baseline and detect contamination.
+- Preserve pre-existing user changes. Stop before implementation if they overlap the phase or make attribution unsafe.
+- Finish with the phase results, verification, review outcome, and changed files. Ask the user to inspect the diff, run `/compact` when supported, and commit the phase.

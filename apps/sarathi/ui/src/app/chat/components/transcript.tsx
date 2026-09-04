@@ -10,7 +10,17 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
-import type { AskItem, Banner, ChatStore, SubagentItem, TextItem, ToolItem, TranscriptItem, Turn } from "../state";
+import type {
+  AskItem,
+  Banner,
+  ChatStore,
+  MessageItem,
+  SubagentItem,
+  TextItem,
+  ToolItem,
+  TranscriptItem,
+  Turn,
+} from "../state";
 
 type AskResponder = (askId: string, response: string) => void;
 
@@ -135,10 +145,12 @@ function AskCard({
   item,
   banner,
   onAskResponse,
+  interactive,
 }: {
   item: AskItem;
   banner: Banner | null;
   onAskResponse: AskResponder;
+  interactive: boolean;
 }) {
   const [sent, setSent] = useState(false);
 
@@ -164,7 +176,7 @@ function AskCard({
         </CardContent>
       )}
       <CardFooter className="gap-2">
-        {item.status === "pending" ? (
+        {item.status === "pending" && interactive ? (
           <>
             <Button size="sm" disabled={sent} onClick={() => respond("allow")}>
               Approve
@@ -174,10 +186,30 @@ function AskCard({
             </Button>
           </>
         ) : (
-          <p className="text-muted-foreground text-xs">{item.allow === false ? "Denied" : "Approved"}</p>
+          <p className="text-muted-foreground text-xs">
+            {item.status === "pending" ? "Awaiting input from parent" : item.allow === false ? "Denied" : "Approved"}
+          </p>
         )}
       </CardFooter>
     </Card>
+  );
+}
+
+function MessageBlock({ item }: { item: MessageItem }) {
+  const label = item.source === "user" ? "You" : item.source === "parent" ? "Parent message" : "Child notification";
+  return (
+    <div className={cn("flex", item.source === "user" && "justify-end")}>
+      <div className="bg-muted flex max-w-[85%] flex-col gap-1.5 rounded-lg px-3 py-2 text-xs">
+        <p className="text-muted-foreground font-medium">{label}</p>
+        {item.attachments.map((attachment) => (
+          <span key={attachment.path} className="flex items-center gap-1">
+            <FileText className="size-3 shrink-0" />
+            {attachment.name}
+          </span>
+        ))}
+        {item.content.length > 0 && <p className="whitespace-pre-wrap">{item.content}</p>}
+      </div>
+    </div>
   );
 }
 
@@ -209,13 +241,21 @@ function SubagentBlock({
         <ChevronRight className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")} />
         <Bot className="size-3 shrink-0" />
         <span className="font-medium">{item.agent}</span>
+        <span className="bg-muted rounded px-1.5 py-0.5">{item.state.replace("_", " ")}</span>
         {summary.length > 0 && <span className="truncate">{summary}</span>}
         {!item.final && <Loader2 className="size-3 shrink-0 animate-spin" />}
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="border-border mt-2 flex flex-col gap-3 border-l pl-3">
+          <p className="text-muted-foreground font-mono text-[11px] break-all">{item.childSessionId}</p>
           {item.items.map((nested, index) => (
-            <Item key={itemKey(nested, index)} item={nested} banner={banner} onAskResponse={onAskResponse} />
+            <Item
+              key={itemKey(nested, index)}
+              item={nested}
+              banner={banner}
+              onAskResponse={onAskResponse}
+              observational
+            />
           ))}
           {item.isError && <p className="text-destructive text-xs">{formatResult(item.result)}</p>}
         </div>
@@ -228,10 +268,12 @@ function Item({
   item,
   banner,
   onAskResponse,
+  observational = false,
 }: {
   item: TranscriptItem;
   banner: Banner | null;
   onAskResponse: AskResponder;
+  observational?: boolean;
 }) {
   switch (item.kind) {
     case "thinking":
@@ -242,8 +284,10 @@ function Item({
       return <ToolChip item={item} />;
     case "subagent":
       return <SubagentBlock item={item} banner={banner} onAskResponse={onAskResponse} />;
+    case "message":
+      return <MessageBlock item={item} />;
     case "ask":
-      return <AskCard item={item} banner={banner} onAskResponse={onAskResponse} />;
+      return <AskCard item={item} banner={banner} onAskResponse={onAskResponse} interactive={!observational} />;
   }
 }
 

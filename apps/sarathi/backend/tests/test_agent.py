@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from sarathi.agent import Researcher, Sarathi, _wire_tools
+from sarathi.agent import Investigator, Researcher, Sarathi, _wire_tools
 from sarathi.config import get_settings
 from tantra.extratools.web import web_fetch as real_web_fetch
 from tantra.tools import Tool
@@ -14,11 +14,12 @@ def unwired() -> Iterator[None]:
     yield
     Sarathi.tools = []
     Researcher.tools = []
+    Investigator.tools = []
     _wire_tools.cache_clear()
     get_settings.cache_clear()
 
 
-def _names(agent: type[Sarathi] | type[Researcher]) -> list[str]:
+def _names(agent: type[Sarathi] | type[Researcher] | type[Investigator]) -> list[str]:
     return [tool.schema.name for tool in agent.tools]
 
 
@@ -31,6 +32,7 @@ def test_tools_wire_without_a_brave_key(monkeypatch: pytest.MonkeyPatch, unwired
 
     assert _names(Sarathi) == ["web_fetch", "read_doc", "memory_write", "memory_recall"]
     assert _names(Researcher) == ["web_fetch"]
+    assert _names(Investigator) == ["web_fetch"]
 
 
 def test_tools_include_web_search_when_a_brave_key_is_set(monkeypatch: pytest.MonkeyPatch, unwired: None) -> None:
@@ -42,6 +44,7 @@ def test_tools_include_web_search_when_a_brave_key_is_set(monkeypatch: pytest.Mo
 
     assert _names(Sarathi) == ["web_search", "web_fetch", "read_doc", "memory_write", "memory_recall"]
     assert _names(Researcher) == ["web_search", "web_fetch"]
+    assert _names(Investigator) == ["web_search", "web_fetch"]
 
 
 def _record_web_fetch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
@@ -85,5 +88,15 @@ def test_memory_write_asks_before_it_runs() -> None:
 
 def test_the_researcher_is_a_sarathi_subagent_with_a_delegate_description() -> None:
     assert Sarathi.subagents == [Researcher]
+    assert Researcher.subagents == [Investigator]
+    assert Investigator.subagents == []
     assert Researcher.__doc__ is not None
     assert Researcher.__doc__.strip().startswith("Delegate a focused research task")
+
+
+def test_async_task_prompts_cover_the_full_lifecycle() -> None:
+    for name in ("task_status", "task_messages", "task_send", "task_wait", "task_result", "task_kill"):
+        assert name in Sarathi.prompt
+        assert name in Researcher.prompt
+    assert "notify_parent" in Researcher.prompt
+    assert "notify_parent" in Investigator.prompt

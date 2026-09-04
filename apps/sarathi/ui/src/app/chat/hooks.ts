@@ -83,7 +83,10 @@ export const useChatSocket = (sessionId: string, store: ChatStore) => {
   );
 
   const ready = useStore(store, (state) => state.ready);
-  const running = useStore(store, (state) => state.turns[state.turns.length - 1]?.status === "running");
+  const running = useStore(store, (state) => {
+    const status = state.turns[state.turns.length - 1]?.status;
+    return status === "running" || status === "waiting";
+  });
   const askId = useStore(store, (state) => pendingAsk(state.turns)?.askId ?? null);
 
   const sendFrame = useCallback(

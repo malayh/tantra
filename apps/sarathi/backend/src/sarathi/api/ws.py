@@ -40,6 +40,8 @@ router = APIRouter(prefix="/api/ws", tags=["ws"])
 
 CLIENT_FRAME_ADAPTER: TypeAdapter[ClientFrame] = TypeAdapter(ClientFrame)
 FALLBACK_RETRY_IN = 5.0
+BUSY_TRANSITION_TIMEOUT = 0.5
+BUSY_POLL_INTERVAL = 0.01
 POLICY_VIOLATION = 1008
 ATTACHMENT_MARKER = "[attachment: "
 
@@ -91,16 +93,20 @@ class Connection:
             return FALLBACK_RETRY_IN
         return max((lease.expires_at - datetime.now(UTC)).total_seconds(), 0.0)
 
-    async def pump(self, stream: AsyncIterator[Emitted]) -> None:
+    async def pump(self, stream: AsyncIterator[Emitted], *, report_busy: bool = True) -> TantraError | None:
         try:
             async with aclosing(stream) as events:
                 async for emitted in events:
                     self.track(emitted)
                     await self.send(emitted)
+            return None
         except SessionBusy as exc:
-            await self.send(BusyFrame(retry_in=await self.retry_in(exc.sid)))
+            if report_busy:
+                await self.send(BusyFrame(retry_in=await self.retry_in(exc.sid)))
+            return exc
         except TantraError as exc:
             await self.send(ServerErrorFrame(message=str(exc)))
+            return exc
 
     async def read_loop(self) -> None:
         while True:
@@ -115,7 +121,10 @@ class Connection:
                 except TantraError as exc:
                     await self.send(ServerErrorFrame(message=str(exc)))
                 continue
-            await self.queue.put(frame)
+            if isinstance(frame, UserMessageFrame):
+                await self.receive_message(frame)
+            else:
+                await self.queue.put(frame)
 
     async def maybe_title(self) -> None:
         if self.titled:
@@ -164,17 +173,71 @@ class Connection:
         root = (Path(get_settings().UPLOAD_DIR) / self.uid).resolve()
         return all(Path(item.path).resolve().is_relative_to(root) for item in frame.attachments)
 
-    async def run_turn(self, frame: UserMessageFrame) -> None:
+    def message_text(self, frame: UserMessageFrame) -> str | None:
         if not self.owns_attachments(frame):
-            await self.send(ServerErrorFrame(message="invalid attachment path"))
-            return
+            return None
         lines = [frame.text]
         lines.extend(f"{ATTACHMENT_MARKER}{item.name} path={item.path}]" for item in frame.attachments)
+        return "\n".join(lines)
+
+    async def receive_message(self, frame: UserMessageFrame) -> None:
+        message = self.message_text(frame)
+        if message is None:
+            await self.send(ServerErrorFrame(message="invalid attachment path"))
+            return
+        if not await self.incomplete(self.sid):
+            await self.queue.put(frame)
+            return
+        try:
+            await self.harness.send_user_message(self.sid, message)
+        except TantraError as exc:
+            ended = str(exc) == f"session {self.sid} has no incomplete turn to receive a user message"
+            if ended and not await self.incomplete(self.sid):
+                await self.queue.put(frame)
+            else:
+                await self.send(ServerErrorFrame(message=str(exc)))
+
+    async def retain_busy_message(self, frame: UserMessageFrame, message: str, sid: str) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + BUSY_TRANSITION_TIMEOUT
+        while True:
+            if await self.incomplete(self.sid):
+                try:
+                    await self.harness.send_user_message(self.sid, message)
+                    return
+                except TantraError as exc:
+                    ended = str(exc) == f"session {self.sid} has no incomplete turn to receive a user message"
+                    if not ended:
+                        await self.send(ServerErrorFrame(message=str(exc)))
+                        return
+            header = await self.harness.store.header(self.sid)
+            lease = header.lease if header is not None else None
+            now = datetime.now(UTC)
+            if lease is None or lease.expires_at <= now:
+                await self.queue.put(frame)
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                retry_in = await self.retry_in(sid)
+                await self.send(BusyFrame(retry_in=retry_in))
+                await asyncio.sleep(min(max(retry_in, BUSY_POLL_INTERVAL), FALLBACK_RETRY_IN))
+                await self.queue.put(frame)
+                return
+            lease_remaining = max((lease.expires_at - now).total_seconds(), 0.0)
+            await asyncio.sleep(min(BUSY_POLL_INTERVAL, remaining, lease_remaining))
+
+    async def run_turn(self, frame: UserMessageFrame) -> None:
+        message = self.message_text(frame)
+        if message is None:
+            await self.send(ServerErrorFrame(message="invalid attachment path"))
+            return
         header = await self.harness.store.header(self.sid)
         model = header.metadata.get("model") if header is not None else None
         if model:
             self.harness.default_model = model
-        await self.pump(self.harness.run(self.sid, "\n".join(lines)))
+        failed = await self.pump(self.harness.run(self.sid, message), report_busy=False)
+        if isinstance(failed, SessionBusy):
+            await self.retain_busy_message(frame, message, failed.sid)
 
     async def answer_ask(self, frame: AskResponseFrame) -> None:
         target, kind = self.asks.get(frame.ask_id, (self.sid, "approval"))
@@ -201,7 +264,7 @@ async def session_socket(
     harness = factory(None)
     try:
         header = await harness.store.header(session_id)
-        if header is None or header.metadata.get("user") != str(user.id):
+        if header is None or header.parent_id is not None or header.metadata.get("user") != str(user.id):
             await websocket.close(code=POLICY_VIOLATION)
             return
         harness.default_model = header.metadata.get("model") or harness.default_model

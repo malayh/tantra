@@ -495,6 +495,58 @@
   },
   "components": {
     "schemas": {
+      "AgentMessageQueued": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "agent_message_queued",
+            "title": "Type",
+            "default": "agent_message_queued"
+          },
+          "message_id": {
+            "type": "string",
+            "title": "Message Id"
+          },
+          "sender_session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sender Session Id"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "user",
+              "parent",
+              "child"
+            ],
+            "title": "Source"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "message_id",
+          "sender_session_id",
+          "source",
+          "text"
+        ],
+        "title": "AgentMessageQueued"
+      },
       "Approval": {
         "properties": {
           "kind": {
@@ -1002,6 +1054,15 @@
                     "$ref": "#/components/schemas/CancelRequested"
                   },
                   {
+                    "$ref": "#/components/schemas/AgentMessageQueued"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TaskNoticeQueued"
+                  },
+                  {
+                    "$ref": "#/components/schemas/KillRequested"
+                  },
+                  {
                     "$ref": "#/components/schemas/TurnCompleted"
                   },
                   {
@@ -1011,15 +1072,18 @@
                 "discriminator": {
                   "propertyName": "type",
                   "mapping": {
+                    "agent_message_queued": "#/components/schemas/AgentMessageQueued",
                     "ask_answered": "#/components/schemas/AskAnswered",
                     "ask_raised": "#/components/schemas/AskRaised",
                     "cancel_requested": "#/components/schemas/CancelRequested",
                     "child_session_spawned": "#/components/schemas/ChildSessionSpawned",
                     "compaction_applied": "#/components/schemas/CompactionApplied",
+                    "kill_requested": "#/components/schemas/KillRequested",
                     "reasoning_part": "#/components/schemas/ReasoningPart",
                     "sample_completed": "#/components/schemas/SampleCompleted",
                     "sample_started": "#/components/schemas/SampleStarted",
                     "session_created": "#/components/schemas/SessionCreated",
+                    "task_notice_queued": "#/components/schemas/TaskNoticeQueued",
                     "text_part": "#/components/schemas/TextPart",
                     "tool_call_completed": "#/components/schemas/ToolCallCompleted",
                     "tool_call_requested": "#/components/schemas/ToolCallRequested",
@@ -1109,6 +1173,36 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "KillRequested": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "kill_requested",
+            "title": "Type",
+            "default": "kill_requested"
+          },
+          "request_id": {
+            "type": "string",
+            "title": "Request Id"
+          },
+          "requested_by_session_id": {
+            "type": "string",
+            "title": "Requested By Session Id"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "request_id",
+          "requested_by_session_id"
+        ],
+        "title": "KillRequested"
       },
       "LoginRequest": {
         "properties": {
@@ -1457,6 +1551,51 @@
           "password"
         ],
         "title": "SignupRequest"
+      },
+      "TaskNoticeQueued": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "title": "Version",
+            "default": 1
+          },
+          "type": {
+            "type": "string",
+            "const": "task_notice_queued",
+            "title": "Type",
+            "default": "task_notice_queued"
+          },
+          "notice_id": {
+            "type": "string",
+            "title": "Notice Id"
+          },
+          "task_session_id": {
+            "type": "string",
+            "title": "Task Session Id"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "failed",
+              "killed"
+            ],
+            "title": "State"
+          },
+          "terminal_seq": {
+            "type": "integer",
+            "title": "Terminal Seq"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "notice_id",
+          "task_session_id",
+          "state",
+          "terminal_seq"
+        ],
+        "title": "TaskNoticeQueued"
       },
       "TextDelta": {
         "properties": {

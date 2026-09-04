@@ -4,16 +4,19 @@
  * sarathi
  * OpenAPI spec version: 0.1.0
  */
+import type { AgentMessageQueued } from './agentMessageQueued';
 import type { AskAnswered } from './askAnswered';
 import type { AskRaised } from './askRaised';
 import type { CancelRequested } from './cancelRequested';
 import type { ChildSessionSpawned } from './childSessionSpawned';
 import type { CompactionApplied } from './compactionApplied';
+import type { KillRequested } from './killRequested';
 import type { ReasoningDelta } from './reasoningDelta';
 import type { ReasoningPart } from './reasoningPart';
 import type { SampleCompleted } from './sampleCompleted';
 import type { SampleStarted } from './sampleStarted';
 import type { SessionCreated } from './sessionCreated';
+import type { TaskNoticeQueued } from './taskNoticeQueued';
 import type { TextDelta } from './textDelta';
 import type { TextPart } from './textPart';
 import type { ToolCallCompleted } from './toolCallCompleted';
@@ -29,6 +32,6 @@ export interface Emitted {
   session_id: string;
   depth?: number;
   seq?: number | null;
-  event: SessionCreated | TurnStarted | SampleStarted | TextPart | ReasoningPart | ToolCallRequested | ToolCallStarted | ToolProgress | ToolCallCompleted | ChildSessionSpawned | AskRaised | AskAnswered | SampleCompleted | CompactionApplied | CancelRequested | TurnCompleted | TurnFailed | TextDelta | ReasoningDelta | ToolCallDelta;
+  event: SessionCreated | TurnStarted | SampleStarted | TextPart | ReasoningPart | ToolCallRequested | ToolCallStarted | ToolProgress | ToolCallCompleted | ChildSessionSpawned | AskRaised | AskAnswered | SampleCompleted | CompactionApplied | CancelRequested | AgentMessageQueued | TaskNoticeQueued | KillRequested | TurnCompleted | TurnFailed | TextDelta | ReasoningDelta | ToolCallDelta;
   [key: string]: unknown;
  }

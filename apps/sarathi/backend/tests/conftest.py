@@ -89,6 +89,7 @@ def factory(store: SharedStore, provider: SharedProvider) -> HarnessFactory:
             default_model=model or "test-model",
             deps_factory=deps_factory,
             memory=BuiltinMemory(store),
+            max_concurrency=2,
         )
 
     return build

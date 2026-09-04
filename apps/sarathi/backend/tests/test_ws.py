@@ -10,9 +10,9 @@ import pytest
 from conftest import SharedProvider, SharedStore
 from httpx_ws import AsyncWebSocketSession, WebSocketDisconnect
 
-from sarathi.agent import HarnessFactory
-from tantra import BuiltinMemory, MemoryWrite, Sample
-from tantra.events import CancelRequested
+from sarathi.agent import HarnessFactory, Researcher, Sarathi, _wire_tools
+from tantra import BuiltinMemory, Context, MemoryWrite, Sample, tool
+from tantra.events import AgentMessageQueued, CancelRequested, TurnCompleted, TurnStarted
 from tantra.providers.base import ToolCall
 
 Signup = Callable[..., Awaitable[str]]
@@ -363,7 +363,7 @@ async def test_subagent_frames_ride_the_socket_under_the_child_session(
     delegate = next(
         frame for frame in turn if _kind(frame) == "tool_call_completed" and frame["event"]["call_id"] == "d1"
     )
-    assert delegate["event"]["result"] == "child findings"
+    assert delegate["event"]["result"] == {"task_id": child_sid, "agent": "researcher"}
     assert delegate["event"]["is_error"] is False
     assert turn[-1]["event"]["stop_reason"] == "completed"
 
@@ -393,14 +393,11 @@ async def test_reconnect_replays_child_frames_depth_first(
         replay = await _until(ws, "replay_done")
 
     kinds = [_kind(frame) for frame in replay]
-    spawn = kinds.index("child_session_spawned")
-    completed = kinds.index("tool_call_completed")
-    assert spawn < completed
     assert kinds[-1] == "replay_done"
-
-    child = replay[spawn + 1 : completed]
-    assert child
-    assert all(frame["session_id"] != sid for frame in child)
+    spawned = [frame for frame in replay if _kind(frame) == "child_session_spawned"]
+    assert len(spawned) == 1
+    child_sid = spawned[0]["event"]["child_session_id"]
+    child = [frame for frame in replay if frame.get("session_id") == child_sid]
     assert [_kind(frame) for frame in child] == [
         "session_created",
         "turn_started",
@@ -409,7 +406,10 @@ async def test_reconnect_replays_child_frames_depth_first(
         "sample_completed",
         "turn_completed",
     ]
-    assert [frame["session_id"] for frame in replay[:spawn]] == [sid] * spawn
+    launches = [
+        frame for frame in replay if _kind(frame) == "tool_call_completed" and frame["event"]["call_id"] == "d1"
+    ]
+    assert [frame["event"]["result"]["task_id"] for frame in launches] == [child_sid]
 
 
 async def test_unknown_tool_completes_with_an_error_and_the_turn_continues(
@@ -498,11 +498,9 @@ async def test_cancel_mid_child_sample_ends_the_child_and_the_parent_cancelled(
     async with socket(sid, token) as ws:
         await _until(ws, "replay_done")
         await _send(ws, _message("research it"))
-        streaming = await _until(ws, "text_delta")
+        streaming = await _until(ws, "child_session_spawned")
         spawned = next(frame for frame in streaming if _kind(frame) == "child_session_spawned")
         child_sid = spawned["event"]["child_session_id"]
-        assert streaming[-1]["session_id"] == child_sid
-
         await _send(ws, {"type": "cancel"})
         await _cancel_recorded(store, child_sid)
         await _cancel_recorded(store, sid)
@@ -514,10 +512,12 @@ async def test_cancel_mid_child_sample_ends_the_child_and_the_parent_cancelled(
     assert turn[-1]["event"]["stop_reason"] == "cancelled"
 
     delegate = next(
-        frame for frame in turn if _kind(frame) == "tool_call_completed" and frame["event"]["call_id"] == "d1"
+        frame
+        for frame in [*streaming, *turn]
+        if _kind(frame) == "tool_call_completed" and frame["event"]["call_id"] == "d1"
     )
-    assert delegate["event"]["is_error"] is True
-    assert "cancelled" in delegate["event"]["result"]
+    assert delegate["event"]["is_error"] is False
+    assert delegate["event"]["result"] == {"task_id": child_sid, "agent": "researcher"}
 
 
 async def test_attachment_outside_the_user_directory_is_refused(
@@ -849,3 +849,319 @@ async def test_switching_the_model_applies_to_the_next_turn(
     started = next(frame for frame in following if _kind(frame) == "sample_started")
     assert started["event"]["model"] == "other-model"
     assert provider.requests[-1].model == "other-model"
+
+
+async def test_active_user_message_is_persisted_and_absorbed_during_a_sample(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend(
+        [
+            Sample(text="stale", tool_calls=[ToolCall(id="stale", name="nonexistent", args="{}")]),
+            Sample(text="guided answer"),
+        ]
+    )
+    token = await signup()
+    sid = await new_session(token)
+    provider.gate.clear()
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("start"))
+        await _until(ws, "text_delta")
+        await _send(ws, _message("new guidance"))
+        for _ in range(200):
+            events = [stamped.event async for stamped in store.read(sid)]
+            if any(isinstance(event, AgentMessageQueued) for event in events):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("active message was not persisted")
+        provider.gate.set()
+        turn = await _turn(ws, sid)
+
+    messages = [event for event in events if isinstance(event, AgentMessageQueued)]
+    assert [event.text for event in messages] == ["new guidance"]
+    queued = [frame for frame in turn if _kind(frame) == "agent_message_queued"]
+    assert [frame["event"]["message_id"] for frame in queued] == [messages[0].message_id]
+    skipped = next(
+        frame for frame in turn if _kind(frame) == "tool_call_completed" and frame["event"]["call_id"] == "stale"
+    )
+    assert skipped["event"]["result"] == "skipped: newer agent message"
+    assert [frame["event"]["text"] for frame in turn if _kind(frame) == "text_part"] == ["stale", "guided answer"]
+
+
+async def test_second_authorized_root_socket_can_persist_active_guidance(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend([Sample(text="stale"), Sample(text="guided")])
+    token = await signup()
+    sid = await new_session(token)
+    provider.gate.clear()
+
+    async with socket(sid, token) as owner:
+        await _until(owner, "replay_done")
+        await _send(owner, _message("start"))
+        await _until(owner, "text_delta")
+        async with socket(sid, token) as guide:
+            await _until(guide, "replay_done")
+            await _send(guide, _message("from tab two"))
+            for _ in range(200):
+                events = [stamped.event async for stamped in store.read(sid)]
+                if any(isinstance(event, AgentMessageQueued) and event.text == "from tab two" for event in events):
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("second socket guidance was not persisted")
+            provider.gate.set()
+            await _turn(owner, sid)
+
+    assert len([event for event in events if isinstance(event, AgentMessageQueued)]) == 1
+
+
+async def test_idle_message_is_steered_when_competitor_holds_lease_before_turn_started(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider.samples.extend([Sample(text="stale"), Sample(text="guided")])
+    token = await signup()
+    sid = await new_session(token)
+    await store.patch_header(sid, title="Existing")
+    provider.gate.clear()
+    winner_acquired = asyncio.Event()
+    loser_collided = asyncio.Event()
+    release_started = asyncio.Event()
+    original_acquire = store.acquire_lease
+    original_append = store.append
+
+    async def gated_acquire(session_id: str, holder: str, ttl: float) -> bool:
+        acquired = await original_acquire(session_id, holder, ttl)
+        if session_id == sid and not acquired and winner_acquired.is_set():
+            loser_collided.set()
+        return acquired
+
+    async def gated_append(session_id: str, events: Any, *, expect_seq: int | None) -> int:
+        if session_id == sid and any(isinstance(event, TurnStarted) for event in events):
+            winner_acquired.set()
+            await release_started.wait()
+        return await original_append(session_id, events, expect_seq=expect_seq)
+
+    monkeypatch.setattr(store, "acquire_lease", gated_acquire)
+    monkeypatch.setattr(store, "append", gated_append)
+
+    async with socket(sid, token) as owner:
+        await _until(owner, "replay_done")
+        await _send(owner, _message("owner starts"))
+        await asyncio.wait_for(winner_acquired.wait(), 2)
+        async with socket(sid, token) as guide:
+            await _until(guide, "replay_done")
+            await _send(guide, _message("race guidance"))
+            await asyncio.wait_for(loser_collided.wait(), 2)
+            release_started.set()
+            for _ in range(200):
+                events = [stamped.event async for stamped in store.read(sid)]
+                messages = [
+                    event for event in events if isinstance(event, AgentMessageQueued) and event.text == "race guidance"
+                ]
+                if messages:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("pre-start guidance was not persisted")
+            provider.gate.set()
+            turn = await _turn(owner, sid)
+
+    events = [stamped.event async for stamped in store.read(sid)]
+    messages = [event for event in events if isinstance(event, AgentMessageQueued) and event.text == "race guidance"]
+    assert len(messages) == 1
+    assert [event.input for event in events if isinstance(event, TurnStarted)] == ["owner starts"]
+    assert [
+        frame["event"]["message_id"]
+        for frame in turn
+        if _kind(frame) == "agent_message_queued" and frame["event"]["text"] == "race guidance"
+    ] == [messages[0].message_id]
+
+
+async def test_idle_message_starts_after_competitor_completes_before_lease_release(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider.samples.extend([Sample(text="first answer"), Sample(text="next answer")])
+    token = await signup()
+    sid = await new_session(token)
+    await store.patch_header(sid, title="Existing")
+    completed_while_leased = asyncio.Event()
+    loser_collided = asyncio.Event()
+    release_lease = asyncio.Event()
+    original_acquire = store.acquire_lease
+    original_release = store.release_lease
+
+    async def gated_acquire(session_id: str, holder: str, ttl: float) -> bool:
+        acquired = await original_acquire(session_id, holder, ttl)
+        if session_id == sid and not acquired and completed_while_leased.is_set():
+            loser_collided.set()
+        return acquired
+
+    async def gated_release(session_id: str, holder: str) -> None:
+        events = [stamped.event async for stamped in store.read(session_id)]
+        if session_id == sid and any(isinstance(event, TurnCompleted) for event in events):
+            completed_while_leased.set()
+            await release_lease.wait()
+        await original_release(session_id, holder)
+
+    monkeypatch.setattr(store, "acquire_lease", gated_acquire)
+    monkeypatch.setattr(store, "release_lease", gated_release)
+
+    async with socket(sid, token) as owner:
+        await _until(owner, "replay_done")
+        await _send(owner, _message("owner starts"))
+        await asyncio.wait_for(completed_while_leased.wait(), 2)
+        async with socket(sid, token) as guide:
+            await _until(guide, "replay_done")
+            await _send(guide, _message("next message"))
+            await asyncio.wait_for(loser_collided.wait(), 2)
+            release_lease.set()
+            following = await asyncio.wait_for(_turn(guide, sid), 3)
+
+    events = [stamped.event async for stamped in store.read(sid)]
+    assert [event.input for event in events if isinstance(event, TurnStarted)] == ["owner starts", "next message"]
+    assert not [event for event in events if isinstance(event, AgentMessageQueued)]
+    assert [frame["event"]["input"] for frame in following if _kind(frame) == "turn_started"] == ["next message"]
+
+
+async def test_active_attachment_message_reuses_owned_marker_encoding(
+    socket: Socket,
+    client: httpx.AsyncClient,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+    upload_dir: Path,
+) -> None:
+    provider.samples.extend([Sample(text="stale"), Sample(text="guided")])
+    token = await signup()
+    sid = await new_session(token)
+    attachment = upload_dir / await _uid(client, token) / "x.pdf"
+    provider.gate.clear()
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("start"))
+        await _until(ws, "text_delta")
+        await _send(
+            ws,
+            {
+                "type": "user_message",
+                "text": "read this too",
+                "attachments": [{"path": str(attachment), "name": "x.pdf"}],
+            },
+        )
+        for _ in range(200):
+            events = [stamped.event async for stamped in store.read(sid)]
+            messages = [event for event in events if isinstance(event, AgentMessageQueued)]
+            if messages:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("active attachment message was not persisted")
+        provider.gate.set()
+        await _turn(ws, sid)
+
+    assert messages[0].text == f"read this too\n[attachment: x.pdf path={attachment}]"
+
+
+async def test_child_session_socket_is_rejected(
+    socket: Socket,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend(
+        [
+            Sample(tool_calls=[ToolCall(id="d1", name="researcher", args='{"task": "look"}')]),
+            Sample(text="child findings"),
+            Sample(text="parent answer"),
+        ]
+    )
+    token = await signup()
+    sid = await new_session(token)
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("research it"))
+        turn = await _turn(ws, sid)
+    child_sid = next(frame for frame in turn if _kind(frame) == "child_session_spawned")["event"]["child_session_id"]
+
+    with pytest.raises((WebSocketDisconnect, BaseExceptionGroup)) as raised:
+        async with socket(child_sid, token) as child:
+            await child.receive_text(timeout=RECEIVE_TIMEOUT)
+    assert _disconnect_code(raised.value) == 1008
+
+
+async def test_active_message_wakes_task_wait_inside_a_running_tool(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waiting = asyncio.Event()
+
+    @tool
+    async def spawn_wait(ctx: Context) -> dict[str, object]:
+        ref = await ctx.spawn(Researcher, "hold")
+        waiting.set()
+        return await ctx.task_wait([ref.task_id])
+
+    _wire_tools()
+    monkeypatch.setattr(Sarathi, "tools", [*Sarathi.tools, spawn_wait])
+    provider.samples.extend(
+        [
+            Sample(tool_calls=[ToolCall(id="spawn-wait", name="spawn_wait", args="{}")]),
+            Sample(text="child done"),
+            Sample(text="guided root"),
+            Sample(text="guided root"),
+        ]
+    )
+    token = await signup()
+    sid = await new_session(token)
+    provider.gate.clear()
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("start"))
+        await asyncio.wait_for(waiting.wait(), 1)
+        await _send(ws, _message("wake and continue"))
+        for _ in range(200):
+            root_events = [stamped.event async for stamped in store.read(sid)]
+            messages = [event for event in root_events if isinstance(event, AgentMessageQueued)]
+            if messages:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("task_wait guidance was not persisted")
+        provider.gate.set()
+        turn = await _turn(ws, sid)
+
+    completed = [
+        frame for frame in turn if _kind(frame) == "tool_call_completed" and frame["event"]["call_id"] == "spawn-wait"
+    ]
+    assert len(completed) == 1
+    assert completed[0]["event"]["is_error"] is False
+    assert [event.text for event in messages] == ["wake and continue"]

@@ -5,6 +5,8 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './agentMessageQueued';
+export * from './agentMessageQueuedSource';
 export * from './approval';
 export * from './approvalExtra';
 export * from './approvalResponse';
@@ -28,6 +30,7 @@ export * from './freeTextExtra';
 export * from './freeTextResponse';
 export * from './health200';
 export * from './hTTPValidationError';
+export * from './killRequested';
 export * from './loginRequest';
 export * from './memoryOut';
 export * from './patchSessionRequest';
@@ -41,6 +44,8 @@ export * from './sessionCreated';
 export * from './sessionCreatedMetadata';
 export * from './sessionOut';
 export * from './signupRequest';
+export * from './taskNoticeQueued';
+export * from './taskNoticeQueuedState';
 export * from './textDelta';
 export * from './textPart';
 export * from './titleUpdatedFrame';

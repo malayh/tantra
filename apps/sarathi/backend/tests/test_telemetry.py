@@ -3,7 +3,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from sarathi.agent import Researcher, Sarathi, _wire_tools, make_harness
+from sarathi.agent import Investigator, Researcher, Sarathi, _wire_tools, make_harness
 from sarathi.config import get_settings
 from sarathi.telemetry import get_telemetry, shutdown_telemetry
 from tantra.telemetry import Telemetry
@@ -18,6 +18,7 @@ def unwired() -> Iterator[None]:
         shutdown_telemetry()
     Sarathi.tools = []
     Researcher.tools = []
+    Investigator.tools = []
     _wire_tools.cache_clear()
     get_telemetry.cache_clear()
     get_settings.cache_clear()

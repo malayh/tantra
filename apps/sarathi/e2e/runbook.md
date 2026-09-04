@@ -1,6 +1,6 @@
 # Sarathi E2E Runbook
 
-Manual-but-agent-driven end-to-end pass over the compose stack. Executed by Claude Code with browser tools + shell access. Produces one report per run.
+Manual-but-agent-driven end-to-end pass over the compose stack. Executed with agent-browser + shell access. Produces one report per run.
 
 ## Prerequisites
 
@@ -21,7 +21,7 @@ Manual-but-agent-driven end-to-end pass over the compose stack. Executed by Clau
 
 ## Instructions to the executing agent
 
-- Drive the browser with whatever browser tools this session has. Take a screenshot at each expected observation — screenshots are the evidence.
+- Drive the browser with agent-browser. Capture screenshots at each expected observation and video for the async-task flow; these artifacts are the evidence.
 - **Judge behaviourally, never by exact text.** The LLM output is nondeterministic. "Cited answer" means links/sources are present and on-topic, not a specific sentence. "Grounded" means the distinctive facts from the fixture show up, not a specific phrasing.
 - Shell is allowed and needed: `docker compose restart backend` (scenario 6), `docker compose logs backend` when diagnosing a FAIL.
 - **Flaky rule:** a failing scenario gets **exactly one** re-run. Still failing → FAIL. Record both attempts in the notes.
@@ -33,8 +33,8 @@ Manual-but-agent-driven end-to-end pass over the compose stack. Executed by Clau
 
 - Sidebar: `New chat`, session list (title + relative time), footer = email · brain icon (Memory) · sun/moon (`Toggle theme`) · log out.
 - Header: session title · model `Select` (`aria-label="Model"`) · connection dot (green = WS open).
-- Composer: paperclip (`Attach file`, accepts `.pdf`/`.docx`) · textarea (Enter sends, Shift+Enter newline) · `Send` / `Stop` button (swaps while a turn runs).
-- Transcript items: `Thinking` collapsible (open while streaming, auto-collapses when the sample finishes) · markdown text with a streaming cursor · tool chips (`web_search`, `web_fetch`, `read_doc`, `memory_write`, `memory_recall`, spinner while in flight, click to expand the result) · subagent block badged **`researcher`** (lowercase — the badge is the agent name, not the class name; bot icon, nested items inside) · approval card titled `Run memory_write?` with `Approve` / `Deny`.
+- Composer: paperclip (`Attach file`, accepts `.pdf`/`.docx`) · textarea (Enter sends, Shift+Enter newline) · `Send` stays available beside root `Stop` while a turn runs or waits; pending asks lock the composer.
+- Transcript items: `Thinking` collapsible (open while streaming, auto-collapses when the sample finishes) · markdown text with a streaming cursor · tool chips (`web_search`, `web_fetch`, `read_doc`, `memory_write`, `memory_recall`, task tools, spinner while in flight, click to expand the result) · observational subagent blocks showing the full task ID, lifecycle state, and nested activity · root approval cards with `Approve` / `Deny`.
 
 ---
 
@@ -71,7 +71,7 @@ Manual-but-agent-driven end-to-end pass over the compose stack. Executed by Clau
 - A `Thinking…` shimmer (or an open, pulsing `Thinking` block) appears before any answer text.
 - Answer text streams in visibly — partial text with a blinking cursor, growing over time, not one paste at the end.
 - If the endpoint emits reasoning: a `Thinking` block is present and **collapsed** once the sample completes; expanding it shows reasoning text. If no reasoning ever appears → **SKIP this sub-check**, note the model id from `SARATHI_MODELS`.
-- Composer is disabled while the turn runs and re-enables when it completes.
+- Composer remains editable while the turn runs; `Send` and root `Stop` are separate controls.
 - Within a few seconds of turn completion the sidebar row changes from `New chat` to a real generated title relevant to the question — **with no page reload**. The header title updates too.
 
 ---
@@ -137,7 +137,7 @@ Per-page distinctive facts:
 - While the subagent runs the block is open and shows **nested** activity inside its left rule: `web_search` / `web_fetch` chips and the subagent's own text.
 - When the subagent finishes, its spinner clears and the block collapses.
 - After the block completes, the root agent streams a **synthesis** answer below it (text outside the block).
-- The composer stays disabled until the *root* turn completes (a subagent turn emits two `turn_completed`s; the composer must not unlock early).
+- Child completion does not complete the root turn. The composer remains available for root guidance throughout.
 
 ---
 
@@ -239,6 +239,58 @@ Per-page distinctive facts:
 **Note — busy toast on reload:** the new connection can race the old one's 60s lease and surface `Another turn is running — retry in Ns`. If that happens, wait out the stated retry and reload once more. This does **not** consume the flaky re-run.
 
 ---
+
+
+## Phase 3 async-task acceptance — six focused tasks
+
+Run these with a real model after scenarios 1–4 establish auth, streaming, and attachments. Record task IDs and capture the browser console plus WebSocket frames. Rapidly refresh at least twice during the sequence; any uncaught console error, duplicate persisted event, changed task ID, or resumed killed task is a failure.
+
+### Task A — immediate references, hierarchy, and cap
+
+1. Send: `Launch three bounded researcher tasks on different aspects of WebAssembly components. Each researcher must launch one narrow investigator. Keep working after launch, retain every task reference, and use the async task tools deliberately.`
+2. Observe the root and nested blocks before completion.
+
+Expect full stable IDs, explicit queued/running states, nested `investigator` blocks beneath their direct `researcher`, and no more than four running descendants. A launch tool completes with a task reference while its block can remain queued/running; it must not masquerade as the final child result. No runaway recursive investigator launch is allowed.
+
+### Task B — refresh and second-tab busy-root guidance
+
+1. Refresh once with at least one queued task, once with one running task, and once while the root shows `waiting`.
+2. Open the same root URL in a second authorized tab while the first still owns the turn.
+3. In tab two send text plus a PDF attachment: `Prioritise standards-track sources. Use the attachment as extra guidance.`
+
+Expect identical task IDs and one transcript after each replay, no twin tasks, and exactly one durable guidance bubble with the attachment chip in both tabs after replay. The second tab may show a busy notice for execution ownership, but its root-targeted guidance must persist. `Send` remains available beside root `Stop`; no child URL or child control is used.
+
+### Task C — inspect, redirect, and direct-parent notify
+
+1. Send the root: `Inspect every task with task_status and task_messages. Redirect one running researcher with task_send to focus on the W3C standards position.`
+2. Ask the researcher to have its investigator call `notify_parent` when it finds a decisive source.
+
+Expect visible `task_status`, `task_messages`, and `task_send` calls using previously returned IDs. The message appears once in the target block. The investigator notification wakes and appears only in its direct researcher block; it must not be injected directly into the root transcript.
+
+### Task D — save, finish, wait, and result
+
+1. Send: `Tell one researcher to save its useful work and finish. Wait without polling, then retrieve its result and summarise it.`
+2. Refresh while the selected task is waiting and again after completion but before or during result retrieval.
+
+Expect `task_send`, one replay-stable `waiting` state, one direct-parent terminal notice, then `task_result`. The original launch completion remains the task reference, while the retrieved terminal output is shown by `task_result`. IDs, messages, notice, outcome, and transcript remain singular after refresh.
+
+### Task E — targeted kill preserves siblings
+
+1. With at least two unfinished sibling researchers, send: `Use task_kill on only the least useful researcher. Let its siblings continue and finish.`
+2. Refresh immediately after the kill and again after siblings finish.
+
+Expect the target and any nested investigator to become `killed`; sibling blocks continue through running/waiting to completed. The killed task never restarts, emits no second terminal notice, and retains the same ID and transcript after every reconnect.
+
+### Task F — root Stop, follow-up, transport rejection
+
+1. Start fresh nested work, then click root `Stop` while descendants are active.
+2. After the root shows `Stopped.`, send a normal follow-up in the same session.
+3. Copy a child task ID into `/chat/<child-id>` and attempt to open it directly.
+4. Perform two rapid refreshes and inspect console and WebSocket frames.
+
+Expect root Stop to cooperatively cancel the whole active tree, distinct from targeted `task_kill`; the follow-up starts an ordinary root turn. A direct child URL/WebSocket is rejected. No duplicate bubbles/notices, extra resumed task, unhandled console error, or malformed WebSocket frame is allowed.
+
+For every task, save screenshots and the async-flow video path in the ignored `e2e/reports/<YYYY-MM-DD>.md` report. Do not claim PASS for any observation that agent-browser did not actually exercise.
 
 ## Report template
 

@@ -99,13 +99,12 @@ export function Composer({ disabled, running = false, askPending = false, onSend
             }
           }}
         />
-        {running && !askPending ? (
+        <Button size="icon" aria-label="Send" disabled={blocked || nothingToSend} onClick={submit}>
+          <Send />
+        </Button>
+        {running && !askPending && (
           <Button variant="outline" size="icon" aria-label="Stop" onClick={onStop}>
             <Square />
-          </Button>
-        ) : (
-          <Button size="icon" aria-label="Send" disabled={blocked || nothingToSend} onClick={submit}>
-            <Send />
           </Button>
         )}
       </div>

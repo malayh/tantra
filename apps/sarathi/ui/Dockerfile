@@ -1,7 +1,10 @@
+# syntax=docker/dockerfile:1
+
 FROM node:22-slim AS deps
 WORKDIR /app
 COPY package.json yarn.lock ./
-RUN yarn install --frozen-lockfile
+RUN --mount=type=cache,target=/usr/local/share/.cache/yarn,sharing=locked \
+    yarn install --frozen-lockfile --network-timeout 600000
 
 FROM node:22-slim AS builder
 WORKDIR /app

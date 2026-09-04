@@ -48,7 +48,7 @@ export default function SessionPage() {
         <div className="mx-auto w-full max-w-3xl px-6 pb-6">
           <Composer
             key={sessionId}
-            disabled={!ready || running}
+            disabled={!ready || pendingAsk !== null}
             running={running}
             askPending={pendingAsk !== null}
             onSend={(text, attachments) => sendFrame({ type: "user_message", text, attachments })}

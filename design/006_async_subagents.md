@@ -245,23 +245,26 @@ P0 durable live inbox
 - **Follow-up:** Phase-specific tests pass on MemoryStore, FileSystemStore, and SQLiteStore, but PostgreSQL is skipped because Docker is unavailable. The exact `just` wrappers cannot run because `just` and `uv` are absent; `.venv` Ruff and core tests pass. Repository-wide tests remain blocked by the deferred Agni async migration, and full stress remains blocked by the pre-existing notice-unaware `stress/test_kitchen.py` policy; both files are unchanged in P2.
 
 ### Phase 3 — Sarathi pilot · deps: P2 · ∥ P4 docs draft · —
+- Agent orchestration: migrate Sarathi instructions to the async task lifecycle and add a bounded Researcher → Investigator hierarchy. Agni remains in P4.
 - Backend: route mid-turn `user_message` to durable root ingress, keep idle messages as new turns, preserve root-only authorization, and remove in-memory waiting for active-turn user messages.
 - UI: enable the composer while active, render durable user messages once, update async subagent/task states, and keep child blocks observational with no direct controls.
 - Reconnect: replay root messages and recursive child state, reconstruct unfinished tasks, and avoid duplicate bubbles/notices.
 - Keep root recursive cooperative Stop behavior and verify it alongside parent force-kill tools.
 - **Verify:** browser/API test launches nested work, sends user guidance while the root waits and while a child runs, observes the root inspect and redirect it, then asks the root to kill one child; refresh during each state preserves one transcript, the same task IDs, bounded concurrency, and no resumed killed task.
 - Checklist:
-  - [ ] Durable active-turn WebSocket ingress
-  - [ ] Running/waiting composer and root-only controls
-  - [ ] Async task reducer and nested transcript rendering
-  - [ ] Reconnect/replay deduplication
+  - [x] Durable active-turn WebSocket ingress
+  - [x] Running/waiting composer and root-only controls
+  - [x] Async task reducer and nested transcript rendering
+  - [x] Reconnect/replay deduplication
   - [ ] Sarathi backend `just lint` + `just test`
-  - [ ] UI `yarn lint` + `yarn build`
-  - [ ] Desktop and mobile browser flow
+  - [x] UI `yarn test` + `yarn lint` + `yarn build`
   - [ ] Root `just lint` + `just test`
+  - [x] Test subagent launch, wait, inspect, message, notify, result, and kill
+  - [ ] Agent-browser full lifecycle flow
+- **Follow-up:** ~~Browser acceptance is open because Docker is unavailable in this environment.~~ **Live Brave verification ran after an external Docker rebuild.** Nested launch/status/messages/wait/result/notify, successful parent steering, targeted subtree kill, sibling preservation, stable replay, root Stop, and child-route rejection passed. Phase 3 remains open because a post-Stop `hi` submission was lost even after replay; a related idle submission persisted but required reload to render and start. Brave also denied the PDF fixture upload, and `agent-browser` could not attach to the authenticated browser, so the attachment/video sub-checks remain open. Exact `just`/`uv` wrappers remain unavailable; `.venv` Ruff and all 84 Sarathi backend tests pass. Root lint passes, while root tests retain the deferred Agni blocking-delegate failure and stress retains the pre-existing notice-unaware kitchen-policy failure.
 
 ### Phase 4 — documentation and 0.5 release · deps: P3 · —
-- Migrate Agni and Sarathi agent callers and instructions to the async task lifecycle.
+- ~~Migrate Agni and Sarathi agent callers and instructions to the async task lifecycle.~~ **Sarathi moved to P3; migrate Agni here.**
 - Rewrite `docs/guides/subagents.md`, `docs/concepts/durability.md`, `docs/concepts/turn-loop.md`, `docs/reference/{events,harness,loop,tools}.md`, and `docs/sharp-edges.md` for async task ownership, messaging, inspection, waiting, cancellation versus kill, and recovery.
 - Update package/readme examples and all blocking `spawn`/`fan_out` references. Include a 0.4-to-0.5 migration showing launch, wait, inspect, result, notify, message, and kill.
 - Bump `packages/tantra/pyproject.toml` and exported version to 0.5.0; update Sarathi's dependency floor and lockfile.

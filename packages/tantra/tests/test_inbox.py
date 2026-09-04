@@ -317,7 +317,7 @@ async def test_message_during_text_only_sample_prevents_terminal_completion(gate
     assert picks(events, TurnCompleted)[0].stop_reason == "completed"
 
 
-async def test_task_notice_is_actionable_but_kill_request_is_only_absorbed(gated_provider: Any) -> None:
+async def test_kill_request_takes_precedence_over_an_actionable_notice(gated_provider: Any) -> None:
     @tool
     async def touch() -> str:
         """Return a value."""
@@ -352,8 +352,9 @@ async def test_task_notice_is_actionable_but_kill_request_is_only_absorbed(gated
 
     assert len(picks(events, KillRequested)) == 1
     assert len(picks(events, TaskNoticeQueued)) == 1
-    assert picks(events, ToolCallCompleted)[0].result == INBOX_RESULT
-    assert len(provider.requests) == 2
+    assert not picks(events, ToolCallCompleted)
+    assert picks(events, TurnCompleted)[0].stop_reason == "killed"
+    assert len(provider.requests) == 1
 
 
 async def test_absorbed_duplicate_envelopes_stream_once_but_render_first_id_once(gated_provider: Any) -> None:

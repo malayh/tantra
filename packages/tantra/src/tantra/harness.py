@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from contextlib import aclosing
@@ -24,12 +25,15 @@ from tantra.events import (
     Stamped,
     TaskNoticeQueued,
     TextPart,
+    ToolCallCompleted,
+    ToolCallRequested,
+    ToolCallStarted,
     TurnCompleted,
     TurnFailed,
     TurnStarted,
 )
 from tantra.hooks import Hook
-from tantra.loop import DEFAULT_RETRY, SUBMIT_OUTPUT, Emitted, RetryConfig, TurnLoop
+from tantra.loop import DEFAULT_RETRY, KILLED_RESULT, SUBMIT_OUTPUT, Emitted, RetryConfig, TurnLoop
 from tantra.permissions import check_permission
 from tantra.providers.base import Provider
 from tantra.skills import SKILL_TOOL, SkillInfo, Skills
@@ -311,11 +315,18 @@ class Harness:
         for hook in self.hooks:
             await hook.on_event(emitted)
 
-    def _end_turn(self, span: Any, loop: TurnLoop | None, raised: BaseException | None) -> None:
-        terminal = loop.terminal if loop is not None else None
+    def _end_turn(
+        self,
+        span: Any,
+        loop: TurnLoop | None,
+        raised: BaseException | None,
+        setup_terminal: TurnCompleted | None = None,
+    ) -> None:
+        terminal = loop.terminal if loop is not None and loop.terminal is not None else setup_terminal
         outcome_error: BaseException | str | None
         if isinstance(terminal, TurnCompleted):
-            outcome, stop_reason, output = terminal.stop_reason, terminal.stop_reason, terminal.output
+            outcome = "cancelled" if terminal.stop_reason == "killed" else terminal.stop_reason
+            stop_reason, output = terminal.stop_reason, terminal.output
             outcome_error, ask_id = None, None
         elif isinstance(terminal, TurnFailed):
             outcome, stop_reason, output, outcome_error, ask_id = "failed", None, None, terminal.error, None
@@ -333,13 +344,78 @@ class Harness:
             ask_id=ask_id,
         )
 
-    async def _settle(self, header: SessionHeader, loop: TurnLoop | None, holder: str) -> None:
+    async def _settle(
+        self,
+        header: SessionHeader,
+        loop: TurnLoop | None,
+        holder: str,
+        setup_terminal: TurnCompleted | None = None,
+    ) -> None:
         if loop is not None and not loop.lease_lost:
             if loop.suspended is not None:
                 await self.store.patch_header(header.id, status="awaiting_input", pending_ask=loop.suspended)
             else:
                 await self.store.patch_header(header.id, status="failed" if loop.failed else "idle", pending_ask=None)
+        elif setup_terminal is not None:
+            await self.store.patch_header(header.id, status="idle", pending_ask=None)
         await self.store.release_lease(header.id, holder)
+
+    async def _finalize_setup_kill(
+        self,
+        header: SessionHeader,
+        supervisor: TaskSupervisor,
+        turn: TurnContext | None,
+    ) -> tuple[TurnCompleted, list[Emitted]] | None:
+        while True:
+            stamped = [item async for item in self.store.read(header.id)]
+            history = [item.event for item in stamped]
+            if not any(isinstance(event, KillRequested) for event in history) or not _turn_incomplete(history):
+                return None
+            started = _last_turn(history)
+            tail = _turn_tail(history)
+            completed = {event.call_id for event in tail if isinstance(event, ToolCallCompleted)}
+            begun = {event.call_id for event in tail if isinstance(event, ToolCallStarted)}
+            additions: list[SessionEvent] = []
+            for call in (event for event in tail if isinstance(event, ToolCallRequested)):
+                if call.call_id in completed:
+                    continue
+                if call.call_id not in begun:
+                    additions.append(ToolCallStarted(call_id=call.call_id))
+                additions.append(ToolCallCompleted(call_id=call.call_id, result=KILLED_RESULT, is_error=True))
+            terminal = TurnCompleted(turn_id=started.turn_id, stop_reason="killed")
+            additions.append(terminal)
+            expect_seq = stamped[-1].seq if stamped else 0
+            try:
+                last = await self.store.append(header.id, additions, expect_seq=expect_seq)
+                break
+            except SeqConflict:
+                continue
+        first = last - len(additions) + 1
+        header.last_seq = last
+        emitted = [
+            Emitted(session_id=header.id, depth=header.depth, seq=first + index, event=event)
+            for index, event in enumerate(additions)
+        ]
+        visible: list[Emitted] = []
+        for item in emitted:
+            if not supervisor.claim(item):
+                continue
+            await self._notify(item)
+            visible.append(item)
+        await supervisor.notify_terminal(header.id)
+        if turn is None:
+            turn = TurnContext(
+                session_id=header.id,
+                turn_id=started.turn_id,
+                agent=header.agent,
+                depth=header.depth,
+                input=started.input,
+                metadata=header.metadata,
+                deps=None,
+            )
+        for hook in self.hooks:
+            await hook.after_turn(turn, terminal)
+        return terminal, visible
 
     async def run(self, sid: str, input: str) -> AsyncIterator[Emitted]:
         supervisor = TaskSupervisor(self, sid)
@@ -369,8 +445,12 @@ class Harness:
         span: Any = None
         traced = False
         raised: BaseException | None = None
+        setup_terminal: TurnCompleted | None = None
+        turn: TurnContext | None = None
         try:
             history = [stamped.event async for stamped in self.store.read(sid)]
+            if any(isinstance(event, KillRequested) for event in history):
+                return
             if _turn_incomplete(history):
                 raise TurnIncomplete(sid)
 
@@ -418,13 +498,22 @@ class Harness:
             async with aclosing(loop.run()) as turn_stream:
                 async for emitted in turn_stream:
                     yield emitted
+        except asyncio.CancelledError as exc:
+            raised = exc
+            finalized = await self._finalize_setup_kill(header, supervisor, turn)
+            if finalized is None:
+                raise
+            setup_terminal, emitted = finalized
+            raised = None
+            for item in emitted:
+                yield item
         except BaseException as exc:
             raised = exc
             raise
         finally:
-            await self._settle(header, loop, holder)
+            await self._settle(header, loop, holder, setup_terminal)
             if traced:
-                self._end_turn(span, loop, raised)
+                self._end_turn(span, loop, raised, setup_terminal)
 
     async def resume(
         self, sid: str, ask_id: str | None = None, response: AskResponse | None = None
@@ -459,9 +548,18 @@ class Harness:
         span: Any = None
         traced = False
         raised: BaseException | None = None
+        setup_terminal: TurnCompleted | None = None
+        turn: TurnContext | None = None
         try:
             stamped = [item async for item in self.store.read(sid)]
             history = [item.event for item in stamped]
+            if any(isinstance(event, KillRequested) for event in history):
+                finalized = await self._finalize_setup_kill(header, supervisor, turn)
+                if finalized is not None:
+                    setup_terminal, emitted = finalized
+                    for item in emitted:
+                        yield item
+                return
             if not _turn_incomplete(history):
                 raise TantraError(f"session {sid} has no incomplete turn to resume")
             if (ask_id is None) != (response is None):
@@ -524,13 +622,22 @@ class Harness:
             async with aclosing(loop.run()) as turn_stream:
                 async for emitted in turn_stream:
                     yield emitted
+        except asyncio.CancelledError as exc:
+            raised = exc
+            finalized = await self._finalize_setup_kill(header, supervisor, turn)
+            if finalized is None:
+                raise
+            setup_terminal, emitted = finalized
+            raised = None
+            for item in emitted:
+                yield item
         except BaseException as exc:
             raised = exc
             raise
         finally:
-            await self._settle(header, loop, holder)
+            await self._settle(header, loop, holder, setup_terminal)
             if traced:
-                self._end_turn(span, loop, raised)
+                self._end_turn(span, loop, raised, setup_terminal)
 
     async def _append_absorbing(
         self,

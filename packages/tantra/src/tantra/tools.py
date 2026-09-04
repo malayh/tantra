@@ -45,6 +45,9 @@ class Context:
         task_messages: Callable[[str, int], Awaitable[list[dict[str, Any]]]] | None = None,
         task_result: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
         task_wait: Callable[[list[str] | None], Awaitable[dict[str, Any]]] | None = None,
+        task_send: Callable[[str, str], Awaitable[str]] | None = None,
+        notify_parent: Callable[[str], Awaitable[str]] | None = None,
+        task_kill: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
         memory: Memory | None = None,
     ) -> None:
         self.session_id = session_id
@@ -61,6 +64,9 @@ class Context:
         self._task_messages = task_messages
         self._task_result = task_result
         self._task_wait = task_wait
+        self._task_send = task_send
+        self._notify_parent = notify_parent
+        self._task_kill = task_kill
 
     async def emit(self, message: str) -> None:
         """Record progress for the running tool call as a persisted `ToolProgress` event."""
@@ -102,6 +108,21 @@ class Context:
         if self._task_wait is None:
             raise TantraError("task_wait is only available inside a running tool call")
         return await self._task_wait(task_ids)
+
+    async def task_send(self, task_id: str, message: str) -> str:
+        if self._task_send is None:
+            raise TantraError("task_send is only available inside a running tool call")
+        return await self._task_send(task_id, message)
+
+    async def notify_parent(self, message: str) -> str:
+        if self._notify_parent is None:
+            raise TantraError("notify_parent is only available inside a running tool call")
+        return await self._notify_parent(message)
+
+    async def task_kill(self, task_id: str) -> dict[str, Any]:
+        if self._task_kill is None:
+            raise TantraError("task_kill is only available inside a running tool call")
+        return await self._task_kill(task_id)
 
 
 def _args_model(fn: Callable[..., Any], name: str) -> tuple[str | None, type[BaseModel]]:

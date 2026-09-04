@@ -233,13 +233,16 @@ P0 durable live inbox
 - Make bundled shell subprocesses cancellation-safe; document custom-tool cleanup and irreversible-side-effect limits.
 - **Verify:** nested root/mid/leaf tests prove root-to-leaf course correction skips stale calls, leaf notification wakes only mid, a save-and-exit message returns persisted output, force-kill interrupts an active provider and active shell process locally, queued descendants never start, siblings continue, duplicate replay events appear once in model context, and remote kill takes effect at the next boundary.
 - Checklist:
-  - [ ] Parent-to-descendant and child-to-parent message tools
-  - [ ] Lineage checks, bounds, ordering, and deterministic IDs
-  - [ ] Local wakeups and remote wait polling
-  - [ ] Recursive immediate kill and race-closing second scan
-  - [ ] Shell and custom-tool cancellation contract
-  - [ ] Nested, replay, side-effect, and all-store stress tests
+  - [x] Parent-to-descendant and child-to-parent message tools
+  - [x] Lineage checks, bounds, ordering, and deterministic IDs
+  - [x] Local wakeups and remote wait polling
+  - [x] Recursive immediate kill and race-closing second scan
+  - [x] Shell and custom-tool cancellation contract
+  - [x] Nested, replay, and side-effect tests
+  - [x] MemoryStore, FileSystemStore, and SQLiteStore stress tests
+  - [ ] PostgreSQL stress tests
   - [ ] `just lint` + `just test` + `just stress`
+- **Follow-up:** Phase-specific tests pass on MemoryStore, FileSystemStore, and SQLiteStore, but PostgreSQL is skipped because Docker is unavailable. The exact `just` wrappers cannot run because `just` and `uv` are absent; `.venv` Ruff and core tests pass. Repository-wide tests remain blocked by the deferred Agni async migration, and full stress remains blocked by the pre-existing notice-unaware `stress/test_kitchen.py` policy; both files are unchanged in P2.
 
 ### Phase 3 — Sarathi pilot · deps: P2 · ∥ P4 docs draft · —
 - Backend: route mid-turn `user_message` to durable root ingress, keep idle messages as new turns, preserve root-only authorization, and remove in-memory waiting for active-turn user messages.

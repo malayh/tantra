@@ -13,6 +13,9 @@ The behaviours that surprise people. Each one is load-bearing: it is how the lib
 **Cancel is a persisted flag, not `task.cancel()`.**
 `cancel()` appends `CancelRequested` and nothing else. The loop may be running in another process; it notices at its next store boundary — before a sample, and between tool calls — then ends the turn with `stop_reason="cancelled"`. **A tool already executing is not interrupted**: cancelling a session sitting inside `bash()` waits for that command to finish or time out. Cancelling a *suspended* turn takes effect at the next `resume`, which completes it without sampling. It flags one session: a parent waiting on a child that is still sampling needs `cancel(sid, recursive=True)`. If you need a hard stop, give the tool its own timeout.
 
+**Force-killing a task cannot undo its side effects.**
+`task_kill` persists the kill before cancelling locally owned agent and tool coroutines. Bundled `bash()` terminates and awaits its process group, but custom tools receive ordinary asyncio cancellation and must clean up their own resources. Filesystem, network, database, and subprocess effects completed before cancellation remain completed.
+
 **Every `tool_call_id` must be answered before the next sample — `max_steps` is the sneaky one.**
 OpenAI-compatible APIs reject an assistant message whose tool calls have no results, so any early stop mid-batch (suspend, denial, cancel, cap) still writes `ToolCallStarted` and `ToolCallCompleted(is_error=True)` for the calls that never ran. Expect `"not executed: max steps reached"` and `"denied by user"` in your logs — they are real events, not noise. Anything you write that rewrites or filters the log must preserve the pairing.
 

@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import signal
+from contextlib import suppress
 from pathlib import Path
 from typing import Literal
 
@@ -57,7 +58,8 @@ def _kill_group(process: asyncio.subprocess.Process) -> None:
     try:
         os.killpg(os.getpgid(process.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
-        process.kill()
+        with suppress(ProcessLookupError):
+            process.kill()
 
 
 def bash(*, timeout: float = 120.0) -> Tool:
@@ -97,10 +99,12 @@ def bash(*, timeout: float = 120.0) -> Tool:
         )
         try:
             stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except TimeoutError:
+        except (TimeoutError, asyncio.CancelledError) as exc:
             _kill_group(process)
             await process.wait()
-            raise TimeoutError(f"command timed out after {timeout}s: {command}") from None
+            if isinstance(exc, TimeoutError):
+                raise TimeoutError(f"command timed out after {timeout}s: {command}") from None
+            raise
         output = _cap(stdout.decode("utf-8", errors="replace"))
         if process.returncode:
             return f"{output}\n[exit status {process.returncode}]".lstrip()

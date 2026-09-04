@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import os
 from typing import Any
 
 import pytest
@@ -9,7 +11,7 @@ from tantra.agent import Agent
 from tantra.ask import Approval, ApprovalResponse
 from tantra.context import TurnContext
 from tantra.events import AskRaised, ToolCallCompleted, ToolCallRequested, ToolCallStarted, TurnCompleted
-from tantra.extratools.shell import ShellGuard, bash
+from tantra.extratools.shell import ShellGuard, _kill_group, bash
 from tantra.harness import Harness
 from tantra.hooks import Denial, Escalation
 from tantra.providers.base import ToolCall
@@ -187,6 +189,41 @@ async def test_bash_kills_a_command_that_outlives_the_factory_timeout() -> None:
         await bash(timeout=0.2).invoke({"command": "sleep 5"}, make_ctx([]))
 
     assert "command timed out after 0.2s: sleep 5" in str(info.value)
+
+
+async def test_bash_kills_and_awaits_its_process_group_when_cancelled(tmp_path: Any) -> None:
+    pid_file = tmp_path / "child.pid"
+    running = asyncio.create_task(
+        bash().invoke(
+            {"command": f"sh -c 'sleep 30 & echo $! > {pid_file}; wait'"},
+            make_ctx([]),
+        )
+    )
+    while not pid_file.exists():
+        await asyncio.sleep(0.01)
+    child_pid = int(pid_file.read_text())
+
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+
+def test_kill_group_does_not_mask_an_already_exited_process(monkeypatch: Any) -> None:
+    class Gone:
+        pid = 123
+
+        def kill(self) -> None:
+            raise ProcessLookupError
+
+    def missing_group(pid: int) -> int:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(os, "getpgid", missing_group)
+
+    _kill_group(Gone())
 
 
 def test_bash_hides_the_timeout_from_the_model_facing_schema() -> None:

@@ -61,6 +61,7 @@ if TYPE_CHECKING:
 SUBMIT_OUTPUT = "submit_output"
 
 CANCELLED_RESULT = "not executed: turn cancelled"
+KILLED_RESULT = "not executed: task killed"
 COMPLETED_RESULT = "not executed: turn completed"
 INBOX_RESULT = "skipped: newer agent message"
 CONTROL_EVENTS = (CancelRequested, AgentMessageQueued, TaskNoticeQueued, KillRequested)
@@ -117,6 +118,12 @@ class Spawner(Protocol):
 
     async def wait(self, task_ids: list[str] | None) -> dict[str, Any]: ...
 
+    async def send(self, call_id: str, task_id: str, message: str) -> str: ...
+
+    async def notify_parent(self, call_id: str, message: str) -> str: ...
+
+    async def kill(self, call_id: str, task_id: str) -> dict[str, Any]: ...
+
     async def unfinished(self) -> list[str]: ...
 
     async def cancelling(self) -> list[str]: ...
@@ -135,6 +142,7 @@ class TurnState:
     asks: dict[str, list[Ask]] = field(default_factory=dict)
     children: dict[str, list[ChildSessionSpawned]] = field(default_factory=dict)
     cancelled: bool = False
+    killed: bool = False
 
     def observe(self, event: SessionEvent) -> None:
         if isinstance(event, TurnStarted):
@@ -159,6 +167,8 @@ class TurnState:
                         record.response = event.response
         elif isinstance(event, CancelRequested):
             self.cancelled = True
+        elif isinstance(event, KillRequested):
+            self.killed = True
 
     def unanswered(self) -> list[ToolCallRequested]:
         return [call for call in self.batch if call.call_id not in self.results]
@@ -192,6 +202,11 @@ def submit_output_schema(output_schema: type[BaseModel]) -> ToolSchema:
 
 def accumulate(total: Usage, sample: Usage) -> Usage:
     return Usage(**{name: getattr(total, name) + getattr(sample, name) for name in Usage.model_fields})
+
+
+class KilledBoundary(BaseException):
+    def __init__(self, emitted: list[Emitted]) -> None:
+        self.emitted = emitted
 
 
 class TurnLoop:
@@ -260,7 +275,7 @@ class TurnLoop:
         if agent.output_schema is not None:
             self.schemas = [*self.schemas, submit_output_schema(agent.output_schema)]
 
-    async def _refresh(self) -> list[Emitted]:
+    async def _refresh(self, *, allow_killed: bool = False) -> list[Emitted]:
         stamped = [item async for item in self.store.read(self.header.id, from_seq=self.header.last_seq)]
         if any(not isinstance(item.event, CONTROL_EVENTS) for item in stamped):
             foreign = next(item.event for item in stamped if not isinstance(item.event, CONTROL_EVENTS))
@@ -271,6 +286,8 @@ class TurnLoop:
             self.history.append(item.event)
             self.state.observe(item.event)
             absorbed.append(Emitted(session_id=self.header.id, depth=self.header.depth, seq=item.seq, event=item.event))
+        if self.state.killed and not allow_killed:
+            raise KilledBoundary(absorbed)
         return absorbed
 
     async def _write(
@@ -279,9 +296,12 @@ class TurnLoop:
         *,
         abort_on_inbox: bool = False,
         abort_on_cancel: bool = False,
+        allow_killed: bool = False,
     ) -> tuple[list[Emitted], bool]:
         absorbed: list[Emitted] = []
         while True:
+            if self.state.killed and not allow_killed:
+                raise KilledBoundary(absorbed)
             if abort_on_inbox and pending_inbox(self.history):
                 return absorbed, False
             if abort_on_cancel and self.state.cancelled:
@@ -290,7 +310,10 @@ class TurnLoop:
                 last = await self.store.append(self.header.id, events, expect_seq=self.header.last_seq)
                 break
             except SeqConflict:
-                refreshed = await self._refresh()
+                try:
+                    refreshed = await self._refresh(allow_killed=allow_killed)
+                except KilledBoundary as exc:
+                    raise KilledBoundary([*absorbed, *exc.emitted]) from None
                 if not refreshed:
                     raise
                 absorbed.extend(refreshed)
@@ -305,8 +328,8 @@ class TurnLoop:
         ]
         return [*absorbed, *appended], True
 
-    async def _append(self, events: Sequence[SessionEvent]) -> list[Emitted]:
-        emitted, _ = await self._write(events)
+    async def _append(self, events: Sequence[SessionEvent], *, allow_killed: bool = False) -> list[Emitted]:
+        emitted, _ = await self._write(events, allow_killed=allow_killed)
         return emitted
 
     def _stub_span(self, call: ToolCallRequested, result: Any, *, is_error: bool, error_type: str | None) -> None:
@@ -334,6 +357,7 @@ class TurnLoop:
         is_error: bool = False,
         error_type: str | None = None,
         call: ToolCallRequested | None = None,
+        allow_killed: bool = False,
     ) -> list[Emitted]:
         if is_error and error_type is None:
             error_type = "_OTHER"
@@ -350,8 +374,8 @@ class TurnLoop:
             self._stub_span(call, result, is_error=is_error, error_type=error_type)
         completed = ToolCallCompleted(call_id=call_id, result=result, is_error=is_error)
         if call_id in self.state.started:
-            return await self._append([completed])
-        return await self._append([ToolCallStarted(call_id=call_id), completed])
+            return await self._append([completed], allow_killed=allow_killed)
+        return await self._append([ToolCallStarted(call_id=call_id), completed], allow_killed=allow_killed)
 
     def _live(self, event: TextDelta | ReasoningDelta | ToolCallDelta) -> Emitted:
         return Emitted(session_id=self.header.id, depth=self.header.depth, seq=None, event=event)
@@ -475,6 +499,9 @@ class TurnLoop:
             task_messages=self.spawner.messages if delegates else None,
             task_result=self.spawner.result if delegates else None,
             task_wait=self.spawner.wait if delegates else None,
+            task_send=(lambda task_id, message: self.spawner.send(call_id, task_id, message)) if delegates else None,
+            notify_parent=(lambda message: self.spawner.notify_parent(call_id, message)) if delegates else None,
+            task_kill=(lambda task_id: self.spawner.kill(call_id, task_id)) if delegates else None,
             memory=self.memory,
         )
         task = asyncio.ensure_future(tool.invoke(args, ctx))
@@ -674,6 +701,45 @@ class TurnLoop:
         async with aclosing(self._terminal("cancelled", None, abort_on_inbox=False)) as terminal:
             async for emitted in terminal:
                 yield emitted
+
+    async def _killed(self) -> AsyncIterator[Emitted]:
+        pending = self.state.unanswered()
+        for call in pending:
+            active = call.call_id in self.tool_spans
+            if active:
+                self.tracer.end_tool(
+                    self.tool_spans.pop(call.call_id),
+                    result=None,
+                    is_error=False,
+                    outcome="aborted",
+                    error_type=None,
+                    ask_id=None,
+                )
+            for emitted in await self._completed(
+                call.call_id,
+                KILLED_RESULT,
+                is_error=True,
+                call=None if active else call,
+                allow_killed=True,
+            ):
+                yield emitted
+        terminal = next(
+            (
+                event
+                for event in reversed(self.history)
+                if isinstance(event, TurnCompleted) and event.stop_reason == "killed"
+            ),
+            None,
+        )
+        if terminal is None:
+            terminal = TurnCompleted(turn_id=self.turn.turn_id, stop_reason="killed")
+            for emitted in await self._append([terminal], allow_killed=True):
+                yield emitted
+            if self.spawner is not None:
+                await self.spawner.notify_terminal()
+            for hook in self.hooks:
+                await hook.after_turn(self.turn, terminal)
+        self.terminal = terminal
 
     async def _batch(self, capped: bool) -> AsyncIterator[Emitted]:
         stopped = False
@@ -982,17 +1048,41 @@ class TurnLoop:
             yield emitted
 
     async def run(self) -> AsyncIterator[Emitted]:
+        killed: list[Emitted] | None = None
         try:
-            async with aclosing(self._drive()) as stream:
-                async for emitted in stream:
+            try:
+                async with aclosing(self._drive()) as stream:
+                    async for emitted in stream:
+                        if self.event_claim is not None and not self.event_claim(emitted):
+                            continue
+                        if emitted.session_id == self.header.id:
+                            for hook in self.hooks:
+                                await hook.on_event(emitted)
+                        yield emitted
+            except KilledBoundary as exc:
+                killed = exc.emitted
+            except asyncio.CancelledError:
+                killed = await self._refresh(allow_killed=True)
+                if not self.state.killed:
+                    raise
+            if killed is not None:
+                for emitted in killed:
                     if self.event_claim is not None and not self.event_claim(emitted):
                         continue
                     if emitted.session_id == self.header.id:
                         for hook in self.hooks:
                             await hook.on_event(emitted)
                     yield emitted
+                async with aclosing(self._killed()) as terminal:
+                    async for emitted in terminal:
+                        if self.event_claim is not None and not self.event_claim(emitted):
+                            continue
+                        if emitted.session_id == self.header.id:
+                            for hook in self.hooks:
+                                await hook.on_event(emitted)
+                        yield emitted
         finally:
-            outcome = "suspended" if self.suspended is not None else "aborted"
+            outcome = "aborted" if self.state.killed else "suspended" if self.suspended is not None else "aborted"
             while self.tool_spans:
                 _, span = self.tool_spans.popitem()
                 self.tracer.end_tool(

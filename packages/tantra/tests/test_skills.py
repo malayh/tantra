@@ -447,6 +447,9 @@ async def test_a_harness_without_skills_offers_no_skill_tool_and_one_system_bloc
         "task_messages",
         "task_result",
         "task_wait",
+        "task_send",
+        "notify_parent",
+        "task_kill",
     ]
 
 
@@ -466,6 +469,9 @@ async def test_an_agent_opting_out_gets_neither_the_tool_nor_the_block(root: Pat
         "task_messages",
         "task_result",
         "task_wait",
+        "task_send",
+        "notify_parent",
+        "task_kill",
     ]
 
 

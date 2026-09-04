@@ -254,9 +254,12 @@ async def test_capture_content_records_the_prompt_and_the_completion() -> None:
     assert {schema["name"] for schema in tools} == {
         "search",
         "explode",
+        "notify_parent",
+        "task_kill",
         "task_status",
         "task_messages",
         "task_result",
+        "task_send",
         "task_wait",
     }
 

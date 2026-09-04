@@ -254,6 +254,67 @@ async def test_abandon_mid_spawn_no_twin(store: Store) -> None:
     await check_log(store, leaf_sid)
 
 
+async def test_message_then_kill_active_custom_tool(store: Store) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    captured: list[tuple[Any, str, dict[str, Any]]] = []
+
+    @tool
+    async def hold() -> str:
+        """Wait until force-killed."""
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    class Hand(Agent):
+        model = MODEL_HAND
+        tools = [hold]
+        permissions = {"hold": "allow"}
+
+    @tool
+    async def control(ctx: Context) -> str:
+        """Launch, message, and force-kill one worker."""
+        ref = await ctx.spawn(Hand, "hold")
+        await started.wait()
+        message = await ctx.task_send(ref.task_id, "save nothing and stop")
+        killed = await ctx.task_kill(ref.task_id)
+        captured.append((ref, message, killed))
+        return ref.task_id
+
+    class Controller(Agent):
+        model = MODEL_ROOT
+        tools = [control]
+        subagents = [Hand]
+        permissions = {"control": "allow", "hand": "allow"}
+
+    policy = by_model(
+        {
+            MODEL_ROOT: call_policy("control", {}, answer="controlled"),
+            MODEL_HAND: call_policy("hold", {}, answer="released"),
+        }
+    )
+    harness, provider = build(store, policy, [Controller])
+    sid = (await harness.create_session(Controller)).id
+
+    events = await asyncio.wait_for(collect(harness.run(sid, "go")), 2)
+    ref, message, killed = captured[0]
+    child_log = await log(store, ref.task_id)
+
+    assert cancelled.is_set()
+    assert len(message) == 32
+    assert killed == {"task_id": ref.task_id, "state": "killed"}
+    assert [event.source for event in picks(child_log, "agent_message_queued")] == ["parent"]
+    assert [event.stop_reason for event in picks(child_log, "turn_completed")] == ["killed"]
+    assert [event.state for event in picks(await log(store, sid), "task_notice_queued")] == ["killed"]
+    assert [event.stop_reason for event in emitted(events, "turn_completed", sid)] == ["completed"]
+    check_pairs(provider.requests)
+    await check_log(store, sid)
+    await check_log(store, ref.task_id)
+
+
 async def test_derived_permissions_at_depth(store: Store) -> None:
     probed: list[str] = []
     written: list[str] = []

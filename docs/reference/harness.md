@@ -92,6 +92,13 @@ Raises `SessionNotFound`, `SessionBusy`, or `TantraError` when there is no incom
 
 `before_turn` hooks do **not** fire on resume; `before_sample` does.
 
+
+## `async send_user_message(root_session_id: str, message: str) -> str`
+
+Persists a host/user `AgentMessageQueued` for an incomplete root turn and returns its UUID message ID. It does not acquire the turn lease, so another harness instance can steer a busy root. Accepted text is stored unchanged.
+
+Raises `SessionNotFound` for an unknown session and `TantraError` for a child session, a root with no incomplete turn, blank text, or text longer than 32,768 characters. The append uses optimistic revalidation: if terminal completion wins the sequence race, the message is rejected rather than landing after the turn.
+
 ## `async cancel(sid: str, *, recursive: bool = False) -> bool`
 
 Appends `CancelRequested` for the running turn and returns `True`. Returns `False` when there is no incomplete turn. With `recursive=True`, every descendant session is flagged deepest-first before the target, and the return is `True` when at least one of them had a turn to cancel. Raises `SessionNotFound`.

@@ -18,12 +18,15 @@ from tantra.compaction import (
 from tantra.context import TurnContext, assemble_messages, build_messages, compaction_window
 from tantra.errors import ProviderError
 from tantra.events import (
+    AgentMessageQueued,
     AskRaised,
+    ChildSessionSpawned,
     CompactionApplied,
     SampleCompleted,
     SampleStarted,
     SessionCreated,
     SessionEvent,
+    TaskNoticeQueued,
     TextPart,
     ToolCallCompleted,
     ToolCallRequested,
@@ -781,3 +784,145 @@ async def test_a_compacted_turn_resumes_from_a_fresh_harness_over_the_summary() 
     assert len([event for event in replayed if isinstance(event, CompactionApplied)]) == 1
     assert any(isinstance(event, TextPart) and event.text == "x" * 500_000 for event in replayed)
     assert len([event for event in replayed if isinstance(event, TurnStarted)]) == 2
+
+
+def test_pending_inbox_prevents_a_compaction_floor_from_dropping_it() -> None:
+    queued = AgentMessageQueued(
+        message_id="m1",
+        sender_session_id=None,
+        source="user",
+        text="keep this pending",
+    )
+    events: list[SessionEvent] = [
+        TurnStarted(turn_id="t1", input="go"),
+        queued,
+        CompactionApplied(
+            strategy=STRATEGY,
+            tokens_before=100,
+            tokens_after=10,
+            summary=BRIEF,
+            floor_turn_id="missing",
+        ),
+    ]
+
+    summary, window = compaction_window(events)
+
+    assert summary == BRIEF
+    assert window[0] is queued
+    assert queued in window
+
+
+def test_a_later_sample_releases_the_pending_inbox_compaction_floor() -> None:
+    queued = AgentMessageQueued(
+        message_id="m1",
+        sender_session_id=None,
+        source="user",
+        text="already delivered",
+    )
+    applied = CompactionApplied(
+        strategy=STRATEGY,
+        tokens_before=100,
+        tokens_after=10,
+        summary=BRIEF,
+        floor_turn_id="missing",
+    )
+    started = SampleStarted(turn_id="t1", sample_id="s1", model=MODEL)
+
+    _, window = compaction_window([TurnStarted(turn_id="t1", input="go"), queued, applied, started])
+
+    assert window == [started]
+
+
+def test_first_sequence_wins_before_compaction_floor_and_a_later_duplicate_stays_dropped() -> None:
+    first = AgentMessageQueued(
+        message_id="m1",
+        sender_session_id=None,
+        source="user",
+        text="first",
+    )
+    duplicate = first.model_copy(update={"text": "duplicate"})
+    events: list[SessionEvent] = [
+        TurnStarted(turn_id="t1", input="one"),
+        first,
+        SampleStarted(turn_id="t1", sample_id="s1", model=MODEL),
+        SampleCompleted(sample_id="s1"),
+        TurnStarted(turn_id="t2", input="two"),
+        CompactionApplied(
+            strategy=STRATEGY,
+            tokens_before=100,
+            tokens_after=10,
+            summary=BRIEF,
+            floor_turn_id="t2",
+        ),
+        duplicate,
+    ]
+
+    _, window = compaction_window(events)
+
+    assert first not in window
+    assert duplicate not in window
+    assert not [message for message in build_messages(events) if "message id=m1" in getattr(message, "content", "")]
+
+
+def test_token_estimate_includes_only_the_first_pending_message_envelope() -> None:
+    baseline: list[SessionEvent] = [
+        TurnStarted(turn_id="t1", input="go"),
+        SampleCompleted(sample_id="s1", usage=Usage(input_tokens=10_000)),
+    ]
+    first = AgentMessageQueued(
+        message_id="m1",
+        sender_session_id=None,
+        source="user",
+        text="x" * 4_000,
+    )
+    duplicate = first.model_copy(update={"text": "y" * 20_000})
+
+    without = estimate_tokens(baseline)
+    with_first = estimate_tokens([*baseline, first])
+    with_duplicate = estimate_tokens([*baseline, first, duplicate])
+
+    assert without == 10_000
+    assert with_first > without
+    assert with_duplicate == with_first
+
+
+def test_task_notice_keeps_agent_lookup_from_before_the_compaction_floor() -> None:
+    notice = TaskNoticeQueued(
+        notice_id="child:8",
+        task_session_id="child",
+        state="completed",
+        terminal_seq=8,
+    )
+    events: list[SessionEvent] = [
+        ChildSessionSpawned(call_id="spawn", child_session_id="child", agent="researcher"),
+        TurnStarted(turn_id="t1", input="one"),
+        CompactionApplied(
+            strategy=STRATEGY,
+            tokens_before=100,
+            tokens_after=10,
+            summary=BRIEF,
+            floor_turn_id="missing",
+        ),
+        notice,
+    ]
+
+    messages = build_messages(events)
+
+    assert messages[-1].content == "[task notice id=child:8 task_id=child agent=researcher state=completed]"
+
+
+def test_token_estimate_counts_a_message_that_arrived_during_the_reported_sample() -> None:
+    first = AgentMessageQueued(
+        message_id="m1",
+        sender_session_id=None,
+        source="user",
+        text="x" * 4_000,
+    )
+    events: list[SessionEvent] = [
+        TurnStarted(turn_id="t1", input="go"),
+        SampleStarted(turn_id="t1", sample_id="s1", model=MODEL),
+        first,
+        SampleCompleted(sample_id="s1", usage=Usage(input_tokens=10_000)),
+    ]
+
+    assert estimate_tokens(events) > 10_000

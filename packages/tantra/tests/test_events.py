@@ -1,7 +1,11 @@
 from typing import get_args
 
+import pytest
+from pydantic import ValidationError
+
 from tantra.events import (
     SESSION_EVENT_ADAPTER,
+    AgentMessageQueued,
     SessionEvent,
     SessionHeader,
     Stamped,
@@ -25,6 +29,9 @@ PERSISTED = {
     "SampleCompleted",
     "CompactionApplied",
     "CancelRequested",
+    "AgentMessageQueued",
+    "TaskNoticeQueued",
+    "KillRequested",
     "TurnCompleted",
     "TurnFailed",
 }
@@ -67,3 +74,39 @@ def test_header_defaults() -> None:
     assert header.metadata == {}
     assert header.usage.input_tokens == 0
     assert header.created_at.tzinfo is not None
+
+
+def test_agent_message_source_and_sender_must_match() -> None:
+    assert (
+        AgentMessageQueued(
+            message_id="m1",
+            sender_session_id=None,
+            source="user",
+            text="hello",
+        ).source
+        == "user"
+    )
+    assert (
+        AgentMessageQueued(
+            message_id="m2",
+            sender_session_id="parent-1",
+            source="parent",
+            text="hello",
+        ).sender_session_id
+        == "parent-1"
+    )
+
+    with pytest.raises(ValidationError, match="sender_session_id"):
+        AgentMessageQueued(
+            message_id="m3",
+            sender_session_id="root-1",
+            source="user",
+            text="hello",
+        )
+    with pytest.raises(ValidationError, match="sender_session_id"):
+        AgentMessageQueued(
+            message_id="m4",
+            sender_session_id=None,
+            source="child",
+            text="hello",
+        )

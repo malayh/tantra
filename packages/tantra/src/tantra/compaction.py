@@ -5,12 +5,22 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from tantra.context import TurnContext, _as_content, assemble_messages, compaction_window
+from tantra.context import (
+    TurnContext,
+    _as_content,
+    _deduplicate_inbox,
+    assemble_messages,
+    compaction_window,
+    inbox_content,
+    pending_inbox,
+)
 from tantra.errors import ProviderError
 from tantra.events import (
+    AgentMessageQueued,
     CompactionApplied,
     SampleCompleted,
     SessionEvent,
+    TaskNoticeQueued,
     ToolCallCompleted,
     ToolCallRequested,
     TurnStarted,
@@ -76,29 +86,32 @@ def _reported(usage: Usage) -> int:
 
 
 def estimate_tokens(events: Sequence[SessionEvent], summary: str = "") -> int:
+    deduplicated = _deduplicate_inbox(events)
     base = 0
     base_index = -1
-    for index, event in enumerate(events):
+    for index, event in enumerate(deduplicated):
         if isinstance(event, SampleCompleted):
             base, base_index = _reported(event.usage), index
         elif isinstance(event, CompactionApplied):
             base, base_index = 0, -1
     if base_index < 0:
-        return _rough(events, summary)
+        return _rough(deduplicated, summary)
     counted = {
         event.call_id: len(_as_content(event.result))
-        for event in events[:base_index]
+        for event in deduplicated[:base_index]
         if isinstance(event, ToolCallCompleted)
     }
-    added = 0
-    for event in events[base_index + 1 :]:
+    added = sum(len(inbox_content(event, deduplicated)) for event in pending_inbox(deduplicated[: base_index + 1]))
+    for event in deduplicated[base_index + 1 :]:
         if isinstance(event, TurnStarted):
             added += len(event.input)
+        elif isinstance(event, AgentMessageQueued | TaskNoticeQueued):
+            added += len(inbox_content(event, deduplicated))
         elif isinstance(event, ToolCallCompleted):
             content = _as_content(event.result)
             added += len(content) - counted.get(event.call_id, 0)
             counted[event.call_id] = len(content)
-    return max(base + added // 4, _rough(events, summary))
+    return max(base + added // 4, _rough(deduplicated, summary))
 
 
 def _stub(name: str, content: str) -> str:

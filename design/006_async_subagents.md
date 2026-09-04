@@ -200,13 +200,14 @@ P0 durable live inbox
 - This phase ships standalone as durable host/user steering of an active root at safe boundaries; no async child API exists yet.
 - **Verify:** gated-provider tests append a root message from a fresh harness during a sample and during a tool; the first skips all sampled calls, the second lets the active call finish and skips the remainder; one ordered message appears after process replay; unknown foreign events still raise `SeqConflict`; all store conformance suites parse and retain the new events.
 - Checklist:
-  - [ ] Existing contract freeze updated before event code
-  - [ ] Event schemas, parser union, exports, and exact-union tests
-  - [ ] Root-only public message ingress and validation
-  - [ ] Conflict absorption, live acknowledgement, and deduplication
-  - [ ] Context rendering, compaction guard, and stale-call synthesis
+  - [x] Existing contract freeze updated before event code
+  - [x] Event schemas, parser union, exports, and exact-union tests
+  - [x] Root-only public message ingress and validation
+  - [x] Conflict absorption, live acknowledgement, and deduplication
+  - [x] Context rendering, compaction guard, and stale-call synthesis
   - [ ] Cross-harness and all-store tests
   - [ ] `just lint` + `just test`
+- **Follow-up:** PostgreSQL conformance remains pending because Docker/PostgreSQL is unavailable in this environment.
 
 ### Phase 1 — attached async task lifecycle · deps: P0 · —
 - Add `TaskRef`, `Harness.max_concurrency`, and the root-scoped supervisor; change generated delegates and `Context.spawn`; remove `fan_out` and migrate all core, Agni, and Sarathi agent callers.

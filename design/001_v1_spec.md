@@ -60,6 +60,10 @@
 - **Child asks bubble.** A sub-agent's `ctx.ask` (or `ask` permission) suspends the child durably and forwards `AskRaised` onto the parent's live stream; the whole ancestry suspends. The answer targets the child session; bare `resume(root)` re-drives the chain. Rejected ask→deny in children (Grok Build style) — it silently changes what the one HITL primitive means at depth≥1.
 - **The loop owns provider retry.** Transient failures (429, 5xx, timeout) retry with capped exponential backoff — `RetryConfig` on `Harness`, default 3 attempts — then `TurnFailed`. A partial stream is discarded, never persisted. Hand-rolled backoff, not tenacity: one call site, and the discard-partial-sample semantics don't fit a generic decorator; not worth a dependency.
 - **Events carry a version int**; readers tolerate unknown fields. The log outlives the code that wrote it.
+- **Control events may be appended without the turn lease.** `AgentMessageQueued`, `TaskNoticeQueued`, and
+  `KillRequested` join `CancelRequested` as legal externally appended records because live host steering and
+  cross-session task control must persist while the owning loop is busy. The loop absorbs only these control
+  events across an optimistic sequence conflict; any other foreign event still raises `SeqConflict`.
 - **`TurnStarted.input` is `str`.** Multimodal input is out of v1.
 - **Memory rows carry `metadata: dict`** exactly like sessions — recall filters on it, tantra enforces nothing. Without it a multi-tenant app leaks memories across tenants with no way to filter.
 - **Unattended guardrails are `before_tool` hooks, not declarative arg rules.** No-HITL runs use `allow`/`deny` rulesets plus a hook that denies or transforms calls by args; `deny` is an `is_error` result the model adapts to, never a suspend. Declarative arg-level rules stay parked in Open Decisions. Demonstrated in `apps/agni` (P10).
@@ -123,8 +127,23 @@ Two streams, deliberately different.
 | `SampleCompleted` | `sample_id`, `usage`, `finish_reason` |
 | `CompactionApplied` | `strategy`, `tokens_before`, `tokens_after`, `summary`, `floor_turn_id` *(added in P7: the append-only log puts this event after the tail it protects, so it must name the oldest kept turn)* |
 | `CancelRequested` | `turn_id` |
+| `AgentMessageQueued` | `message_id`, `sender_session_id`, `source` (`user\|parent\|child`), `text` |
+| `TaskNoticeQueued` | `notice_id`, `task_session_id`, `state` (`completed\|failed\|killed`), `terminal_seq` |
+| `KillRequested` | `request_id`, `requested_by_session_id` |
 | `TurnCompleted` | `turn_id`, `stop_reason`, `output` |
 | `TurnFailed` | `turn_id`, `error` |
+
+`AgentMessageQueued` requires `sender_session_id=None` exactly when `source="user"`; parent and child sources name
+ their sending session. Host message IDs are UUIDs, agent-originated message IDs derive from the initiating tool
+ `call_id`, notice IDs derive from `task_session_id + terminal_seq`, and kill request IDs derive from the initiating
+ kill tool call. Replay can append duplicate envelopes after a cross-session crash, so the earliest sequence for each
+ message or notice ID wins across the full log. Distinct inbox items retain sequence order.
+
+An inbox item is pending until a later `SampleStarted` exists in the same session. Pending messages and notices enter
+ the next provider request as one ordered batch. If one arrives during a provider request or tool batch, the current
+ provider request and already-running tool finish; every not-yet-started call in that sample receives an error result,
+ then the control batch is rendered after the completed sample/tool exchange and before the next `SampleStarted`.
+Compaction cannot move its effective floor past an inbox item before that first delivery sample.
 
 **Emitted only (never persisted):** `TextDelta`, `ReasoningDelta`, `ToolArgsDelta`.
 
@@ -301,6 +320,10 @@ Things that will surprise an implementer. Each is load-bearing.
 
 - **The loop advances only while someone consumes the iterator.** `run()`/`resume()` are generators; a WS client that drops mid-turn pauses the turn at the last persisted event — durable and resumable, but nothing re-drives it by itself. Detection: lease expired with the turn incomplete. Re-entry: `resume(sid)` with no `ask_id`. Server adapters must own this sweep; the library will not.
 - **Cancel is a persisted flag, not `task.cancel()`.** The loop may be running in another process. `cancel()` appends `CancelRequested`; the loop checks the store at sample and tool-call boundaries. An in-flight tool in *your* process also gets an asyncio cancellation, but that is an optimization, not the mechanism. Cancelling a *suspended* turn takes effect at the next `resume`, which appends `TurnCompleted(stop_reason="cancelled")` without sampling.
+- **Externally appended control events are the only legal second-writer records.** The active loop refreshes at safe
+  boundaries and emits each newly absorbed stored envelope once with its original sequence. Message and notice IDs
+  deduplicate by their first sequence, but the duplicate envelopes remain in the append-only log. `KillRequested`
+  is parseable and absorbable before force-kill behavior exists; it does not reuse cooperative cancellation.
 - **Nothing may be captured in a Python closure across a suspend.** After `ctx.ask` the process can die. Anything a tool needs post-resume comes from `ctx.deps` (rebuilt per process by `deps_factory`) or from the event log. `deps_factory` must be a factory for exactly this reason — a captured connection pool will not survive a resume on another pod.
 - **`O_APPEND` is not atomic above `PIPE_BUF` (4096 bytes).** A single JSON line longer than that can interleave under concurrent append, which any tool result will exceed. The FS backend does not rely on append atomicity — correctness comes from the **single-writer lease per session**. Fan-out children write to their own logs, so they never contend.
 - **Replaying a parent session does not reproduce the child events you saw live.** Child events persist only to the child's log; forwarding is live-only. A client reconstructing history must fetch child sessions via `list(parent_id=...)`. This asymmetry is deliberate — the alternative doubles every child write.
@@ -331,7 +354,7 @@ Where the graph lies: **P5, P6 and P7 all edit context assembly** (`context.py:b
 - **No comments in code.** Docstrings on public protocols and tools only — a tool's docstring *is* its model-facing description.
 - No network in tests. Every test uses `FakeProvider` or a recorded cassette.
 - Run `just lint` + `just test` before marking a phase done.
-- **Contract freeze after P0/P1:** the `SessionEvent` union, `SessionHeader`, the `Store` protocol, and the `Provider`/`SampleRequest`/`ProviderEvent` types. Changing them means updating this spec first, then telling dependent phases.
+- **Contract freeze after P0/P1:** the `SessionEvent` union, `SessionHeader`, the `Store` protocol, and the `Provider`/`SampleRequest`/`ProviderEvent` types. Async-subagents P0 amends that union with the three externally appended control events and freezes their schemas, ID derivation, ordering, deduplication, and boundary delivery above. Changing them means updating this spec first, then telling dependent phases.
 
 ### Keeping this spec current
 - Update the status marker on the heading and tick the checklist as you go.

@@ -9,7 +9,7 @@ The session log is append-only. Everything the harness knows about a session is 
 
 ## The persisted events
 
-All seventeen are pydantic models carrying `version: int = 1` and a literal `type` discriminator, with `extra="allow"` so a newer writer's fields survive a round trip through an older reader.
+All twenty are pydantic models carrying `version: int = 1` and a literal `type` discriminator, with `extra="allow"` so a newer writer's fields survive a round trip through an older reader.
 
 | Class | `type` | Fields | Meaning |
 |---|---|---|---|
@@ -28,14 +28,26 @@ All seventeen are pydantic models carrying `version: int = 1` and a literal `typ
 | `SampleCompleted` | `sample_completed` | `sample_id`, `usage`, `finish_reason` | The sample finished; `usage` is the provider's report. |
 | `CompactionApplied` | `compaction_applied` | `strategy`, `tokens_before`, `tokens_after`, `summary`, `floor_turn_id` | Context was summarized. See below. |
 | `CancelRequested` | `cancel_requested` | `turn_id` | Someone called `Harness.cancel`. |
+| `AgentMessageQueued` | `agent_message_queued` | `message_id`, `sender_session_id`, `source`, `text` | Durable host or agent input queued for a safe model boundary. |
+| `TaskNoticeQueued` | `task_notice_queued` | `notice_id`, `task_session_id`, `state`, `terminal_seq` | Durable notice that a child task completed, failed, or was killed. |
+| `KillRequested` | `kill_requested` | `request_id`, `requested_by_session_id` | Durable force-kill intent. Phase 0 parses and streams it but does not act on it. |
 | `TurnCompleted` | `turn_completed` | `turn_id`, `stop_reason`, `output` | Terminal. `stop_reason` is `completed`, `output`, `max_steps` or `cancelled`. |
 | `TurnFailed` | `turn_failed` | `turn_id`, `error` | Terminal. The provider failed after its retries, or compaction could not summarize. |
 
 A turn is *incomplete* when the log's last `TurnStarted` is not followed by a `TurnCompleted` or `TurnFailed`. That is what `run` refuses and `resume` picks up.
 
+
+## Inbox and control events
+
+`AgentMessageQueued.source` is `user`, `parent`, or `child`. `sender_session_id` is `None` exactly for `user`; agent-originated messages identify their sender. Host messages use UUID message IDs. Later task phases derive agent message IDs from their tool call and notice IDs from the child session plus terminal sequence.
+
+Message and notice envelopes remain in the log, including crash-replay duplicates. Context assembly keeps the first sequence for each ID and renders distinct items in sequence order. A message renders as `[<source> message id=<message_id>]` followed by its unchanged text. A notice renders task ID, agent, and terminal state; missing `ChildSessionSpawned` metadata produces `agent=unknown`.
+
+An item remains pending until a later `SampleStarted`. Compaction cannot move the effective floor past a pending item. Control events absorbed from a blind append are emitted once by the active loop with their stored sequence; only `AgentMessageQueued`, `TaskNoticeQueued`, `KillRequested`, and `CancelRequested` are legal foreign records.
+
 ## `SessionEvent`
 
-A discriminated union over the seventeen classes, keyed on `type`. Being an `Annotated` union, it is a type — not a class — so `isinstance(event, SessionEvent)` does not work.
+A discriminated union over the twenty classes, keyed on `type`. Being an `Annotated` union, it is a type — not a class — so `isinstance(event, SessionEvent)` does not work.
 
 Two ways to branch:
 

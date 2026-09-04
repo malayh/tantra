@@ -10,11 +10,14 @@ from typing import Any
 
 from tantra.errors import SeqConflict, SessionExists, SessionNotFound
 from tantra.events import (
+    AgentMessageQueued,
+    KillRequested,
     SampleCompleted,
     SampleStarted,
     SessionEvent,
     SessionHeader,
     Stamped,
+    TaskNoticeQueued,
     TextPart,
     ToolCallCompleted,
     ToolCallRequested,
@@ -56,6 +59,7 @@ async def store_conformance(store_factory: StoreFactory) -> None:
     await _check_append_and_read(store_factory)
     await _check_stale_expect_seq(store_factory)
     await _check_blind_append(store_factory)
+    await _check_control_event_retention(store_factory)
     await _check_put_header(store_factory)
     await _check_patch_header(store_factory)
     await _check_unknown_session(store_factory)
@@ -208,6 +212,30 @@ async def _check_blind_append(factory: StoreFactory) -> None:
     loaded = await factory().header(header.id)
     assert loaded is not None
     assert loaded.last_seq == 2
+
+
+async def _check_control_event_retention(factory: StoreFactory) -> None:
+    store = factory()
+    header = _header()
+    await store.create(header)
+    events: list[SessionEvent] = [
+        AgentMessageQueued(
+            message_id="message-1",
+            sender_session_id=None,
+            source="user",
+            text=" preserve me ",
+        ),
+        TaskNoticeQueued(
+            notice_id="task-1:9",
+            task_session_id="task-1",
+            state="completed",
+            terminal_seq=9,
+        ),
+        KillRequested(request_id="kill-1", requested_by_session_id="parent-1"),
+    ]
+
+    assert await store.append(header.id, events, expect_seq=0) == len(events)
+    assert [item.event for item in await _drain(factory(), header.id)] == events
 
 
 async def _check_put_header(factory: StoreFactory) -> None:

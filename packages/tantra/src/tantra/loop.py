@@ -12,19 +12,22 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from tantra.agent import Agent
 from tantra.ask import Approval, ApprovalResponse, AskRequest, AskResponse
-from tantra.context import TurnContext, build_sample_request, resolve_prompt
+from tantra.context import TurnContext, build_sample_request, pending_inbox, resolve_prompt
 from tantra.errors import ProviderError, SeqConflict, SessionBusy, TantraError
 from tantra.events import (
+    AgentMessageQueued,
     AskAnswered,
     AskRaised,
     CancelRequested,
     ChildSessionSpawned,
     CompactionApplied,
+    KillRequested,
     ReasoningPart,
     SampleCompleted,
     SampleStarted,
     SessionEvent,
     SessionHeader,
+    TaskNoticeQueued,
     TextPart,
     ToolCallCompleted,
     ToolCallRequested,
@@ -59,6 +62,8 @@ SUBMIT_OUTPUT = "submit_output"
 
 CANCELLED_RESULT = "not executed: turn cancelled"
 COMPLETED_RESULT = "not executed: turn completed"
+INBOX_RESULT = "skipped: newer agent message"
+CONTROL_EVENTS = (CancelRequested, AgentMessageQueued, TaskNoticeQueued, KillRequested)
 
 
 class Emitted(BaseModel):
@@ -249,33 +254,54 @@ class TurnLoop:
         if agent.output_schema is not None:
             self.schemas = [*self.schemas, submit_output_schema(agent.output_schema)]
 
-    async def _absorb(self) -> list[SessionEvent]:
-        absorbed: list[SessionEvent] = []
-        async for stamped in self.store.read(self.header.id, from_seq=self.header.last_seq):
-            self.header.last_seq = stamped.seq
-            self.history.append(stamped.event)
-            self.state.observe(stamped.event)
-            absorbed.append(stamped.event)
+    async def _refresh(self) -> list[Emitted]:
+        stamped = [item async for item in self.store.read(self.header.id, from_seq=self.header.last_seq)]
+        if any(not isinstance(item.event, CONTROL_EVENTS) for item in stamped):
+            foreign = next(item.event for item in stamped if not isinstance(item.event, CONTROL_EVENTS))
+            raise SeqConflict(f"session {self.header.id}: cannot absorb foreign {foreign.type!r} event")
+        absorbed: list[Emitted] = []
+        for item in stamped:
+            self.header.last_seq = item.seq
+            self.history.append(item.event)
+            self.state.observe(item.event)
+            absorbed.append(Emitted(session_id=self.header.id, depth=self.header.depth, seq=item.seq, event=item.event))
         return absorbed
 
-    async def _append(self, events: Sequence[SessionEvent]) -> list[Emitted]:
+    async def _write(
+        self,
+        events: Sequence[SessionEvent],
+        *,
+        abort_on_inbox: bool = False,
+        abort_on_cancel: bool = False,
+    ) -> tuple[list[Emitted], bool]:
+        absorbed: list[Emitted] = []
         while True:
+            if abort_on_inbox and pending_inbox(self.history):
+                return absorbed, False
+            if abort_on_cancel and self.state.cancelled:
+                return absorbed, False
             try:
                 last = await self.store.append(self.header.id, events, expect_seq=self.header.last_seq)
                 break
             except SeqConflict:
-                absorbed = await self._absorb()
-                if not absorbed or any(not isinstance(event, CancelRequested) for event in absorbed):
+                refreshed = await self._refresh()
+                if not refreshed:
                     raise
+                absorbed.extend(refreshed)
         first = last - len(events) + 1
         self.header.last_seq = last
         self.history.extend(events)
         for event in events:
             self.state.observe(event)
-        return [
+        appended = [
             Emitted(session_id=self.header.id, depth=self.header.depth, seq=first + offset, event=event)
             for offset, event in enumerate(events)
         ]
+        return [*absorbed, *appended], True
+
+    async def _append(self, events: Sequence[SessionEvent]) -> list[Emitted]:
+        emitted, _ = await self._write(events)
+        return emitted
 
     def _stub_span(self, call: ToolCallRequested, result: Any, *, is_error: bool, error_type: str | None) -> None:
         span = self.tracer.start_tool(
@@ -641,8 +667,17 @@ class TurnLoop:
                 return True, result.result
         return False, None
 
-    async def _synthesize(self, reason: str) -> AsyncIterator[Emitted]:
+    async def _synthesize(
+        self,
+        reason: str,
+        *,
+        only_unstarted: bool = False,
+        started: set[str] | None = None,
+    ) -> AsyncIterator[Emitted]:
         pending = self.state.unanswered()
+        if only_unstarted:
+            known_started = self.state.started if started is None else started
+            pending = [call for call in pending if call.call_id not in known_started]
         if not pending:
             return
         events: list[SessionEvent] = []
@@ -664,12 +699,33 @@ class TurnLoop:
         for hook in self.hooks:
             await hook.after_turn(self.turn, failure)
 
-    async def _terminal(self, reason: str, output: Any) -> AsyncIterator[Emitted]:
+    async def _terminal(
+        self,
+        reason: str,
+        output: Any,
+        *,
+        abort_on_inbox: bool = True,
+    ) -> AsyncIterator[Emitted]:
+        for emitted in await self._refresh():
+            yield emitted
+        if reason != "cancelled" and self.state.cancelled:
+            async for emitted in self._cancel():
+                yield emitted
+            return
         event = TurnCompleted(turn_id=self.turn.turn_id, stop_reason=reason, output=output)
-        appended = await self._append([event])
-        self.terminal = event
+        appended, written = await self._write(
+            [event],
+            abort_on_inbox=abort_on_inbox,
+            abort_on_cancel=reason != "cancelled",
+        )
         for emitted in appended:
             yield emitted
+        if not written:
+            if self.state.cancelled:
+                async for emitted in self._cancel():
+                    yield emitted
+            return
+        self.terminal = event
         for hook in self.hooks:
             await hook.after_turn(self.turn, event)
 
@@ -677,7 +733,7 @@ class TurnLoop:
         async with aclosing(self._synthesize(CANCELLED_RESULT)) as orphans:
             async for emitted in orphans:
                 yield emitted
-        async with aclosing(self._terminal("cancelled", None)) as terminal:
+        async with aclosing(self._terminal("cancelled", None, abort_on_inbox=False)) as terminal:
             async for emitted in terminal:
                 yield emitted
 
@@ -686,9 +742,19 @@ class TurnLoop:
         for call in list(self.state.batch):
             if call.call_id in self.state.results:
                 continue
+            started_before = set(self.state.started)
+            replayed = call.call_id in started_before
             if not stopped:
-                await self._absorb()
+                for emitted in await self._refresh():
+                    yield emitted
                 if self.state.cancelled:
+                    return
+                if pending_inbox(self.history) and not replayed:
+                    async with aclosing(
+                        self._synthesize(INBOX_RESULT, only_unstarted=True, started=started_before)
+                    ) as stale:
+                        async for emitted in stale:
+                            yield emitted
                     return
             if stopped:
                 for emitted in await self._completed(call.call_id, COMPLETED_RESULT, is_error=True, call=call):
@@ -698,6 +764,15 @@ class TurnLoop:
                 events, output, stopped = await self._submit(call)
                 for emitted in events:
                     yield emitted
+                for emitted in await self._refresh():
+                    yield emitted
+                if self.state.cancelled:
+                    return
+                if pending_inbox(self.history):
+                    async with aclosing(self._synthesize(INBOX_RESULT, only_unstarted=True)) as stale:
+                        async for emitted in stale:
+                            yield emitted
+                    return
                 if stopped:
                     self.stop = ("output", output)
                 continue
@@ -756,20 +831,48 @@ class TurnLoop:
                     for emitted in await self._completed(call.call_id, "denied by user", is_error=True, call=effective):
                         yield emitted
                     continue
-            replayed = call.call_id in self.state.started
+            for emitted in await self._refresh():
+                yield emitted
+            if self.state.cancelled:
+                return
+            if pending_inbox(self.history) and not replayed:
+                async with aclosing(
+                    self._synthesize(INBOX_RESULT, only_unstarted=True, started=started_before)
+                ) as stale:
+                    async for emitted in stale:
+                        yield emitted
+                return
             if call.call_id not in self.state.started:
                 for emitted in await self._append([ToolCallStarted(call_id=call.call_id)]):
                     yield emitted
+            for emitted in await self._refresh():
+                yield emitted
+            if pending_inbox(self.history) and not replayed:
+                async with aclosing(
+                    self._synthesize(INBOX_RESULT, only_unstarted=True, started=started_before)
+                ) as stale:
+                    async for emitted in stale:
+                        yield emitted
+                return
             self.tool_spans[call.call_id] = self.tracer.start_tool(
                 self.turn_span, call, args=effective.args, tool=tool, replayed=replayed
             )
             async with aclosing(self._execute(tool, call, effective.args)) as execution:
                 async for emitted in execution:
                     yield emitted
-            if self.suspended is not None:
+            for emitted in await self._refresh():
+                yield emitted
+            if self.suspended is not None or self.state.cancelled:
+                return
+            if pending_inbox(self.history):
+                async with aclosing(self._synthesize(INBOX_RESULT, only_unstarted=True)) as stale:
+                    async for emitted in stale:
+                        yield emitted
                 return
 
     async def _after_batch(self, capped: bool) -> AsyncIterator[Emitted]:
+        for emitted in await self._refresh():
+            yield emitted
         if self.suspended is not None or self.failed:
             self.done = True
             return
@@ -778,18 +881,26 @@ class TurnLoop:
             async for emitted in self._cancel():
                 yield emitted
             return
+        if pending_inbox(self.history) and not capped:
+            self.stop = None
         if self.stop is not None:
-            self.done = True
             async for emitted in self._terminal(*self.stop):
                 yield emitted
+            self.done = self.terminal is not None
+            if not self.done:
+                self.stop = None
+            return
+        if pending_inbox(self.history):
             return
         if capped:
-            self.done = True
-            async for emitted in self._terminal("max_steps", None):
+            async for emitted in self._terminal("max_steps", None, abort_on_inbox=False):
                 yield emitted
+            self.done = True
 
     async def _drive(self) -> AsyncIterator[Emitted]:
         state = self.state
+        for emitted in await self._refresh():
+            yield emitted
         if state.cancelled:
             async for emitted in self._cancel():
                 yield emitted
@@ -801,13 +912,17 @@ class TurnLoop:
                 async with aclosing(self._synthesize(COMPLETED_RESULT)) as orphans:
                     async for emitted in orphans:
                         yield emitted
+                for emitted in await self._refresh():
+                    yield emitted
                 if state.cancelled:
                     async for emitted in self._cancel():
                         yield emitted
                     return
-                async for emitted in self._terminal("output", output):
-                    yield emitted
-                return
+                if not pending_inbox(self.history):
+                    async for emitted in self._terminal("output", output):
+                        yield emitted
+                    if self.terminal is not None:
+                        return
             if state.unanswered():
                 capped = state.samples_used >= self.agent.max_steps
                 async with aclosing(self._batch(capped)) as batch:
@@ -822,7 +937,8 @@ class TurnLoop:
             if not await self.store.acquire_lease(self.header.id, self.holder, self.lease_ttl):
                 self.lease_lost = True
                 raise TantraError(f"lease lost: session {self.header.id} is held by another writer")
-            await self._absorb()
+            for emitted in await self._refresh():
+                yield emitted
             if state.cancelled:
                 async for emitted in self._cancel():
                     yield emitted
@@ -857,8 +973,23 @@ class TurnLoop:
                     for emitted in await self._append(compacted):
                         yield emitted
 
+            for emitted in await self._refresh():
+                yield emitted
+            if state.cancelled:
+                async for emitted in self._cancel():
+                    yield emitted
+                return
+
             sample_id = uuid4().hex
             prompt = await resolve_prompt(self.agent.prompt, self.turn)
+            for emitted in await self._append(
+                [SampleStarted(turn_id=self.turn.turn_id, sample_id=sample_id, model=self.model)]
+            ):
+                yield emitted
+            if state.cancelled:
+                async for emitted in self._cancel():
+                    yield emitted
+                return
             req = build_sample_request(
                 model=self.model,
                 prompt=prompt,
@@ -866,10 +997,6 @@ class TurnLoop:
                 tools=self.schemas,
                 skills=self.skills_index,
             )
-            for emitted in await self._append(
-                [SampleStarted(turn_id=self.turn.turn_id, sample_id=sample_id, model=self.model)]
-            ):
-                yield emitted
 
             end: StreamEnd | None = None
             try:
@@ -884,6 +1011,8 @@ class TurnLoop:
                     yield emitted
                 return
 
+            for emitted in await self._refresh():
+                yield emitted
             for emitted in await self._append(self._parts(sample_id, end)):
                 yield emitted
             self.header.usage = accumulate(self.header.usage, end.usage)
@@ -894,9 +1023,13 @@ class TurnLoop:
                     async for emitted in self._cancel():
                         yield emitted
                     return
+                if pending_inbox(self.history):
+                    continue
                 async for emitted in self._terminal("completed", None):
                     yield emitted
-                return
+                if self.terminal is not None:
+                    return
+                continue
 
             capped = state.samples_used >= self.agent.max_steps
             async with aclosing(self._batch(capped)) as batch:
@@ -907,7 +1040,7 @@ class TurnLoop:
             if self.done:
                 return
 
-        async for emitted in self._terminal("max_steps", None):
+        async for emitted in self._terminal("max_steps", None, abort_on_inbox=False):
             yield emitted
 
     async def run(self) -> AsyncIterator[Emitted]:

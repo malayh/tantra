@@ -28,6 +28,13 @@ async for emitted in harness.run(session.id, "how is p99?"):
         print(emitted.event.text, end="", flush=True)
 ```
 
+
+## Live inbox boundaries
+
+The owning loop refreshes its stored suffix at provider completion, before and after each tool, before samples, and before terminal completion. Blind-appended messages, task notices, cancellation, and kill intent are legal control events. Each absorbed envelope keeps its original `seq`, reaches `Hook.on_event` once, and is yielded once; any other foreign event raises `SeqConflict`.
+
+A message or task notice arriving during a provider request waits for that request to finish. A running tool also finishes. Every remaining unstarted call from that sampled batch receives `ToolCallCompleted(is_error=True, result="skipped: newer agent message")`, with a synthetic `ToolCallStarted` where needed, and the loop resamples. Context rendering places the ordered control batch after the completed or synthetically completed assistant/tool exchange and before the next sample. `KillRequested` has no kill behavior in Phase 0.
+
 ## `RetryConfig`
 
 Frozen dataclass. Governs **provider sampling only** — tool failures are never retried; they become error results the model sees.

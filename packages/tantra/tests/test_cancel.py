@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from tantra.adapters.collect import collect
 from tantra.agent import Agent
@@ -49,6 +50,22 @@ class RecordingStore(MemoryStore):
     async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
         if any(isinstance(event, CancelRequested) for event in events):
             self.cancels.append(sid)
+        return await super().append(sid, events, expect_seq=expect_seq)
+
+
+class TerminalCancelStore(MemoryStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.injected = False
+
+    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
+        terminal = next(
+            (event for event in events if isinstance(event, TurnCompleted) and event.stop_reason != "cancelled"),
+            None,
+        )
+        if terminal is not None and not self.injected:
+            self.injected = True
+            await super().append(sid, [CancelRequested(turn_id=terminal.turn_id)], expect_seq=None)
         return await super().append(sid, events, expect_seq=expect_seq)
 
 
@@ -441,3 +458,66 @@ async def test_a_cancel_recorded_after_turn_completed_does_not_poison_the_next_t
 
     assert picks(second, TurnCompleted)[0].stop_reason == "completed"
     assert [event.text for event in picks(second, TextPart)] == ["second answer"]
+
+
+async def test_cancel_conflicting_with_terminal_append_replaces_original_outcome() -> None:
+    store = TerminalCancelStore()
+    harness = Harness(
+        FakeProvider([Sample(text="answer")]),
+        store,
+        [Worker],
+        default_model="fake/model",
+    )
+    sid = (await harness.create_session(Worker)).id
+
+    events = await collect(harness.run(sid, "go"))
+
+    assert store.injected
+    assert len(picks(events, CancelRequested)) == 1
+    terminal = picks(events, TurnCompleted)
+    assert len(terminal) == 1
+    assert terminal[0].stop_reason == "cancelled"
+    assert terminal[0].output is None
+    durable = [event for event in await history(store, sid) if isinstance(event, TurnCompleted)]
+    assert len(durable) == 1
+    assert durable[0].stop_reason == "cancelled"
+
+
+async def test_cancel_absorbed_after_submit_output_keeps_cancellation_precedence() -> None:
+    class Result(BaseModel):
+        value: str
+
+    class Structured(Agent):
+        output_schema = Result
+
+    watcher: Harness
+
+    class Canceller(Hook):
+        def __init__(self) -> None:
+            self.sent = False
+
+        async def on_event(self, emitted: Emitted) -> None:
+            if self.sent or not isinstance(emitted.event, ToolCallCompleted):
+                return
+            self.sent = True
+            assert await watcher.cancel(emitted.session_id)
+
+    store = MemoryStore()
+    harness = Harness(
+        FakeProvider([Sample(tool_calls=[call("submit_output", '{"value":"done"}')])]),
+        store,
+        [Structured],
+        default_model="fake/model",
+        hooks=[Canceller()],
+    )
+    watcher = Harness(FakeProvider([]), store, [Structured], default_model="fake/model")
+    sid = (await harness.create_session(Structured)).id
+
+    events = await collect(harness.run(sid, "go"))
+
+    submitted = picks(events, ToolCallCompleted)[0]
+    assert not submitted.is_error
+    terminal = picks(events, TurnCompleted)[0]
+    assert terminal.stop_reason == "cancelled"
+    assert terminal.output is None
+    assert len(picks(events, SampleStarted)) == 1

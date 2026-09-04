@@ -11,15 +11,18 @@ from tantra.ask import ApprovalResponse, AskResponse
 from tantra.context import TurnContext, resolve_model
 from tantra.errors import SeqConflict, SessionBusy, SessionNotFound, TantraError, TurnIncomplete
 from tantra.events import (
+    AgentMessageQueued,
     AskAnswered,
     AskRaised,
     CancelRequested,
     ChildSessionSpawned,
+    KillRequested,
     SampleStarted,
     SessionCreated,
     SessionEvent,
     SessionHeader,
     Stamped,
+    TaskNoticeQueued,
     TextPart,
     TurnCompleted,
     TurnFailed,
@@ -39,6 +42,8 @@ if TYPE_CHECKING:
     from tantra.memory import Memory
 
 TYPED_KEYS = frozenset({"type", "anyOf", "allOf", "oneOf", "$ref", "enum", "const"})
+MAX_MESSAGE_CHARS = 32_768
+CONTROL_EVENTS = (CancelRequested, AgentMessageQueued, TaskNoticeQueued, KillRequested)
 
 
 def _check_schema(label: str, entry: Tool) -> None:
@@ -436,11 +441,9 @@ class Harness:
                         f"ask {ask_id!r} is a permission request and needs an ApprovalResponse, got {response!r}"
                     )
                 answered = AskAnswered(ask_id=ask_id, response=response)
-                header.last_seq = await self._append_absorbing(header, history, answered)
-                history.append(answered)
-                emitted = Emitted(session_id=sid, depth=header.depth, seq=header.last_seq, event=answered)
-                await self._notify(emitted)
-                yield emitted
+                for emitted in await self._append_absorbing(header, history, answered):
+                    await self._notify(emitted)
+                    yield emitted
 
             await self.store.patch_header(sid, status="running")
 
@@ -478,18 +481,58 @@ class Harness:
             if traced:
                 self._end_turn(span, loop, raised)
 
-    async def _append_absorbing(self, header: SessionHeader, history: list[SessionEvent], event: SessionEvent) -> int:
+    async def _append_absorbing(
+        self,
+        header: SessionHeader,
+        history: list[SessionEvent],
+        event: SessionEvent,
+    ) -> list[Emitted]:
+        absorbed: list[Emitted] = []
         while True:
             try:
-                return await self.store.append(header.id, [event], expect_seq=header.last_seq)
+                last = await self.store.append(header.id, [event], expect_seq=header.last_seq)
+                break
             except SeqConflict:
-                absorbed: list[SessionEvent] = []
-                async for stamped in self.store.read(header.id, from_seq=header.last_seq):
-                    header.last_seq = stamped.seq
-                    history.append(stamped.event)
-                    absorbed.append(stamped.event)
-                if not absorbed or any(not isinstance(item, CancelRequested) for item in absorbed):
+                stamped = [item async for item in self.store.read(header.id, from_seq=header.last_seq)]
+                if not stamped or any(not isinstance(item.event, CONTROL_EVENTS) for item in stamped):
                     raise
+                for item in stamped:
+                    header.last_seq = item.seq
+                    history.append(item.event)
+                    absorbed.append(Emitted(session_id=header.id, depth=header.depth, seq=item.seq, event=item.event))
+        header.last_seq = last
+        history.append(event)
+        return [*absorbed, Emitted(session_id=header.id, depth=header.depth, seq=last, event=event)]
+
+    async def send_user_message(self, root_session_id: str, message: str) -> str:
+        header = await self.store.header(root_session_id)
+        if header is None:
+            raise SessionNotFound(root_session_id)
+        if header.parent_id is not None:
+            raise TantraError(f"session {root_session_id} is a child session; user messages target roots only")
+        if not message.strip():
+            raise TantraError("user message must not be blank")
+        if len(message) > MAX_MESSAGE_CHARS:
+            raise TantraError(f"user message exceeds {MAX_MESSAGE_CHARS} characters")
+
+        message_id = uuid4().hex
+        queued = AgentMessageQueued(
+            message_id=message_id,
+            sender_session_id=None,
+            source="user",
+            text=message,
+        )
+        while True:
+            stamped = [item async for item in self.store.read(root_session_id)]
+            history = [item.event for item in stamped]
+            if not _turn_incomplete(history):
+                raise TantraError(f"session {root_session_id} has no incomplete turn to receive a user message")
+            expect_seq = stamped[-1].seq if stamped else 0
+            try:
+                await self.store.append(root_session_id, [queued], expect_seq=expect_seq)
+                return message_id
+            except SeqConflict:
+                continue
 
     async def _cancel_one(self, sid: str) -> bool:
         history = [stamped.event async for stamped in self.store.read(sid)]

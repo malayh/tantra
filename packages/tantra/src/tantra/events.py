@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from tantra.ask import AskRequest, AskResponse
 
@@ -136,6 +136,34 @@ class CancelRequested(EventBase):
     turn_id: str
 
 
+class AgentMessageQueued(EventBase):
+    type: Literal["agent_message_queued"] = "agent_message_queued"
+    message_id: str
+    sender_session_id: str | None
+    source: Literal["user", "parent", "child"]
+    text: str
+
+    @model_validator(mode="after")
+    def validate_sender(self) -> Self:
+        if (self.source == "user") != (self.sender_session_id is None):
+            raise ValueError('sender_session_id must be None exactly when source is "user"')
+        return self
+
+
+class TaskNoticeQueued(EventBase):
+    type: Literal["task_notice_queued"] = "task_notice_queued"
+    notice_id: str
+    task_session_id: str
+    state: Literal["completed", "failed", "killed"]
+    terminal_seq: int
+
+
+class KillRequested(EventBase):
+    type: Literal["kill_requested"] = "kill_requested"
+    request_id: str
+    requested_by_session_id: str
+
+
 class TurnCompleted(EventBase):
     type: Literal["turn_completed"] = "turn_completed"
     turn_id: str
@@ -165,6 +193,9 @@ SessionEvent = Annotated[
     | SampleCompleted
     | CompactionApplied
     | CancelRequested
+    | AgentMessageQueued
+    | TaskNoticeQueued
+    | KillRequested
     | TurnCompleted
     | TurnFailed,
     Field(discriminator="type"),

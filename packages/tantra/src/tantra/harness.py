@@ -5,12 +5,19 @@ import inspect
 from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from contextlib import aclosing
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from tantra.agent import Agent, agent_name, build_name_table
 from tantra.ask import ApprovalResponse, AskResponse
 from tantra.context import TurnContext, resolve_model
-from tantra.errors import SeqConflict, SessionBusy, SessionNotFound, TantraError, TurnIncomplete
+from tantra.errors import (
+    SeqConflict,
+    SessionBusy,
+    SessionNotFound,
+    TantraError,
+    TurnIncomplete,
+    TurnNotAcceptingMessages,
+)
 from tantra.events import (
     AgentMessageQueued,
     AskAnswered,
@@ -49,6 +56,16 @@ if TYPE_CHECKING:
 TYPED_KEYS = frozenset({"type", "anyOf", "allOf", "oneOf", "$ref", "enum", "const"})
 MAX_MESSAGE_CHARS = 32_768
 CONTROL_EVENTS = (CancelRequested, AgentMessageQueued, TaskNoticeQueued, KillRequested)
+
+
+def _uuid_hex(value: str | None, label: str) -> str:
+    if value is None:
+        return uuid4().hex
+    try:
+        parsed = UUID(value).hex
+    except (AttributeError, ValueError):
+        raise TantraError(f"{label} must be a valid UUID") from None
+    return parsed
 
 
 def _check_schema(label: str, entry: Tool) -> None:
@@ -133,6 +150,13 @@ def _turn_incomplete(events: Sequence[SessionEvent]) -> bool:
 
 def _last_turn(events: Sequence[SessionEvent]) -> TurnStarted:
     return next(event for event in reversed(events) if isinstance(event, TurnStarted))
+
+
+def _turn_accepts_messages(events: Sequence[SessionEvent]) -> bool:
+    if not _turn_incomplete(events):
+        return False
+    turn_id = _last_turn(events).turn_id
+    return not any(isinstance(event, CancelRequested) and event.turn_id == turn_id for event in events)
 
 
 def _turn_slice(stamped: Sequence[Stamped]) -> list[Stamped]:
@@ -417,11 +441,13 @@ class Harness:
             await hook.after_turn(turn, terminal)
         return terminal, visible
 
-    async def run(self, sid: str, input: str) -> AsyncIterator[Emitted]:
+    async def run(self, sid: str, input: str, *, turn_id: str | None = None) -> AsyncIterator[Emitted]:
+        resolved_turn_id = _uuid_hex(turn_id, "turn_id")
         supervisor = TaskSupervisor(self, sid)
         await supervisor.start()
         try:
-            async with aclosing(supervisor.merge(self._run_one(sid, input, supervisor, current_span.get()))) as stream:
+            source = self._run_one(sid, input, supervisor, current_span.get(), turn_id=resolved_turn_id)
+            async with aclosing(supervisor.merge(source)) as stream:
                 async for emitted in stream:
                     yield emitted
         finally:
@@ -433,7 +459,10 @@ class Harness:
         input: str,
         supervisor: TaskSupervisor,
         trace_parent: Any,
+        *,
+        turn_id: str | None = None,
     ) -> AsyncIterator[Emitted]:
+        turn_id = turn_id or uuid4().hex
         header = await self.store.header(sid)
         if header is None:
             raise SessionNotFound(sid)
@@ -451,6 +480,14 @@ class Harness:
             history = [stamped.event async for stamped in self.store.read(sid)]
             if any(isinstance(event, KillRequested) for event in history):
                 return
+            existing = next(
+                (event for event in history if isinstance(event, TurnStarted) and event.turn_id == turn_id), None
+            )
+            if existing is not None:
+                if existing.input != input:
+                    raise TantraError(f"turn_id {turn_id!r} already exists with different input")
+                return
+
             if _turn_incomplete(history):
                 raise TurnIncomplete(sid)
 
@@ -464,7 +501,7 @@ class Harness:
 
             turn = TurnContext(
                 session_id=sid,
-                turn_id=uuid4().hex,
+                turn_id=turn_id,
                 agent=header.agent,
                 depth=header.depth,
                 input=input,
@@ -662,7 +699,7 @@ class Harness:
         history.append(event)
         return [*absorbed, Emitted(session_id=header.id, depth=header.depth, seq=last, event=event)]
 
-    async def send_user_message(self, root_session_id: str, message: str) -> str:
+    async def send_user_message(self, root_session_id: str, message: str, *, message_id: str | None = None) -> str:
         header = await self.store.header(root_session_id)
         if header is None:
             raise SessionNotFound(root_session_id)
@@ -673,7 +710,7 @@ class Harness:
         if len(message) > MAX_MESSAGE_CHARS:
             raise TantraError(f"user message exceeds {MAX_MESSAGE_CHARS} characters")
 
-        message_id = uuid4().hex
+        message_id = _uuid_hex(message_id, "message_id")
         queued = AgentMessageQueued(
             message_id=message_id,
             sender_session_id=None,
@@ -683,8 +720,20 @@ class Harness:
         while True:
             stamped = [item async for item in self.store.read(root_session_id)]
             history = [item.event for item in stamped]
-            if not _turn_incomplete(history):
-                raise TantraError(f"session {root_session_id} has no incomplete turn to receive a user message")
+            existing = next(
+                (
+                    event
+                    for event in history
+                    if isinstance(event, AgentMessageQueued) and event.message_id == message_id
+                ),
+                None,
+            )
+            if existing is not None:
+                if existing.sender_session_id is not None or existing.source != "user" or existing.text != message:
+                    raise TantraError(f"message_id {message_id!r} already exists with different text")
+                return message_id
+            if not _turn_accepts_messages(history):
+                raise TurnNotAcceptingMessages(root_session_id)
             expect_seq = stamped[-1].seq if stamped else 0
             try:
                 await self.store.append(root_session_id, [queued], expect_seq=expect_seq)

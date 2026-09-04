@@ -22,6 +22,12 @@ class SessionBusy(TantraError):
 class TurnIncomplete(TantraError): ...
 
 
+class TurnNotAcceptingMessages(TantraError):
+    def __init__(self, sid: str) -> None:
+        super().__init__(f"session {sid} has no turn accepting user messages")
+        self.sid = sid
+
+
 class ProviderError(TantraError):
     def __init__(self, message: str, *, status_code: int | None = None, retryable: bool | None = None) -> None:
         super().__init__(message)

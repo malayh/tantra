@@ -8,4 +8,5 @@
 export interface ServerErrorFrame {
   type?: 'server_error';
   message: string;
+  request_id?: string | null;
 }

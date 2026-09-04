@@ -10,4 +10,5 @@ export interface UserMessageFrame {
   type?: 'user_message';
   text: string;
   attachments?: Attachment[];
+  request_id: string;
 }

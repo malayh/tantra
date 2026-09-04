@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Discriminator, Field
 
@@ -60,6 +61,8 @@ class UserMessageFrame(BaseModel):
     text: str
     attachments: list[Attachment] = Field(default_factory=list)
 
+    request_id: UUID
+
 
 class AskResponseFrame(BaseModel):
     type: Literal["ask_response"] = "ask_response"
@@ -88,9 +91,15 @@ class TitleUpdatedFrame(BaseModel):
     title: str
 
 
+class MessageAcceptedFrame(BaseModel):
+    type: Literal["message_accepted"] = "message_accepted"
+    request_id: UUID
+
+
 class ServerErrorFrame(BaseModel):
     type: Literal["server_error"] = "server_error"
     message: str
+    request_id: UUID | None = None
 
 
-ServerFrame = ReplayDoneFrame | BusyFrame | TitleUpdatedFrame | ServerErrorFrame | Emitted
+ServerFrame = ReplayDoneFrame | BusyFrame | TitleUpdatedFrame | MessageAcceptedFrame | ServerErrorFrame | Emitted

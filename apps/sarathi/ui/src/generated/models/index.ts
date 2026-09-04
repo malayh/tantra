@@ -33,6 +33,7 @@ export * from './hTTPValidationError';
 export * from './killRequested';
 export * from './loginRequest';
 export * from './memoryOut';
+export * from './messageAcceptedFrame';
 export * from './patchSessionRequest';
 export * from './reasoningDelta';
 export * from './reasoningPart';

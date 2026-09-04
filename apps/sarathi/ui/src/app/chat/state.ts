@@ -7,13 +7,15 @@ import type {
   BusyFrame,
   CancelFrame,
   Emitted,
+  MessageAcceptedFrame,
   ReplayDoneFrame,
   ServerErrorFrame,
   TitleUpdatedFrame,
   UserMessageFrame,
 } from "@/generated/models";
 
-export type ServerFrame = Emitted | ReplayDoneFrame | BusyFrame | TitleUpdatedFrame | ServerErrorFrame;
+export type ServerFrame =
+  Emitted | ReplayDoneFrame | BusyFrame | TitleUpdatedFrame | MessageAcceptedFrame | ServerErrorFrame;
 
 export type ClientFrame = UserMessageFrame | AskResponseFrame | CancelFrame;
 
@@ -91,7 +93,12 @@ export type Turn = {
 
 export type Banner = { kind: "busy" | "error"; message: string };
 
-export type PendingMessage = { text: string; attachments: Attachment[] };
+export type PendingMessage = {
+  requestId: string;
+  text: string;
+  attachments: Attachment[];
+  rejected?: boolean;
+};
 
 export type ChatState = {
   turns: Turn[];
@@ -542,16 +549,40 @@ export const createChatStore = (sessionId: string) =>
     setBanner: (banner) => set({ banner }),
   }));
 
-let pending: ({ sessionId: string } & PendingMessage) | null = null;
+const pendingKey = (sessionId: string) => `sarathi:pending-message:${sessionId}`;
 
-export const pendingFirstMessage = {
-  set: (sessionId: string, text: string, attachments: Attachment[]) => {
-    pending = { sessionId, text, attachments };
+const storage = (): Storage | null => (typeof sessionStorage === "undefined" ? null : sessionStorage);
+
+export const pendingMessages = {
+  create: (text: string, attachments: Attachment[]): PendingMessage => ({
+    requestId: crypto.randomUUID(),
+    text,
+    attachments,
+  }),
+  set: (sessionId: string, message: PendingMessage) => {
+    storage()?.setItem(pendingKey(sessionId), JSON.stringify(message));
   },
-  take: (sessionId: string): PendingMessage | null => {
-    if (pending?.sessionId !== sessionId) return null;
-    const { text, attachments } = pending;
-    pending = null;
-    return { text, attachments };
+  get: (sessionId: string): PendingMessage | null => {
+    const saved = storage()?.getItem(pendingKey(sessionId));
+    if (saved === null || saved === undefined) return null;
+    try {
+      return JSON.parse(saved) as PendingMessage;
+    } catch {
+      storage()?.removeItem(pendingKey(sessionId));
+      return null;
+    }
+  },
+  accept: (sessionId: string, requestId: string): boolean => {
+    const pending = pendingMessages.get(sessionId);
+    if (pending?.requestId !== requestId) return false;
+    storage()?.removeItem(pendingKey(sessionId));
+    return true;
+  },
+  reject: (sessionId: string, requestId: string): PendingMessage | null => {
+    const pending = pendingMessages.get(sessionId);
+    if (pending?.requestId !== requestId) return null;
+    const rejected = { ...pending, rejected: true };
+    pendingMessages.set(sessionId, rejected);
+    return rejected;
   },
 };

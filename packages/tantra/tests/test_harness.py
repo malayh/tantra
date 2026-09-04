@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
+from uuid import uuid4
 
 import pytest
 
@@ -115,6 +116,24 @@ async def test_the_lease_is_released_after_a_turn() -> None:
 
     assert (await store.header(sid)).lease is None
     assert await store.acquire_lease(sid, "someone", 1.0)
+
+
+async def test_run_is_idempotent_with_a_supplied_turn_id() -> None:
+    store = MemoryStore()
+    provider = FakeProvider([Sample(text="hi")])
+    harness = Harness(provider, store, [Bot], default_model="fake/model")
+    sid = await session(harness)
+    turn_id = uuid4().hex
+
+    first = await collect(harness.run(sid, "hello", turn_id=turn_id))
+    second = await collect(harness.run(sid, "hello", turn_id=turn_id))
+
+    assert picks(first, TurnStarted)[0].turn_id == turn_id
+    assert second == []
+    assert len(provider.requests) == 1
+    assert len([event async for event in store.read(sid) if isinstance(event.event, TurnStarted)]) == 1
+    with pytest.raises(TantraError, match="different input"):
+        await collect(harness.run(sid, "different", turn_id=turn_id))
 
 
 async def test_run_raises_turn_incomplete_on_an_abandoned_turn_and_releases_the_lease() -> None:

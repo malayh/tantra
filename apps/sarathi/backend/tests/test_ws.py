@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -11,6 +12,7 @@ from conftest import SharedProvider, SharedStore
 from httpx_ws import AsyncWebSocketSession, WebSocketDisconnect
 
 from sarathi.agent import HarnessFactory, Researcher, Sarathi, _wire_tools
+from sarathi.api.ws import CONNECTIONS
 from tantra import BuiltinMemory, Context, MemoryWrite, Sample, tool
 from tantra.events import AgentMessageQueued, CancelRequested, TurnCompleted, TurnStarted
 from tantra.providers.base import ToolCall
@@ -40,7 +42,11 @@ async def _until(ws: AsyncWebSocketSession, kind: str, limit: int = 60) -> list[
 async def _turn(ws: AsyncWebSocketSession, sid: str, limit: int = 120) -> list[dict[str, Any]]:
     frames: list[dict[str, Any]] = []
     for _ in range(limit):
-        frames.append(json.loads(await ws.receive_text(timeout=RECEIVE_TIMEOUT)))
+        try:
+            payload = await ws.receive_text(timeout=RECEIVE_TIMEOUT)
+        except TimeoutError:
+            break
+        frames.append(json.loads(payload))
         if _kind(frames[-1]) == "turn_completed" and frames[-1].get("session_id") == sid:
             return frames
     raise AssertionError(f"never saw turn_completed for {sid}: {[_kind(frame) for frame in frames]}")
@@ -65,8 +71,8 @@ async def _cancel_recorded(store: SharedStore, sid: str) -> None:
     raise AssertionError(f"session {sid} never recorded a cancel request")
 
 
-def _message(text: str) -> dict[str, Any]:
-    return {"type": "user_message", "text": text, "attachments": []}
+def _message(text: str, request_id: str | None = None) -> dict[str, Any]:
+    return {"type": "user_message", "text": text, "attachments": [], "request_id": request_id or str(uuid4())}
 
 
 def _write_call(content: str) -> ToolCall:
@@ -116,7 +122,8 @@ async def test_turn_streams_deltas_then_parts(
 
     kinds = [_kind(frame) for frame in turn]
     assert kinds[0] == "turn_started"
-    assert kinds[1] == "sample_started"
+    assert kinds[1] == "message_accepted"
+    assert kinds[2] == "sample_started"
     assert kinds[-1] == "turn_completed"
     assert (
         kinds.index("reasoning_delta")
@@ -157,6 +164,7 @@ async def test_user_message_appends_attachment_markers(
                 "type": "user_message",
                 "text": "summarise this",
                 "attachments": [{"path": str(attachment), "name": "x.pdf"}],
+                "request_id": str(uuid4()),
             },
         )
         turn = await _until(ws, "turn_completed")
@@ -354,7 +362,7 @@ async def test_subagent_frames_ride_the_socket_under_the_child_session(
     assert spawned["event"]["agent"] == "researcher"
     assert spawned["event"]["call_id"] == "d1"
 
-    child = [frame for frame in turn if frame["session_id"] != sid]
+    child = [frame for frame in turn if frame.get("session_id", sid) != sid]
     assert child
     assert {frame["session_id"] for frame in child} == {child_sid}
     assert all(frame["depth"] == 1 for frame in child)
@@ -539,6 +547,7 @@ async def test_attachment_outside_the_user_directory_is_refused(
                 "type": "user_message",
                 "text": "summarise this",
                 "attachments": [{"path": "/etc/shadow.pdf", "name": "x.pdf"}],
+                "request_id": str(uuid4()),
             },
         )
         refused = await _until(ws, "server_error")
@@ -868,11 +877,16 @@ async def test_active_user_message_is_persisted_and_absorbed_during_a_sample(
     sid = await new_session(token)
     provider.gate.clear()
 
+    request_id = str(uuid4())
     async with socket(sid, token) as ws:
         await _until(ws, "replay_done")
         await _send(ws, _message("start"))
         await _until(ws, "text_delta")
-        await _send(ws, _message("new guidance"))
+        await _send(ws, _message("new guidance", request_id))
+        first_accept = (await _until(ws, "message_accepted"))[-1]
+        await _send(ws, _message("new guidance", request_id))
+        second_accept = (await _until(ws, "message_accepted"))[-1]
+        assert first_accept["request_id"] == second_accept["request_id"] == request_id
         for _ in range(200):
             events = [stamped.event async for stamped in store.read(sid)]
             if any(isinstance(event, AgentMessageQueued) for event in events):
@@ -885,6 +899,7 @@ async def test_active_user_message_is_persisted_and_absorbed_during_a_sample(
 
     messages = [event for event in events if isinstance(event, AgentMessageQueued)]
     assert [event.text for event in messages] == ["new guidance"]
+    assert messages[0].message_id == request_id.replace("-", "")
     queued = [frame for frame in turn if _kind(frame) == "agent_message_queued"]
     assert [frame["event"]["message_id"] for frame in queued] == [messages[0].message_id]
     skipped = next(
@@ -905,6 +920,7 @@ async def test_second_authorized_root_socket_can_persist_active_guidance(
     token = await signup()
     sid = await new_session(token)
     provider.gate.clear()
+    await store.patch_header(sid, title="Existing")
 
     async with socket(sid, token) as owner:
         await _until(owner, "replay_done")
@@ -912,7 +928,9 @@ async def test_second_authorized_root_socket_can_persist_active_guidance(
         await _until(owner, "text_delta")
         async with socket(sid, token) as guide:
             await _until(guide, "replay_done")
+            assert len(CONNECTIONS.connections[sid]) == 2
             await _send(guide, _message("from tab two"))
+            accepted = (await _until(guide, "message_accepted"))[-1]
             for _ in range(200):
                 events = [stamped.event async for stamped in store.read(sid)]
                 if any(isinstance(event, AgentMessageQueued) and event.text == "from tab two" for event in events):
@@ -920,8 +938,15 @@ async def test_second_authorized_root_socket_can_persist_active_guidance(
                 await asyncio.sleep(0.01)
             else:
                 raise AssertionError("second socket guidance was not persisted")
+            assert accepted["request_id"] is not None
             provider.gate.set()
-            await _turn(owner, sid)
+            owner_turn = await _turn(owner, sid)
+            assert len(CONNECTIONS.connections[sid]) == 2
+            guide_turn = await _turn(guide, sid)
+
+    for turn in (owner_turn, guide_turn):
+        delivered = [frame for frame in turn if _kind(frame) == "agent_message_queued"]
+        assert [frame["event"]["text"] for frame in delivered] == ["from tab two"]
 
     assert len([event for event in events if isinstance(event, AgentMessageQueued)]) == 1
 
@@ -1069,6 +1094,7 @@ async def test_active_attachment_message_reuses_owned_marker_encoding(
                 "type": "user_message",
                 "text": "read this too",
                 "attachments": [{"path": str(attachment), "name": "x.pdf"}],
+                "request_id": str(uuid4()),
             },
         )
         for _ in range(200):
@@ -1165,3 +1191,108 @@ async def test_active_message_wakes_task_wait_inside_a_running_tool(
     assert len(completed) == 1
     assert completed[0]["event"]["is_error"] is False
     assert [event.text for event in messages] == ["wake and continue"]
+
+
+async def test_duplicate_idle_delivery_is_acknowledged_once_without_another_turn(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.append(Sample(text="done"))
+    token = await signup()
+    sid = await new_session(token)
+    await store.patch_header(sid, title="Existing")
+    provider.gate.clear()
+    request_id = str(uuid4())
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("once", request_id))
+        first = (await _until(ws, "message_accepted"))[-1]
+        await _send(ws, _message("once", request_id))
+        second = (await _until(ws, "message_accepted"))[-1]
+        await _send(ws, _message("different", request_id))
+        conflict = (await _until(ws, "server_error"))[-1]
+        provider.gate.set()
+        await _turn(ws, sid)
+
+    events = [stamped.event async for stamped in store.read(sid)]
+    assert first["request_id"] == second["request_id"] == request_id
+    assert conflict["request_id"] == request_id
+    assert "different input" in conflict["message"]
+    assert [event.input for event in events if isinstance(event, TurnStarted)] == ["once"]
+    assert len(provider.requests) == 1
+
+
+async def test_cancel_then_immediate_message_starts_exactly_one_new_turn(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend([Sample(text="first"), Sample(text="second")])
+    token = await signup()
+    sid = await new_session(token)
+    await store.patch_header(sid, title="Existing")
+    provider.gate.clear()
+    next_id = str(uuid4())
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        await _send(ws, _message("start"))
+        await _until(ws, "text_delta")
+        await _send(ws, {"type": "cancel"})
+        await _send(ws, _message("follow up", next_id))
+        await _cancel_recorded(store, sid)
+        provider.gate.set()
+        cancelled = await _turn(ws, sid)
+        following = await _turn(ws, sid)
+
+    events = [stamped.event async for stamped in store.read(sid)]
+    started = [event for event in events if isinstance(event, TurnStarted)]
+    completed = [event for event in events if isinstance(event, TurnCompleted)]
+    assert [event.input for event in started] == ["start", "follow up"]
+    assert started[1].turn_id == next_id.replace("-", "")
+    assert [event.stop_reason for event in completed] == ["cancelled", "completed"]
+    assert cancelled[-1]["event"]["stop_reason"] == "cancelled"
+    assert [frame["request_id"] for frame in following if _kind(frame) == "message_accepted"] == [next_id]
+    assert len(provider.requests) == 2
+
+
+async def test_two_tabs_receive_root_and_descendant_live_events_once(
+    socket: Socket,
+    store: SharedStore,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend(
+        [
+            Sample(tool_calls=[ToolCall(id="d1", name="researcher", args='{"task": "look"}')]),
+            Sample(text="child findings"),
+            Sample(text="parent answer"),
+        ]
+    )
+    token = await signup()
+    sid = await new_session(token)
+    await store.patch_header(sid, title="Existing")
+
+    async with socket(sid, token) as owner:
+        await _until(owner, "replay_done")
+        async with socket(sid, token) as observer:
+            await _until(observer, "replay_done")
+            await _send(owner, _message("research it"))
+            owner_turn = await _turn(owner, sid)
+            observer_turn = await _turn(observer, sid)
+
+    def persisted(frames: list[dict[str, Any]]) -> list[tuple[str, int]]:
+        return [(str(frame["session_id"]), int(frame["seq"])) for frame in frames if frame.get("seq") is not None]
+
+    owner_events = persisted(owner_turn)
+    observer_events = persisted(observer_turn)
+    assert owner_events == observer_events
+    assert len(owner_events) == len(set(owner_events))
+    assert any(frame.get("session_id") != sid for frame in owner_turn)

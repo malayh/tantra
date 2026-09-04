@@ -6,8 +6,8 @@ from collections import defaultdict
 from collections.abc import AsyncIterator
 
 from sarathi.agent import Sarathi, deps_factory
-from sarathi.api.ws import Connection
-from tantra import Harness, MemoryStore
+from sarathi.api.ws import Connection, ConnectionHub
+from tantra import Emitted, Harness, MemoryStore
 from tantra.adapters.collect import collect
 from tantra.events import (
     AgentMessageQueued,
@@ -460,3 +460,56 @@ async def test_fresh_harness_recovers_nested_tasks_without_twins_or_killed_resta
     ]
     child_notices = [event.notice_id for event in child_events if isinstance(event, TaskNoticeQueued)]
     assert len(child_notices) == len(set(child_notices)) == 1
+
+
+async def test_broadcaster_buffers_replay_handoff_and_deduplicates_persisted_frames() -> None:
+    store = MemoryStore()
+    harness = Harness(RecoveryProvider(), store, [Sarathi], default_model="test-model")
+    root = await harness.create_session(Sarathi, {"user": "1"})
+    hub = ConnectionHub()
+    socket = RecordingSocket()
+    connection = Connection(socket, harness, root.id, "1", hub)
+    await hub.register(connection)
+
+    initial = [item async for item in store.read(root.id)][0]
+    replay_race = Emitted(session_id=root.id, depth=0, seq=initial.seq, event=initial.event)
+    await hub.publish(root.id, replay_race)
+    await connection.replay(root.id)
+    await hub.activate(connection)
+
+    seq = await store.append(root.id, [TurnStarted(turn_id="turn", input="go")], expect_seq=initial.seq)
+    started = [item async for item in store.read(root.id)][-1]
+    live = Emitted(session_id=root.id, depth=0, seq=seq, event=started.event)
+    await hub.publish(root.id, live)
+    await hub.publish(root.id, live)
+
+    delivered = [
+        (str(frame["session_id"]), int(frame["seq"])) for frame in socket.frames if frame.get("seq") is not None
+    ]
+    assert delivered == [(root.id, initial.seq), (root.id, seq)]
+
+
+class FailingSocket:
+    async def send_text(self, payload: str) -> None:
+        raise RuntimeError(payload)
+
+
+async def test_broadcaster_removes_a_dead_secondary_without_failing_the_owner() -> None:
+    store = MemoryStore()
+    harness = Harness(RecoveryProvider(), store, [Sarathi], default_model="test-model")
+    root = await harness.create_session(Sarathi, {"user": "1"})
+    hub = ConnectionHub()
+    owner_socket = RecordingSocket()
+    owner = Connection(owner_socket, harness, root.id, "1", hub)
+    dead = Connection(FailingSocket(), harness, root.id, "1", hub)
+    await hub.register(owner)
+    await hub.register(dead)
+    await hub.activate(owner)
+    await hub.activate(dead)
+
+    stamped = [item async for item in store.read(root.id)][0]
+    emitted = Emitted(session_id=root.id, depth=0, seq=stamped.seq, event=stamped.event)
+    await hub.publish(root.id, emitted)
+
+    assert len(owner_socket.frames) == 1
+    assert hub.connections[root.id] == {owner}

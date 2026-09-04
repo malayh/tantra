@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Emitted } from "@/generated/models";
-import { createChatStore, type SubagentItem } from "./state.ts";
+import { createChatStore, pendingMessages, type SubagentItem } from "./state.ts";
 
 const root = "root";
 const child = "child";
@@ -238,4 +238,53 @@ test("only matching task_wait completion clears root and nested waiting", () => 
   store.getState().dispatch(frame(root, 0, { type: "tool_call_completed", call_id: "root-wait", result: {} }));
   assert.equal(store.getState().turns[0].status, "running");
   assert.equal(store.getState().turns[0].waitCallId, null);
+});
+
+test("retains pending delivery until matching acceptance and preserves rejected drafts", () => {
+  const saved = new Map<string, string>();
+  Object.defineProperty(globalThis, "sessionStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => saved.get(key) ?? null,
+      removeItem: (key: string) => saved.delete(key),
+      setItem: (key: string, value: string) => saved.set(key, value),
+    },
+  });
+
+  try {
+    const pending = pendingMessages.create("keep me", [{ name: "note.pdf", path: "/note.pdf" }]);
+    pendingMessages.set(root, pending);
+
+    assert.match(pending.requestId, /^[0-9a-f-]{36}$/);
+    assert.deepEqual(pendingMessages.get(root), pending);
+    assert.equal(pendingMessages.accept(root, "wrong"), false);
+    assert.deepEqual(pendingMessages.get(root), pending);
+
+    const rejected = pendingMessages.reject(root, pending.requestId);
+    assert.deepEqual(rejected, { ...pending, rejected: true });
+    assert.deepEqual(pendingMessages.get(root), rejected);
+
+    const retry = pendingMessages.create("edited", []);
+    pendingMessages.set(root, retry);
+    assert.equal(pendingMessages.accept(root, retry.requestId), true);
+    assert.equal(pendingMessages.get(root), null);
+  } finally {
+    Reflect.deleteProperty(globalThis, "sessionStorage");
+  }
+});
+
+test("drops malformed pending delivery storage", () => {
+  Object.defineProperty(globalThis, "sessionStorage", {
+    configurable: true,
+    value: {
+      getItem: () => "not json",
+      removeItem: () => true,
+      setItem: () => undefined,
+    },
+  });
+  try {
+    assert.equal(pendingMessages.get(root), null);
+  } finally {
+    Reflect.deleteProperty(globalThis, "sessionStorage");
+  }
 });

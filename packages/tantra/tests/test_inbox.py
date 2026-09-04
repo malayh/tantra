@@ -11,11 +11,12 @@ from tantra.adapters.collect import collect
 from tantra.agent import Agent
 from tantra.ask import ApprovalResponse
 from tantra.context import assemble_messages, pending_inbox
-from tantra.errors import SeqConflict, SessionNotFound, TantraError
+from tantra.errors import SeqConflict, SessionNotFound, TantraError, TurnNotAcceptingMessages
 from tantra.events import (
     AgentMessageQueued,
     AskAnswered,
     AskRaised,
+    CancelRequested,
     ChildSessionSpawned,
     KillRequested,
     SampleCompleted,
@@ -79,7 +80,7 @@ async def test_send_user_message_validates_root_live_turn_and_text() -> None:
         await harness.send_user_message("missing", "hello")
 
     root = await harness.create_session(Bot)
-    with pytest.raises(TantraError, match="no incomplete turn"):
+    with pytest.raises(TurnNotAcceptingMessages):
         await harness.send_user_message(root.id, "hello")
 
     await store.append(root.id, [TurnStarted(turn_id="t1", input="go")], expect_seq=root.last_seq)
@@ -113,6 +114,86 @@ async def test_send_user_message_preserves_text_and_returns_a_uuid() -> None:
     ]
 
 
+async def test_send_user_message_is_idempotent_with_a_supplied_id() -> None:
+    store = MemoryStore()
+    harness, sid = await incomplete_root(store)
+    message_id = "12345678123456781234567812345678"
+
+    assert await harness.send_user_message(sid, "same", message_id=message_id) == message_id
+    assert await harness.send_user_message(sid, "same", message_id=message_id) == message_id
+
+    queued = [event for event in await log(store, sid) if isinstance(event, AgentMessageQueued)]
+    assert len(queued) == 1
+    with pytest.raises(TantraError, match="different text"):
+        await harness.send_user_message(sid, "different", message_id=message_id)
+
+
+async def test_send_user_message_rejects_a_cancelling_turn() -> None:
+    store = MemoryStore()
+    harness, sid = await incomplete_root(store)
+    await store.append(sid, [CancelRequested(turn_id="t1")], expect_seq=None)
+
+    with pytest.raises(TurnNotAcceptingMessages):
+        await harness.send_user_message(sid, "next turn")
+
+    assert not [event for event in await log(store, sid) if isinstance(event, AgentMessageQueued)]
+
+
+async def test_message_that_precedes_cancellation_remains_accepted() -> None:
+    store = MemoryStore()
+    harness, sid = await incomplete_root(store)
+
+    message_id = await harness.send_user_message(sid, "accepted first")
+    await store.append(sid, [CancelRequested(turn_id="t1")], expect_seq=None)
+
+    messages = [event for event in await log(store, sid) if isinstance(event, AgentMessageQueued)]
+    assert [event.message_id for event in messages] == [message_id]
+
+
+async def test_stale_cancellation_does_not_poison_a_later_turn() -> None:
+    store = MemoryStore()
+    harness, sid = await incomplete_root(store)
+    await store.append(
+        sid,
+        [
+            CancelRequested(turn_id="t1"),
+            TurnCompleted(turn_id="t1", stop_reason="cancelled"),
+            TurnStarted(turn_id="t2", input="again"),
+        ],
+        expect_seq=None,
+    )
+
+    message_id = await harness.send_user_message(sid, "for the new turn")
+    queued = [event.message_id for event in await log(store, sid) if isinstance(event, AgentMessageQueued)]
+    assert queued == [message_id]
+
+
+class CancelRaceStore:
+    def __init__(self, inner: MemoryStore) -> None:
+        self.inner = inner
+        self.injected = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
+        if not self.injected and any(isinstance(event, AgentMessageQueued) for event in events):
+            self.injected = True
+            await self.inner.append(sid, [CancelRequested(turn_id="t1")], expect_seq=None)
+        return await self.inner.append(sid, events, expect_seq=expect_seq)
+
+
+async def test_send_user_message_loses_the_append_race_to_cancellation() -> None:
+    store = MemoryStore()
+    _, sid = await incomplete_root(store)
+    harness = Harness(FakeProvider([]), CancelRaceStore(store), [Bot], default_model="fake/model")
+
+    with pytest.raises(TurnNotAcceptingMessages):
+        await harness.send_user_message(sid, "next turn")
+
+    assert not [event for event in await log(store, sid) if isinstance(event, AgentMessageQueued)]
+
+
 class TerminalRaceStore:
     def __init__(self, inner: MemoryStore) -> None:
         self.inner = inner
@@ -137,7 +218,7 @@ async def test_send_user_message_cannot_land_after_terminal_completion() -> None
     _, sid = await incomplete_root(store)
     harness = Harness(FakeProvider([]), TerminalRaceStore(store), [Bot], default_model="fake/model")
 
-    with pytest.raises(TantraError, match="no incomplete turn"):
+    with pytest.raises(TurnNotAcceptingMessages):
         await harness.send_user_message(sid, "too late")
 
     assert not [event for event in await log(store, sid) if isinstance(event, AgentMessageQueued)]

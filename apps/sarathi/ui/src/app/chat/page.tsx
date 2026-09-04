@@ -9,7 +9,7 @@ import type { Attachment } from "@/generated/models";
 import { errorMessage } from "@/lib/errors";
 import { Composer } from "./components/composer";
 import { Sidebar } from "./components/sidebar";
-import { pendingFirstMessage } from "./state";
+import { pendingMessages } from "./state";
 
 export default function ChatPage() {
   const router = useRouter();
@@ -20,17 +20,12 @@ export default function ChatPage() {
     },
   });
 
-  const onSend = (text: string, attachments: Attachment[]) => {
-    createSession.mutate(
-      { data: {} },
-      {
-        onSuccess: (created) => {
-          pendingFirstMessage.set(created.id, text, attachments);
-          queryClient.invalidateQueries({ queryKey: getListSessionsQueryKey() });
-          router.push(`/chat/${created.id}`);
-        },
-      },
-    );
+  const onSend = async (text: string, attachments: Attachment[]) => {
+    const created = await createSession.mutateAsync({ data: {} });
+    const pending = pendingMessages.create(text, attachments);
+    pendingMessages.set(created.id, pending);
+    void queryClient.invalidateQueries({ queryKey: getListSessionsQueryKey() });
+    router.push(`/chat/${created.id}`);
   };
 
   return (

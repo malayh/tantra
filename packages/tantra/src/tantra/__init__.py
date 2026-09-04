@@ -19,6 +19,7 @@ from tantra.errors import (
     SessionNotFound,
     TantraError,
     TurnIncomplete,
+    TurnNotAcceptingMessages,
 )
 from tantra.events import (
     CompactionApplied,
@@ -116,6 +117,7 @@ __all__ = [
     "Tracer",
     "TurnContext",
     "TurnIncomplete",
+    "TurnNotAcceptingMessages",
     "Usage",
     "agent_name",
     "build_name_table",

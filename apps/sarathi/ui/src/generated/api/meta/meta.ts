@@ -30,6 +30,7 @@ import type {
   Emitted,
   HTTPValidationError,
   Health200,
+  MessageAcceptedFrame,
   ReplayDoneFrame,
   ServerErrorFrame,
   TitleUpdatedFrame,
@@ -160,7 +161,7 @@ export const wsTypes = (
 ) => {
 
 
-      return customInstance<ReplayDoneFrame | BusyFrame | TitleUpdatedFrame | ServerErrorFrame | Emitted>(
+      return customInstance<ReplayDoneFrame | BusyFrame | TitleUpdatedFrame | MessageAcceptedFrame | ServerErrorFrame | Emitted>(
       {url: `/api/meta/ws-types`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
       data: userMessageFrameAskResponseFrameCancelFrame, signal

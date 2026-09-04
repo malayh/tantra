@@ -16,7 +16,8 @@ import { createChatStore } from "../state";
 export default function SessionPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const store = useMemo(() => createChatStore(sessionId), [sessionId]);
-  const { sendFrame, connected, ready, running, pendingAsk } = useChatSocket(sessionId, store);
+  const { sendFrame, sendMessage, connected, ready, running, pendingAsk, pendingMessage, awaitingAcceptance } =
+    useChatSocket(sessionId, store);
   const banner = useStore(store, (state) => state.banner);
   const { data: sessions } = useListSessions();
   const current = sessions?.find((item) => item.id === sessionId);
@@ -48,10 +49,11 @@ export default function SessionPage() {
         <div className="mx-auto w-full max-w-3xl px-6 pb-6">
           <Composer
             key={sessionId}
-            disabled={!ready || pendingAsk !== null}
+            disabled={!connected || !ready || pendingAsk !== null || awaitingAcceptance}
+            draft={pendingMessage}
             running={running}
             askPending={pendingAsk !== null}
-            onSend={(text, attachments) => sendFrame({ type: "user_message", text, attachments })}
+            onSend={sendMessage}
             onStop={() => sendFrame({ type: "cancel" })}
           />
         </div>

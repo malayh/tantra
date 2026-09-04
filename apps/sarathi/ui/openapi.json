@@ -438,6 +438,9 @@
                       "$ref": "#/components/schemas/TitleUpdatedFrame"
                     },
                     {
+                      "$ref": "#/components/schemas/MessageAcceptedFrame"
+                    },
+                    {
                       "$ref": "#/components/schemas/ServerErrorFrame"
                     },
                     {
@@ -1263,6 +1266,26 @@
         ],
         "title": "MemoryOut"
       },
+      "MessageAcceptedFrame": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "message_accepted",
+            "title": "Type",
+            "default": "message_accepted"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Request Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "request_id"
+        ],
+        "title": "MessageAcceptedFrame"
+      },
       "PatchSessionRequest": {
         "properties": {
           "model": {
@@ -1434,6 +1457,18 @@
           "message": {
             "type": "string",
             "title": "Message"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
           }
         },
         "type": "object",
@@ -1992,11 +2027,17 @@
             },
             "type": "array",
             "title": "Attachments"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Request Id"
           }
         },
         "type": "object",
         "required": [
-          "text"
+          "text",
+          "request_id"
         ],
         "title": "UserMessageFrame"
       },

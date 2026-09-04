@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FileText, Loader2, Paperclip, Send, Square, X } from "lucide-react";
 import { toast } from "sonner";
 
@@ -9,29 +9,56 @@ import { Textarea } from "@/components/ui/textarea";
 import { useCreateUpload } from "@/generated/api/uploads/uploads";
 import type { Attachment } from "@/generated/models";
 import { errorMessage } from "@/lib/errors";
+import type { PendingMessage } from "../state";
 
 type ComposerProps = {
   disabled: boolean;
   running?: boolean;
   askPending?: boolean;
-  onSend: (text: string, attachments: Attachment[]) => void;
+  draft?: PendingMessage | null;
+  onSend: (text: string, attachments: Attachment[]) => Promise<void>;
   onStop?: () => void;
 };
 
-export function Composer({ disabled, running = false, askPending = false, onSend, onStop }: ComposerProps) {
+export function Composer({
+  disabled,
+  running = false,
+  askPending = false,
+  draft = null,
+  onSend,
+  onStop,
+}: ComposerProps) {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [submitting, setSubmitting] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const upload = useCreateUpload();
 
-  const blocked = disabled || upload.isPending;
+  useEffect(() => {
+    if (draft === null) {
+      setText("");
+      setAttachments([]);
+      return;
+    }
+    setText(draft.text);
+    setAttachments(draft.attachments);
+  }, [draft]);
+
+  const blocked = disabled || upload.isPending || submitting;
   const nothingToSend = text.trim().length === 0 && attachments.length === 0;
 
-  const submit = () => {
+  const submit = async () => {
     if (blocked || nothingToSend) return;
-    onSend(text.trim(), attachments);
+    setSubmitting(true);
+    try {
+      await onSend(text.trim(), attachments);
+    } catch {
+      setSubmitting(false);
+      return;
+    }
     setText("");
     setAttachments([]);
+    setSubmitting(false);
   };
 
   const pick = async (file: File) => {
@@ -95,15 +122,15 @@ export function Composer({ disabled, running = false, askPending = false, onSend
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              submit();
+              void submit();
             }
           }}
         />
-        <Button size="icon" aria-label="Send" disabled={blocked || nothingToSend} onClick={submit}>
+        <Button size="icon" aria-label="Send" disabled={blocked || nothingToSend} onClick={() => void submit()}>
           <Send />
         </Button>
         {running && !askPending && (
-          <Button variant="outline" size="icon" aria-label="Stop" onClick={onStop}>
+          <Button variant="outline" size="icon" aria-label="Stop" disabled={disabled} onClick={onStop}>
             <Square />
           </Button>
         )}

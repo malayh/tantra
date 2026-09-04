@@ -229,3 +229,4 @@ class SessionHeader(BaseModel):
     usage: Usage = Field(default_factory=Usage)
     lease: Lease | None = None
     pending_ask: str | None = None
+    task_input: str | None = None

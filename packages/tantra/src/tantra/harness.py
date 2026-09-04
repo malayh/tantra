@@ -29,11 +29,12 @@ from tantra.events import (
     TurnStarted,
 )
 from tantra.hooks import Hook
-from tantra.loop import DEFAULT_RETRY, ChildOutcome, Emitted, RetryConfig, TurnLoop
+from tantra.loop import DEFAULT_RETRY, SUBMIT_OUTPUT, Emitted, RetryConfig, TurnLoop
 from tantra.permissions import check_permission
 from tantra.providers.base import Provider
 from tantra.skills import SKILL_TOOL, SkillInfo, Skills
 from tantra.stores.base import Store
+from tantra.tasking import TASK_TOOL_NAMES, TASK_TOOLS, TaskSpawner, TaskSupervisor
 from tantra.tools import Context, Tool
 from tantra.tracing import NULL_TRACER, Tracer, current_span
 
@@ -66,7 +67,8 @@ def _subagent_tool(sub: type[Agent]) -> Tool:
     described = (sub.__doc__ or "").strip()
 
     async def delegate(task: str, ctx: Context) -> Any:
-        return await ctx.spawn(name, task)
+        ref = await ctx.spawn(name, task)
+        return {"task_id": ref.task_id, "agent": ref.agent}
 
     return Tool(delegate, name=name, description=described or f"Delegate a task to the {name} sub-agent.")
 
@@ -99,6 +101,8 @@ def _tool_table(agent: type[Agent]) -> dict[str, Tool]:
         if not isinstance(entry, Tool):
             raise TantraError(f"{label}: {entry!r} is not decorated with @tool")
         _check_schema(label, entry)
+        if entry.name == SUBMIT_OUTPUT or entry.name in TASK_TOOL_NAMES:
+            raise TantraError(f"{label}: reserved tool name {entry.name!r}")
         if entry.permission is not None:
             check_permission(f"{label}: tool {entry.name!r}", entry.permission)
         if entry.name in table:
@@ -106,6 +110,8 @@ def _tool_table(agent: type[Agent]) -> dict[str, Tool]:
         table[entry.name] = entry
     for sub in agent.subagents:
         delegate = _subagent_tool(sub)
+        if delegate.name == SUBMIT_OUTPUT or delegate.name in TASK_TOOL_NAMES:
+            raise TantraError(f"{label}: reserved sub-agent name {delegate.name!r}")
         if delegate.name in table:
             raise TantraError(f"{label}: duplicate tool name {delegate.name!r}")
         table[delegate.name] = delegate
@@ -185,6 +191,7 @@ class Harness:
         memory: Memory | None = None,
         compactor: Compactor | None = None,
         telemetry: Tracer | None = None,
+        max_concurrency: int = 4,
     ) -> None:
         self.provider = provider
         self.store = store
@@ -193,6 +200,9 @@ class Harness:
         self.retry = retry
         self.lease_ttl = lease_ttl
         self.max_depth = max_depth
+        if max_concurrency < 1:
+            raise TantraError(f"max_concurrency must be at least 1, got {max_concurrency}")
+        self.max_concurrency = max_concurrency
         self.hooks = list(hooks)
         self.skills = skills
         self.memory = memory
@@ -201,6 +211,8 @@ class Harness:
         self.default_permission = check_permission("harness default_permission", default_permission)
         self.agents = build_name_table(agents)
         self.tools = {name: _tool_table(agent) for name, agent in self.agents.items()}
+        for table in self.tools.values():
+            table.update((entry.name, entry) for entry in TASK_TOOLS)
         if skills is not None:
             for name, agent in self.agents.items():
                 if agent.skills == []:
@@ -269,6 +281,7 @@ class Harness:
         chain: Sequence[dict[str, str]],
         skills_index: Sequence[SkillInfo],
         turn_span: Any,
+        supervisor: TaskSupervisor,
     ) -> TurnLoop:
         return TurnLoop(
             store=self.store,
@@ -285,12 +298,13 @@ class Harness:
             hooks=self.hooks,
             default_permission=self.default_permission,
             permission_chain=chain,
-            spawner=_ChildRunner(self, header),
+            spawner=TaskSpawner(supervisor, header, holder),
             skills_index=skills_index,
             memory=self.memory,
             compactor=self.compactor,
             tracer=self.tracer,
             turn_span=turn_span,
+            event_claim=supervisor.claim,
         )
 
     async def _notify(self, emitted: Emitted) -> None:
@@ -328,6 +342,22 @@ class Harness:
         await self.store.release_lease(header.id, holder)
 
     async def run(self, sid: str, input: str) -> AsyncIterator[Emitted]:
+        supervisor = TaskSupervisor(self, sid)
+        await supervisor.start()
+        try:
+            async with aclosing(supervisor.merge(self._run_one(sid, input, supervisor, current_span.get()))) as stream:
+                async for emitted in stream:
+                    yield emitted
+        finally:
+            await supervisor.close()
+
+    async def _run_one(
+        self,
+        sid: str,
+        input: str,
+        supervisor: TaskSupervisor,
+        trace_parent: Any,
+    ) -> AsyncIterator[Emitted]:
         header = await self.store.header(sid)
         if header is None:
             raise SessionNotFound(sid)
@@ -361,7 +391,7 @@ class Harness:
                 metadata=header.metadata,
                 deps=deps,
             )
-            span = self.tracer.start_turn(turn, resumed=False, ask_id=None, parent=current_span.get())
+            span = self.tracer.start_turn(turn, resumed=False, ask_id=None, parent=trace_parent)
             traced = True
             started = TurnStarted(turn_id=turn.turn_id, input=input)
             header.last_seq = await self.store.append(sid, [started], expect_seq=header.last_seq)
@@ -383,6 +413,7 @@ class Harness:
                 chain=chain,
                 skills_index=skills_index,
                 turn_span=span,
+                supervisor=supervisor,
             )
             async with aclosing(loop.run()) as turn_stream:
                 async for emitted in turn_stream:
@@ -397,6 +428,25 @@ class Harness:
 
     async def resume(
         self, sid: str, ask_id: str | None = None, response: AskResponse | None = None
+    ) -> AsyncIterator[Emitted]:
+        supervisor = TaskSupervisor(self, sid)
+        await supervisor.start()
+        try:
+            async with aclosing(
+                supervisor.merge(self._resume_one(sid, ask_id, response, supervisor, current_span.get()))
+            ) as stream:
+                async for emitted in stream:
+                    yield emitted
+        finally:
+            await supervisor.close()
+
+    async def _resume_one(
+        self,
+        sid: str,
+        ask_id: str | None,
+        response: AskResponse | None,
+        supervisor: TaskSupervisor,
+        trace_parent: Any,
     ) -> AsyncIterator[Emitted]:
         header = await self.store.header(sid)
         if header is None:
@@ -457,7 +507,7 @@ class Harness:
                 metadata=header.metadata,
                 deps=deps,
             )
-            span = self.tracer.start_turn(turn, resumed=True, ask_id=ask_id, parent=current_span.get())
+            span = self.tracer.start_turn(turn, resumed=True, ask_id=ask_id, parent=trace_parent)
             traced = True
             loop = self._build_loop(
                 header=header,
@@ -469,6 +519,7 @@ class Harness:
                 chain=chain,
                 skills_index=skills_index,
                 turn_span=span,
+                supervisor=supervisor,
             )
             async with aclosing(loop.run()) as turn_stream:
                 async for emitted in turn_stream:
@@ -572,71 +623,3 @@ class Harness:
             raise SessionNotFound(sid)
         async for stamped in self.store.read(sid, from_seq=from_seq):
             yield Emitted(session_id=sid, depth=header.depth, seq=stamped.seq, event=stamped.event)
-
-
-class _ChildRunner:
-    def __init__(self, harness: Harness, parent: SessionHeader) -> None:
-        self.harness = harness
-        self.parent = parent
-
-    def resolve(self, agent: type[Agent] | str) -> str:
-        name = self.harness._name_of(agent)
-        depth = self.parent.depth + 1
-        if depth > self.harness.max_depth:
-            raise TantraError(f"max_depth {self.harness.max_depth} exceeded: cannot spawn {name!r} at depth {depth}")
-        return name
-
-    async def create(self, agent: str) -> str:
-        depth = self.parent.depth + 1
-        header = SessionHeader(
-            id=uuid4().hex,
-            agent=agent,
-            parent_id=self.parent.id,
-            depth=depth,
-            metadata=dict(self.parent.metadata),
-        )
-        await self.harness.store.create(header)
-        await self.harness.store.append(
-            header.id,
-            [SessionCreated(agent=agent, parent_id=self.parent.id, depth=depth, metadata=header.metadata)],
-            expect_seq=0,
-        )
-        return header.id
-
-    async def _log(self, sid: str) -> list[SessionEvent]:
-        return [stamped.event async for stamped in self.harness.store.read(sid)]
-
-    async def drive(self, sid: str, input: str) -> AsyncIterator[Emitted]:
-        events = await self._log(sid)
-        if not any(isinstance(event, TurnStarted) for event in events):
-            stream = self.harness.run(sid, input)
-        elif _turn_incomplete(events):
-            stream = self.harness.resume(sid)
-        else:
-            return
-        async with aclosing(stream) as child:
-            async for emitted in child:
-                yield emitted
-
-    async def outcome(self, sid: str) -> ChildOutcome:
-        events = await self._log(sid)
-        if _turn_incomplete(events):
-            header = await self.harness.store.header(sid)
-            pending = header.pending_ask if header is not None else None
-            if pending is None:
-                return ChildOutcome(error=TantraError(f"child session {sid} left its turn incomplete"))
-            return ChildOutcome(pending_ask=pending)
-        tail = _turn_tail(events)
-        terminal = next((event for event in reversed(tail) if isinstance(event, TurnCompleted | TurnFailed)), None)
-        if isinstance(terminal, TurnFailed):
-            return ChildOutcome(error=TantraError(f"child session {sid} failed: {terminal.error}"))
-        if terminal is None or terminal.stop_reason == "cancelled":
-            return ChildOutcome(error=TantraError(f"child session {sid}: sub-agent turn cancelled"))
-        if terminal.output is not None:
-            return ChildOutcome(result=terminal.output)
-        text = _final_text(tail)
-        if not text and terminal.stop_reason == "max_steps":
-            return ChildOutcome(
-                error=TantraError(f"child session {sid}: sub-agent hit max_steps without producing output")
-            )
-        return ChildOutcome(result=text)

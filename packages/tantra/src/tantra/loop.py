@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from tantra.agent import Agent
 from tantra.ask import Approval, ApprovalResponse, AskRequest, AskResponse
 from tantra.context import TurnContext, build_sample_request, pending_inbox, resolve_prompt
-from tantra.errors import ProviderError, SeqConflict, SessionBusy, TantraError
+from tantra.errors import ProviderError, SeqConflict, TantraError
 from tantra.events import (
     AgentMessageQueued,
     AskAnswered,
@@ -51,7 +51,7 @@ from tantra.providers.base import (
 )
 from tantra.skills import SkillInfo
 from tantra.stores.base import Store
-from tantra.tools import Context, Tool
+from tantra.tools import Context, TaskRef, Tool
 from tantra.tracing import NULL_TRACER, Tracer, current_span
 
 if TYPE_CHECKING:
@@ -92,13 +92,6 @@ class Ask:
     response: AskResponse | None = None
 
 
-@dataclass(frozen=True)
-class ChildOutcome:
-    result: Any = None
-    error: Exception | None = None
-    pending_ask: str | None = None
-
-
 class Spawner(Protocol):
     """Child-session operations the loop delegates to the harness."""
 
@@ -110,14 +103,25 @@ class Spawner(Protocol):
         and a failing spawn never consumes a child-attachment slot.
         """
 
-    async def create(self, agent: str) -> str:
-        """Create a child session one level below the running one and return its id."""
+    async def create(self, agent: str, call_id: str, index: int, input: str) -> TaskRef:
+        """Create a deterministic child session and return its task reference."""
 
-    def drive(self, sid: str, input: str) -> AsyncIterator[Emitted]:
-        """Run, resume or skip the child's turn, yielding its events for live forwarding."""
+    def launch(self, ref: TaskRef, trace_parent: Any) -> None:
+        """Admit the linked child through the root supervisor."""
 
-    async def outcome(self, sid: str) -> ChildOutcome:
-        """Read the child's log and report its result, its failure, or the ask it waits on."""
+    async def status(self, task_id: str, after_seq: int | None, limit: int) -> dict[str, Any]: ...
+
+    async def messages(self, task_id: str, limit: int) -> list[dict[str, Any]]: ...
+
+    async def result(self, task_id: str) -> dict[str, Any]: ...
+
+    async def wait(self, task_ids: list[str] | None) -> dict[str, Any]: ...
+
+    async def unfinished(self) -> list[str]: ...
+
+    async def cancelling(self) -> list[str]: ...
+
+    async def notify_terminal(self) -> None: ...
 
 
 @dataclass
@@ -214,6 +218,7 @@ class TurnLoop:
         compactor: Compactor | None = None,
         tracer: Tracer = NULL_TRACER,
         turn_span: Any = None,
+        event_claim: Callable[[Emitted], bool] | None = None,
     ) -> None:
         self.store = store
         self.provider = provider
@@ -235,6 +240,7 @@ class TurnLoop:
         self.compactor = compactor
         self.tracer = tracer
         self.turn_span = turn_span
+        self.event_claim = event_claim
         self.tool_spans: dict[str, Any] = {}
         self.terminal: TurnCompleted | TurnFailed | None = None
         self.turn.history = self.history
@@ -370,130 +376,37 @@ class TurnLoop:
             verdict = strictest(verdict, decide(name, rules, None, self.default_permission))
         return verdict
 
-    async def _attach(self, call_id: str, agent: Any) -> tuple[str, Exception | None, list[Emitted]]:
+    async def _attach(
+        self, call_id: str, agent: Any, input: str
+    ) -> tuple[TaskRef | None, Exception | None, list[Emitted]]:
         try:
             name = self.spawner.resolve(agent)
         except Exception as exc:
-            return "", exc, []
+            return None, exc, []
         index = self.spawns.get(call_id, 0)
         records = self.state.children.get(call_id, [])
         self.spawns[call_id] = index + 1
+        ref = await self.spawner.create(name, call_id, index, input)
         if index < len(records):
-            return records[index].child_session_id, None, []
-        child = await self.spawner.create(name)
-        spawned = ChildSessionSpawned(call_id=call_id, child_session_id=child, agent=name)
-        return child, None, await self._append([spawned])
+            record = records[index]
+            if (record.child_session_id, record.agent) != (ref.task_id, ref.agent):
+                raise TantraError(f"task {ref.task_id}: persisted child link does not match its deterministic identity")
+            self.spawner.launch(ref, self.tool_spans.get(call_id))
+            return ref, None, []
+        spawned = ChildSessionSpawned(call_id=call_id, child_session_id=ref.task_id, agent=name)
+        emitted = await self._append([spawned])
+        self.spawner.launch(ref, self.tool_spans.get(call_id))
+        return ref, None, emitted
 
     async def _spawn(self, call_id: str, agent: Any, input: str, future: asyncio.Future[Any]) -> AsyncIterator[Emitted]:
-        child, error, spawned = await self._attach(call_id, agent)
+        ref, error, spawned = await self._attach(call_id, agent, input)
         for emitted in spawned:
             yield emitted
         if error is not None:
             future.set_exception(error)
             return
-        previous = current_span.get()
-        current_span.set(self.tool_spans.get(call_id))
-        try:
-            async with aclosing(self.spawner.drive(child, input)) as stream:
-                async for emitted in stream:
-                    yield emitted
-            outcome = await self.spawner.outcome(child)
-        except SessionBusy:
-            raise
-        except Exception as exc:
-            future.set_exception(exc)
-            return
-        finally:
-            current_span.set(previous)
-        if outcome.pending_ask is not None:
-            self.suspended = outcome.pending_ask
-        elif outcome.error is not None:
-            future.set_exception(outcome.error)
-        else:
-            future.set_result(outcome.result)
-
-    async def _merge(
-        self,
-        plan: Sequence[tuple[int, str, str]],
-        max_concurrency: int,
-        slots: list[Any],
-        waiting: dict[int, str],
-    ) -> AsyncIterator[Emitted]:
-        queue: asyncio.Queue[Emitted] = asyncio.Queue()
-        gate = asyncio.Semaphore(max(1, max_concurrency))
-
-        async def child(index: int, sid: str, task_input: str) -> None:
-            async with gate:
-                try:
-                    async with aclosing(self.spawner.drive(sid, task_input)) as stream:
-                        async for emitted in stream:
-                            await queue.put(emitted)
-                    outcome = await self.spawner.outcome(sid)
-                except SessionBusy:
-                    raise
-                except Exception as exc:
-                    slots[index] = exc
-                    return
-            if outcome.pending_ask is not None:
-                waiting[index] = outcome.pending_ask
-            elif outcome.error is not None:
-                slots[index] = outcome.error
-            else:
-                slots[index] = outcome.result
-
-        workers = [asyncio.ensure_future(child(*entry)) for entry in plan]
-        gathered = asyncio.ensure_future(asyncio.gather(*workers))
-        getter: asyncio.Future[Emitted] | None = None
-        try:
-            while True:
-                getter = asyncio.ensure_future(queue.get())
-                finished, _ = await asyncio.wait({getter, gathered}, return_when=asyncio.FIRST_COMPLETED)
-                if getter in finished:
-                    yield getter.result()
-                    continue
-                getter.cancel()
-                getter = None
-                break
-            while not queue.empty():
-                yield queue.get_nowait()
-            await gathered
-        finally:
-            for pending in (*workers, gathered, getter):
-                if pending is not None:
-                    pending.cancel()
-            with suppress(asyncio.CancelledError):
-                await asyncio.gather(*workers, gathered, return_exceptions=True)
-
-    async def _fan_out(
-        self,
-        call_id: str,
-        tasks: Sequence[tuple[Any, str]],
-        max_concurrency: int,
-        future: asyncio.Future[Any],
-    ) -> AsyncIterator[Emitted]:
-        slots: list[Any] = [None] * len(tasks)
-        plan: list[tuple[int, str, str]] = []
-        for index, (agent, task_input) in enumerate(tasks):
-            child, error, spawned = await self._attach(call_id, agent)
-            for emitted in spawned:
-                yield emitted
-            if error is not None:
-                slots[index] = error
-            else:
-                plan.append((index, child, task_input))
-        waiting: dict[int, str] = {}
-        previous = current_span.get()
-        current_span.set(self.tool_spans.get(call_id))
-        try:
-            async with aclosing(self._merge(plan, max_concurrency, slots, waiting)) as merged:
-                async for emitted in merged:
-                    yield emitted
-        finally:
-            current_span.set(previous)
-        if waiting:
-            self.suspended = waiting[min(waiting)]
-            return
-        future.set_result(slots)
+        assert ref is not None
+        future.set_result(ref)
 
     async def _sample(
         self, req: SampleRequest, *, sample_id: str, compacted: bool
@@ -547,9 +460,6 @@ class TurnLoop:
         async def spawn(agent: Any, input: str) -> Any:
             return await request("spawn", (agent, input))
 
-        async def fan_out(tasks: Any, max_concurrency: int = 4) -> list[Any]:
-            return await request("fan_out", (tasks, max_concurrency))
-
         delegates = self.spawner is not None
         ctx = Context(
             session_id=self.header.id,
@@ -561,7 +471,10 @@ class TurnLoop:
             emit=emit,
             ask=ask,
             spawn=spawn if delegates else None,
-            fan_out=fan_out if delegates else None,
+            task_status=self.spawner.status if delegates else None,
+            task_messages=self.spawner.messages if delegates else None,
+            task_result=self.spawner.result if delegates else None,
+            task_wait=self.spawner.wait if delegates else None,
             memory=self.memory,
         )
         task = asyncio.ensure_future(tool.invoke(args, ctx))
@@ -576,12 +489,8 @@ class TurnLoop:
                         for emitted in await self._append([ToolProgress(call_id=call_id, message=payload)]):
                             yield emitted
                         continue
-                    if kind in ("spawn", "fan_out"):
-                        delegation = (
-                            self._spawn(call_id, *payload, future)
-                            if kind == "spawn"
-                            else self._fan_out(call_id, *payload, future)
-                        )
+                    if kind == "spawn":
+                        delegation = self._spawn(call_id, *payload, future)
                         async with aclosing(delegation) as delegated:
                             async for emitted in delegated:
                                 yield emitted
@@ -650,6 +559,10 @@ class TurnLoop:
     async def _submit(self, call: ToolCallRequested) -> tuple[list[Emitted], Any, bool]:
         schema = self.agent.output_schema
         assert schema is not None
+        unfinished = await self.spawner.unfinished() if self.spawner is not None else []
+        if unfinished:
+            result = f"cannot submit output while descendant tasks are unfinished: {unfinished}; call task_wait"
+            return await self._completed(call.call_id, result, is_error=True, call=call), None, False
         try:
             value = schema.model_validate(call.args)
         except ValidationError as exc:
@@ -693,6 +606,8 @@ class TurnLoop:
         self.failed = True
         failure = TurnFailed(turn_id=self.turn.turn_id, error=str(exc))
         appended = await self._append([failure])
+        if self.spawner is not None:
+            await self.spawner.notify_terminal()
         self.terminal = failure
         for emitted in appended:
             yield emitted
@@ -712,12 +627,35 @@ class TurnLoop:
             async for emitted in self._cancel():
                 yield emitted
             return
+        if reason == "cancelled" and self.spawner is not None:
+            cancelling = await self.spawner.cancelling()
+            while cancelling:
+                await self.spawner.wait(cancelling)
+                cancelling = await self.spawner.cancelling()
+        unfinished = await self.spawner.unfinished() if self.spawner is not None and reason != "cancelled" else []
+        if unfinished:
+            sample_id = next(event.sample_id for event in reversed(self.history) if isinstance(event, SampleStarted))
+            call_id = uuid5(NAMESPACE_URL, f"tantra:completion-wait:{self.turn.turn_id}:{sample_id}").hex
+            requested = ToolCallRequested(sample_id=sample_id, call_id=call_id, name="task_wait", args={})
+            for emitted in await self._append([requested, ToolCallStarted(call_id=call_id)]):
+                yield emitted
+            result: dict[str, Any] = {"reason": "all_terminal", "task_ids": []}
+            while unfinished:
+                result = await self.spawner.wait(unfinished)
+                if reason != "max_steps":
+                    break
+                unfinished = await self.spawner.unfinished()
+            for emitted in await self._completed(call_id, result):
+                yield emitted
+            return
         event = TurnCompleted(turn_id=self.turn.turn_id, stop_reason=reason, output=output)
         appended, written = await self._write(
             [event],
             abort_on_inbox=abort_on_inbox,
             abort_on_cancel=reason != "cancelled",
         )
+        if written and self.spawner is not None:
+            await self.spawner.notify_terminal()
         for emitted in appended:
             yield emitted
         if not written:
@@ -776,7 +714,7 @@ class TurnLoop:
                 if stopped:
                     self.stop = ("output", output)
                 continue
-            if capped:
+            if capped and call.name != "task_wait":
                 capped_result = "not executed: max steps reached"
                 for emitted in await self._completed(call.call_id, capped_result, is_error=True, call=call):
                     yield emitted
@@ -1047,6 +985,8 @@ class TurnLoop:
         try:
             async with aclosing(self._drive()) as stream:
                 async for emitted in stream:
+                    if self.event_claim is not None and not self.event_claim(emitted):
+                        continue
                     if emitted.session_id == self.header.id:
                         for hook in self.hooks:
                             await hook.on_event(emitted)

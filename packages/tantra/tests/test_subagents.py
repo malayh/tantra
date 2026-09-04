@@ -1,820 +1,419 @@
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
 
+from tantra import Agent, Context, Harness, TantraError, TaskRef, tool
 from tantra.adapters.collect import collect
-from tantra.agent import Agent
 from tantra.ask import FreeText, FreeTextResponse
-from tantra.errors import SessionBusy, TantraError
+from tantra.context import build_messages
 from tantra.events import (
     AskRaised,
-    CancelRequested,
     ChildSessionSpawned,
+    ReasoningPart,
+    SampleStarted,
     SessionCreated,
     SessionEvent,
     SessionHeader,
+    TaskNoticeQueued,
     TextPart,
     ToolCallCompleted,
     ToolCallRequested,
-    ToolProgress,
     TurnCompleted,
+    TurnStarted,
 )
-from tantra.harness import Harness
 from tantra.hooks import Hook
 from tantra.loop import Emitted
-from tantra.providers.base import ToolCall
+from tantra.providers.base import ModelLimits, ProviderEvent, ReasoningBlock, SampleRequest, StreamEnd, ToolCall
 from tantra.providers.fake import FakeProvider, Sample
 from tantra.stores.memory import MemoryStore
-from tantra.tools import Context, tool
+from tantra.tasking import TASK_TOOL_NAMES, TaskSupervisor, derive_task_state, task_id
 
 
-def call(name: str, args: str, cid: str = "c1") -> ToolCall:
+def call(name: str, args: str, cid: str) -> ToolCall:
     return ToolCall(id=cid, name=name, args=args)
 
 
 def picks(events: list[Emitted], kind: Any) -> list[Any]:
-    return [event.event for event in events if isinstance(event.event, kind)]
+    return [item.event for item in events if isinstance(item.event, kind)]
 
 
 async def history(store: MemoryStore, sid: str) -> list[SessionEvent]:
-    return [stamped.event async for stamped in store.read(sid)]
+    return [item.event async for item in store.read(sid)]
 
 
-@tool
-async def look(q: str) -> str:
-    """Look something up."""
-    return f"found {q}"
+class RoutedProvider:
+    provider_name = "routed"
+
+    def __init__(self) -> None:
+        self.root_samples: list[Sample] = []
+        self.requests: list[SampleRequest] = []
+        self.counts: defaultdict[str, int] = defaultdict(int)
+        self.release = asyncio.Event()
+        self.two_started = asyncio.Event()
+        self.waiting = asyncio.Event()
+        self.active = 0
+        self.max_active = 0
+        self.attempts: defaultdict[str, int] = defaultdict(int)
+
+    def limits(self, model: str) -> ModelLimits:
+        return ModelLimits(context_window=1_000_000, max_output=64_000)
+
+    async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+        self.requests.append(req)
+        index = self.counts[req.model]
+        self.counts[req.model] += 1
+        if req.model == "root":
+            if index == 1:
+                await self.two_started.wait()
+            if index >= len(self.root_samples):
+                self.waiting.set()
+                await asyncio.Event().wait()
+            sample = self.root_samples[index]
+        else:
+            task_input = req.messages[0].content
+            self.attempts[task_input] += 1
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active == 2:
+                self.two_started.set()
+            try:
+                await self.release.wait()
+                sample = Sample(text=f"done {task_input}")
+            finally:
+                self.active -= 1
+        yield StreamEnd(
+            text=sample.text,
+            reasoning=[ReasoningBlock(text=sample.reasoning)] if sample.reasoning else [],
+            tool_calls=sample.tool_calls,
+            usage=sample.usage,
+            finish_reason=sample.finish_reason or ("tool_calls" if sample.tool_calls else "stop"),
+        )
 
 
-class Researcher(Agent):
-    tools = [look]
+class ModelProvider:
+    provider_name = "model"
+
+    def __init__(self, samples: dict[str, list[Sample]]) -> None:
+        self.samples = samples
+
+    def limits(self, model: str) -> ModelLimits:
+        return ModelLimits(context_window=1_000_000, max_output=64_000)
+
+    async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+        sample = self.samples[req.model].pop(0)
+        yield StreamEnd(
+            text=sample.text,
+            reasoning=[ReasoningBlock(text=sample.reasoning)] if sample.reasoning else [],
+            tool_calls=sample.tool_calls,
+            usage=sample.usage,
+            finish_reason=sample.finish_reason or ("tool_calls" if sample.tool_calls else "stop"),
+        )
 
 
-class Boss(Agent):
-    subagents = [Researcher]
+class Worker(Agent):
+    model = "worker"
 
 
-async def test_child_tool_events_ride_the_parent_stream_but_never_the_parent_log() -> None:
+class Root(Agent):
+    model = "root"
+    max_steps = 20
+    subagents = [Worker]
+
+
+def six_launches() -> list[ToolCall]:
+    return [call("worker", f'{{"task":"job {index}"}}', f"launch-{index}") for index in range(6)]
+
+
+def wait_calls(count: int) -> list[Sample]:
+    return [Sample(tool_calls=[call("task_wait", "{}", f"wait-{index}")]) for index in range(count)]
+
+
+async def test_six_tasks_are_async_bounded_inspectable_waited_and_return_results() -> None:
     store = MemoryStore()
-    harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("researcher", '{"task": "dig"}', cid="p1")]),
-                Sample(tool_calls=[call("look", '{"q": "a"}', cid="k1"), call("look", '{"q": "b"}', cid="k2")]),
-                Sample(text="child answer"),
-                Sample(text="parent answer"),
+    provider = RoutedProvider()
+    harness = Harness(provider, store, [Root], max_concurrency=2)
+    sid = (await harness.create_session(Root)).id
+    ids = [task_id(sid, f"launch-{index}", 0) for index in range(6)]
+    provider.root_samples = [
+        Sample(tool_calls=six_launches()),
+        Sample(
+            tool_calls=[
+                call("task_status", f'{{"task_id":"{ids[0]}","limit":100}}', "status-running"),
+                call("task_status", f'{{"task_id":"{ids[-1]}","limit":1}}', "status-queued"),
+                call("task_messages", f'{{"task_id":"{ids[0]}"}}', "messages-running"),
             ]
         ),
-        store,
-        [Boss],
-        default_model="fake/model",
-    )
-    sid = (await harness.create_session(Boss, {"company": 42})).id
-
-    events = await collect(harness.run(sid, "go"))
-
-    spawned = picks(events, ChildSessionSpawned)
-    assert len(spawned) == 1
-    assert spawned[0].agent == "researcher"
-    assert spawned[0].call_id == "p1"
-    child_sid = spawned[0].child_session_id
-
-    forwarded = [event for event in events if event.session_id == child_sid]
-    assert forwarded
-    assert all(event.depth == 1 for event in forwarded)
-    assert [event.event.args["q"] for event in forwarded if isinstance(event.event, ToolCallRequested)] == ["a", "b"]
-    assert [event.event.result for event in forwarded if isinstance(event.event, ToolCallCompleted)] == [
-        "found a",
-        "found b",
+        *wait_calls(6),
+        Sample(
+            tool_calls=[
+                call("task_result", f'{{"task_id":"{task}"}}', f"result-{index}") for index, task in enumerate(ids)
+            ]
+        ),
+        Sample(text="root done"),
     ]
 
+    running = asyncio.create_task(collect(harness.run(sid, "root work")))
+    await asyncio.wait_for(provider.two_started.wait(), 1)
+    while provider.counts["root"] < 2:
+        await asyncio.sleep(0)
+    states = [derive_task_state(await history(store, task)) for task in ids]
+    assert states.count("running") == 2
+    assert states.count("queued") == 4
+    assert provider.counts["root"] == 2
+    while not {
+        "status-running",
+        "status-queued",
+        "messages-running",
+    }.issubset({event.call_id for event in await history(store, sid) if isinstance(event, ToolCallCompleted)}):
+        await asyncio.sleep(0)
+    provider.release.set()
+    events = await asyncio.wait_for(running, 2)
+
+    assert provider.max_active == 2
+    assert [event.child_session_id for event in picks(events, ChildSessionSpawned)] == ids
     parent_log = await history(store, sid)
-    assert [event.name for event in parent_log if isinstance(event, ToolCallRequested)] == ["researcher"]
-    assert len([event for event in parent_log if isinstance(event, ChildSessionSpawned)]) == 1
-    result = [event for event in parent_log if isinstance(event, ToolCallCompleted)][0]
-    assert result.result == "child answer"
-    assert not result.is_error
+    assert not any(isinstance(event, TurnStarted) and event.input.startswith("job ") for event in parent_log)
+    status_running = next(event for event in picks(events, ToolCallCompleted) if event.call_id == "status-running")
+    status_queued = next(event for event in picks(events, ToolCallCompleted) if event.call_id == "status-queued")
+    assert status_running.result["state"] == "running"
+    assert status_running.result["events"][0]["seq"] == 1
+    assert not status_running.result["has_more"]
+    assert status_queued.result["state"] == "queued"
+    assert len(status_queued.result["events"]) == 1
+    messages = next(event for event in picks(events, ToolCallCompleted) if event.call_id == "messages-running")
+    assert messages.result == [{"role": "user", "content": "job 0"}]
+    for index, task in enumerate(ids):
+        result = next(event for event in picks(events, ToolCallCompleted) if event.call_id == f"result-{index}")
+        assert result.result == {"task_id": task, "state": "completed", "text": f"done job {index}"}
+    notices = [event for event in parent_log if isinstance(event, TaskNoticeQueued)]
+    assert {event.task_session_id for event in notices} == set(ids)
+    assert all(event.state == "completed" for event in notices)
     assert picks(events, TurnCompleted)[-1].stop_reason == "completed"
 
-    fresh = Harness(FakeProvider([]), store, [Boss], default_model="fake/model")
-    replayed = await collect(fresh.replay(sid))
-    assert all(event.session_id == sid for event in replayed)
-    assert [event.event for event in replayed] == parent_log
 
-    child_header = await store.header(child_sid)
-    assert child_header.parent_id == sid
-    assert child_header.depth == 1
-    assert child_header.metadata == {"company": 42}
-    assert [header.id for header in await store.list(parent_id=sid)] == [child_sid]
-
-
-async def test_replaying_a_child_session_keeps_its_depth() -> None:
+async def test_abandonment_and_fresh_harness_recovery_keep_ids_and_cap() -> None:
     store = MemoryStore()
-    harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("researcher", '{"task": "dig"}', cid="p1")]),
-                Sample(tool_calls=[call("look", '{"q": "a"}', cid="k1")]),
-                Sample(text="child answer"),
-                Sample(text="parent answer"),
-            ]
-        ),
-        store,
-        [Boss],
-        default_model="fake/model",
-    )
-    sid = (await harness.create_session(Boss)).id
+    opening_provider = RoutedProvider()
+    opening = Harness(opening_provider, store, [Root], max_concurrency=2)
+    sid = (await opening.create_session(Root)).id
+    ids = [task_id(sid, f"launch-{index}", 0) for index in range(6)]
+    opening_provider.root_samples = [Sample(tool_calls=six_launches())]
 
-    events = await collect(harness.run(sid, "go"))
-    child_sid = picks(events, ChildSessionSpawned)[0].child_session_id
+    stream = opening.run(sid, "root work")
+    seen: list[Emitted] = []
+    async for emitted in stream:
+        seen.append(emitted)
+        if opening_provider.two_started.is_set() and len(picks(seen, ChildSessionSpawned)) == 6:
+            break
+    await stream.aclose()
+    assert [event.child_session_id for event in picks(seen, ChildSessionSpawned)] == ids
+    assert len(await store.list(parent_id=sid)) == 6
 
-    replayed = await collect(harness.replay(child_sid))
+    fresh_provider = RoutedProvider()
+    fresh_provider.root_samples = [*wait_calls(6), Sample(text="recovered")]
+    fresh = Harness(fresh_provider, store, [Root], max_concurrency=2)
+    resumed = asyncio.create_task(collect(fresh.resume(sid)))
+    await asyncio.wait_for(fresh_provider.two_started.wait(), 1)
+    fresh_provider.release.set()
+    events = await asyncio.wait_for(resumed, 2)
 
-    assert replayed
-    assert all(event.session_id == child_sid for event in replayed)
-    assert all(event.depth == 1 for event in replayed), "replay flattened a child session to depth 0"
-
-
-async def test_the_subagent_tool_is_named_after_the_agent_and_takes_a_task() -> None:
-    store = MemoryStore()
-    harness = Harness(FakeProvider([]), store, [Boss], default_model="fake/model")
-
-    delegate = harness.tools["boss"]["researcher"]
-    assert delegate.schema.name == "researcher"
-    assert delegate.schema.description == "Delegate a task to the researcher sub-agent."
-    assert delegate.schema.parameters["properties"]["task"]["type"] == "string"
-    assert "ctx" not in delegate.schema.parameters["properties"]
-
-
-async def test_a_subagent_docstring_becomes_the_tool_description() -> None:
-    class Scout(Agent):
-        """Scouts ahead and reports back."""
-
-    class Captain(Agent):
-        subagents = [Scout]
-
-    harness = Harness(FakeProvider([]), MemoryStore(), [Captain], default_model="fake/model")
-    assert harness.tools["captain"]["scout"].schema.description == "Scouts ahead and reports back."
-
-
-async def test_spawn_accepts_a_class_or_a_name_and_records_one_child_per_call() -> None:
-    @tool
-    async def delegate(ctx: Context) -> str:
-        """Delegates twice, by class then by name."""
-        first = await ctx.spawn(Researcher, "one")
-        second = await ctx.spawn("researcher", "two")
-        return f"{first}|{second}"
-
-    class Delegator(Agent):
-        tools = [delegate]
-        subagents = [Researcher]
-
-    store = MemoryStore()
-    harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("delegate", "{}", cid="p1")]),
-                Sample(text="one done"),
-                Sample(text="two done"),
-                Sample(text="parent done"),
-            ]
-        ),
-        store,
-        [Delegator],
-        default_model="fake/model",
-    )
-    sid = (await harness.create_session(Delegator)).id
-
-    events = await collect(harness.run(sid, "go"))
-
-    assert [event.result for event in picks(events, ToolCallCompleted) if event.call_id == "p1"] == [
-        "one done|two done"
-    ]
-    spawned = picks(events, ChildSessionSpawned)
-    assert len(spawned) == 2
-    assert len({event.child_session_id for event in spawned}) == 2
-    assert len(await store.list(parent_id=sid)) == 2
-
-
-async def test_spawn_returns_the_parsed_output_of_a_child_with_an_output_schema() -> None:
-    class Report(BaseModel):
-        title: str
-        findings: int
-
-    class Analyst(Agent):
-        output_schema = Report
-
-    @tool
-    async def analyze(ctx: Context) -> Any:
-        """Delegates to the analyst."""
-        return await ctx.spawn(Analyst, "analyze this")
-
-    class Chief(Agent):
-        tools = [analyze]
-        subagents = [Analyst]
-
-    store = MemoryStore()
-    harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("analyze", "{}", cid="p1")]),
-                Sample(tool_calls=[call("submit_output", '{"title": "p99", "findings": 3}', cid="k1")]),
-                Sample(text="parent done"),
-            ]
-        ),
-        store,
-        [Chief],
-        default_model="fake/model",
-    )
-    sid = (await harness.create_session(Chief)).id
-
-    events = await collect(harness.run(sid, "go"))
-
-    parent_result = [event for event in picks(events, ToolCallCompleted) if event.call_id == "p1"][0]
-    assert parent_result.result == {"title": "p99", "findings": 3}
-    assert not parent_result.is_error
-
-
-async def test_spawning_an_unknown_agent_raises_before_any_child_session_exists() -> None:
-    @tool
-    async def summon(ctx: Context) -> str:
-        """Spawns an agent that was never declared."""
-        return await ctx.spawn("ghost", "x")
-
-    class Summoner(Agent):
-        tools = [summon]
-
-    store = MemoryStore()
-    harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("summon", "{}", cid="p1")]),
-                Sample(text="recovered"),
-            ]
-        ),
-        store,
-        [Summoner],
-        default_model="fake/model",
-    )
-    sid = (await harness.create_session(Summoner)).id
-
-    events = await collect(harness.run(sid, "go"))
-
-    failure = picks(events, ToolCallCompleted)[0]
-    assert failure.is_error
-    assert "unknown agent 'ghost'" in failure.result
+    assert fresh_provider.max_active == 2
+    assert len(await store.list(parent_id=sid)) == 6
     assert not picks(events, ChildSessionSpawned)
-    assert await store.list(parent_id=sid) == []
-    assert picks(events, TurnCompleted)[0].stop_reason == "completed"
-
-
-async def test_max_depth_stops_the_spawn_before_the_child_session_is_created() -> None:
-    @tool
-    async def deeper(ctx: Context) -> str:
-        """Spawns one level deeper."""
-        return await ctx.spawn(Researcher, "deeper")
-
-    class Middle(Agent):
-        tools = [deeper]
-        subagents = [Researcher]
-
-    class Top(Agent):
-        subagents = [Middle]
-
-    store = MemoryStore()
-    harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("middle", '{"task": "go"}', cid="p1")]),
-                Sample(tool_calls=[call("deeper", "{}", cid="k1")]),
-                Sample(text="child recovered"),
-                Sample(text="parent done"),
-            ]
-        ),
-        store,
-        [Top],
-        default_model="fake/model",
-        max_depth=1,
-    )
-    sid = (await harness.create_session(Top)).id
-
-    events = await collect(harness.run(sid, "go"))
-
-    child_sid = picks(events, ChildSessionSpawned)[0].child_session_id
-    refused = [event for event in picks(events, ToolCallCompleted) if event.call_id == "k1"][0]
-    assert refused.is_error
-    assert "max_depth 1 exceeded" in refused.result
-    assert await store.list(parent_id=child_sid) == []
-    assert len(picks(events, ChildSessionSpawned)) == 1
+    assert all(fresh_provider.attempts[f"job {index}"] == 1 for index in range(6))
+    states = [derive_task_state(await history(store, task)) for task in ids]
+    assert states == ["completed"] * 6
     assert picks(events, TurnCompleted)[-1].stop_reason == "completed"
 
 
-async def test_a_child_ask_suspends_the_ancestry_and_two_resumes_finish_both_turns() -> None:
+async def test_child_ask_is_visible_and_answering_then_root_resume_reconciles_notice() -> None:
     @tool
     async def confirm(ctx: Context) -> str:
-        """Asks the human before answering."""
-        reply = await ctx.ask(FreeText(prompt="which one?"))
+        reply = await ctx.ask(FreeText(prompt="which?"))
         return f"picked {reply.text}"
 
     class Asker(Agent):
+        model = "asker"
         tools = [confirm]
 
     class Manager(Agent):
+        model = "manager"
         subagents = [Asker]
 
     store = MemoryStore()
-    opening_harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("asker", '{"task": "decide"}', cid="p1")]),
-                Sample(tool_calls=[call("confirm", "{}", cid="k1")]),
-            ]
+    opening = Harness(
+        ModelProvider(
+            {
+                "manager": [
+                    Sample(tool_calls=[call("asker", '{"task":"choose"}', "launch")]),
+                    Sample(tool_calls=[call("task_wait", "{}", "wait")]),
+                ],
+                "asker": [Sample(tool_calls=[call("confirm", "{}", "confirm")])],
+            }
         ),
         store,
         [Manager],
-        default_model="fake/model",
     )
-    sid = (await opening_harness.create_session(Manager)).id
+    sid = (await opening.create_session(Manager)).id
+    stream = opening.run(sid, "go")
+    seen: list[Emitted] = []
+    async for emitted in stream:
+        seen.append(emitted)
+        if emitted.session_id != sid and isinstance(emitted.event, AskRaised):
+            break
+    await stream.aclose()
+    child = next(item.session_id for item in seen if isinstance(item.event, AskRaised))
+    raised = picks(seen, AskRaised)[0]
+    assert derive_task_state(await history(store, child)) == "awaiting_input"
 
-    opening = await collect(opening_harness.run(sid, "go"))
-
-    child_sid = picks(opening, ChildSessionSpawned)[0].child_session_id
-    raised = picks(opening, AskRaised)[0]
-    assert [event.session_id for event in opening if isinstance(event.event, AskRaised)] == [child_sid]
-    assert not picks(opening, TurnCompleted)
-
-    parent_log = await history(store, sid)
-    assert not [event for event in parent_log if isinstance(event, AskRaised)]
-    assert not [event for event in parent_log if isinstance(event, ToolCallCompleted)]
-    assert [event.ask_id for event in await history(store, child_sid) if isinstance(event, AskRaised)] == [
-        raised.ask_id
-    ]
-
-    parent_header = await store.header(sid)
-    child_header = await store.header(child_sid)
-    assert parent_header.status == "awaiting_input"
-    assert parent_header.pending_ask == raised.ask_id
-    assert child_header.status == "awaiting_input"
-    assert child_header.pending_ask == raised.ask_id
-
-    del opening_harness
-    fresh = Harness(
-        FakeProvider([Sample(text="child done"), Sample(text="parent done")]),
+    child_harness = Harness(
+        ModelProvider({"asker": [Sample(text="child done")]}),
         store,
         [Manager],
-        default_model="fake/model",
     )
-
-    answered = await collect(fresh.resume(child_sid, raised.ask_id, FreeTextResponse(text="blue")))
-    assert picks(answered, ToolCallCompleted)[0].result == "picked blue"
+    answered = await collect(child_harness.resume(child, raised.ask_id, FreeTextResponse(text="blue")))
     assert picks(answered, TurnCompleted)[0].stop_reason == "completed"
 
+    fresh = Harness(
+        ModelProvider(
+            {
+                "manager": [
+                    Sample(tool_calls=[call("task_result", f'{{"task_id":"{child}"}}', "result")]),
+                    Sample(text="manager done"),
+                ]
+            }
+        ),
+        store,
+        [Manager],
+    )
     finished = await collect(fresh.resume(sid))
-    assert [event.result for event in picks(finished, ToolCallCompleted) if event.call_id == "p1"] == ["child done"]
-    assert picks(finished, TurnCompleted)[0].stop_reason == "completed"
+    result = next(event for event in picks(finished, ToolCallCompleted) if event.call_id == "result")
+    assert result.result == {"task_id": child, "state": "completed", "text": "child done"}
+    notices = [event for event in await history(store, sid) if isinstance(event, TaskNoticeQueued)]
+    assert len(notices) == 1
 
-    assert [header.id for header in await store.list(parent_id=sid)] == [child_sid]
-    assert (await store.header(sid)).status == "idle"
 
-
-async def test_a_grandchild_ask_suspends_three_levels_and_one_root_resume_re_drives_the_chain() -> None:
+async def test_direct_child_resume_notifies_live_waiting_parent_once() -> None:
     @tool
     async def confirm(ctx: Context) -> str:
-        """Asks the human before answering."""
-        reply = await ctx.ask(FreeText(prompt="ok?"))
-        return f"heard {reply.text}"
+        reply = await ctx.ask(FreeText(prompt="which?"))
+        return f"picked {reply.text}"
 
-    class Leaf(Agent):
+    class Asker(Agent):
+        model = "asker"
         tools = [confirm]
 
-    class Mid(Agent):
-        subagents = [Leaf]
-
-    class Root(Agent):
-        subagents = [Mid]
+    class Manager(Agent):
+        model = "manager"
+        subagents = [Asker]
 
     store = MemoryStore()
-    opening_harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("mid", '{"task": "go"}', cid="p1")]),
-                Sample(tool_calls=[call("leaf", '{"task": "go"}', cid="m1")]),
-                Sample(tool_calls=[call("confirm", "{}", cid="l1")]),
-            ]
-        ),
-        store,
-        [Root],
-        default_model="fake/model",
-    )
-    sid = (await opening_harness.create_session(Root)).id
-
-    opening = await collect(opening_harness.run(sid, "go"))
-
-    mid_sid, leaf_sid = [event.child_session_id for event in picks(opening, ChildSessionSpawned)]
-    raised = picks(opening, AskRaised)[0]
-    assert {(event.session_id, event.depth) for event in opening} == {(sid, 0), (mid_sid, 1), (leaf_sid, 2)}
-    for target in (sid, mid_sid, leaf_sid):
-        header = await store.header(target)
-        assert header.status == "awaiting_input"
-        assert header.pending_ask == raised.ask_id
-
-    with pytest.raises(TantraError, match="unknown or already answered"):
-        await collect(opening_harness.resume(sid, raised.ask_id, FreeTextResponse(text="no")))
-
-    del opening_harness
-    fresh = Harness(
-        FakeProvider([Sample(text="leaf done"), Sample(text="mid done"), Sample(text="root done")]),
-        store,
-        [Root],
-        default_model="fake/model",
-    )
-
-    await collect(fresh.resume(leaf_sid, raised.ask_id, FreeTextResponse(text="yes")))
-    finished = await collect(fresh.resume(sid))
-
-    assert [event.session_id for event in finished if isinstance(event.event, TurnCompleted)] == [mid_sid, sid]
-    assert [event.result for event in picks(finished, ToolCallCompleted) if event.call_id == "p1"] == ["mid done"]
-    assert len(await store.list(parent_id=sid)) == 1
-    assert len(await store.list(parent_id=mid_sid)) == 1
-
-
-async def test_abandoning_a_parent_mid_child_turn_reattaches_instead_of_spawning_a_twin() -> None:
-    attempts: list[int] = []
-
-    @tool
-    async def flaky(ctx: Context) -> str:
-        """Reports progress, then stalls on the first attempt."""
-        attempts.append(1)
-        await ctx.emit("working")
-        if len(attempts) == 1:
-            await asyncio.sleep(5.0)
-        return "child work"
-
-    class Slow(Agent):
-        tools = [flaky]
-
-    class Overseer(Agent):
-        subagents = [Slow]
-
-    store = MemoryStore()
-    harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("slow", '{"task": "grind"}', cid="p1")]),
-                Sample(tool_calls=[call("flaky", "{}", cid="k1")]),
+    provider = ModelProvider(
+        {
+            "manager": [
+                Sample(tool_calls=[call("asker", '{"task":"choose"}', "launch")]),
+                Sample(tool_calls=[call("task_wait", "{}", "wait")]),
+                Sample(text="manager done"),
+            ],
+            "asker": [
+                Sample(tool_calls=[call("confirm", "{}", "confirm")]),
                 Sample(text="child done"),
-                Sample(text="parent done"),
-            ]
-        ),
-        store,
-        [Overseer],
-        default_model="fake/model",
+            ],
+        }
     )
-    sid = (await harness.create_session(Overseer)).id
+    harness = Harness(provider, store, [Manager], lease_ttl=0.3)
+    sid = (await harness.create_session(Manager)).id
+    parent = asyncio.create_task(collect(harness.run(sid, "go")))
 
-    stream = harness.run(sid, "go")
-    child_sid = ""
-    async for event in stream:
-        if isinstance(event.event, ChildSessionSpawned):
-            child_sid = event.event.child_session_id
-        if isinstance(event.event, ToolProgress):
-            break
-    await stream.aclose()
-
-    assert child_sid
-    assert len(attempts) == 1
-
-    resumed = await collect(harness.resume(sid))
-
-    assert len(attempts) == 2
-    assert not picks(resumed, ChildSessionSpawned)
-    assert [event.result for event in picks(resumed, ToolCallCompleted) if event.call_id == "p1"] == ["child done"]
-    assert picks(resumed, TurnCompleted)[-1].stop_reason == "completed"
-    assert [header.id for header in await store.list(parent_id=sid)] == [child_sid]
-    assert len([event for event in await history(store, sid) if isinstance(event, ChildSessionSpawned)]) == 1
-
-
-async def test_a_failed_spawn_does_not_shift_the_next_spawn_onto_its_child() -> None:
-    failures: list[str] = []
-
-    @tool
-    async def confirm(ctx: Context) -> str:
-        """Asks the human first."""
-        reply = await ctx.ask(FreeText(prompt="ok?"))
-        return f"heard {reply.text}"
-
-    class Helper(Agent):
-        tools = [confirm]
-
-    @tool
-    async def resilient(ctx: Context) -> str:
-        """Tries a missing agent, shrugs it off, then delegates for real."""
-        try:
-            await ctx.spawn("ghost", "a")
-        except TantraError as exc:
-            failures.append(str(exc))
-        return await ctx.spawn(Helper, "b")
-
-    class Chief(Agent):
-        tools = [resilient]
-        subagents = [Helper]
-
-    store = MemoryStore()
-    opening_harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("resilient", "{}", cid="p1")]),
-                Sample(tool_calls=[call("confirm", "{}", cid="k1")]),
-            ]
-        ),
-        store,
-        [Chief],
-        default_model="fake/model",
-    )
-    sid = (await opening_harness.create_session(Chief)).id
-
-    opening = await collect(opening_harness.run(sid, "go"))
-    child_sid = picks(opening, ChildSessionSpawned)[0].child_session_id
-    raised = picks(opening, AskRaised)[0]
-    assert len(failures) == 1
-
-    del opening_harness
-    fresh = Harness(
-        FakeProvider([Sample(text="child done"), Sample(text="parent done")]),
-        store,
-        [Chief],
-        default_model="fake/model",
-    )
-
-    await collect(fresh.resume(child_sid, raised.ask_id, FreeTextResponse(text="yes")))
-    finished = await collect(fresh.resume(sid))
-
-    assert len(failures) == 2
-    assert all("unknown agent 'ghost'" in failure for failure in failures)
-    assert [event.result for event in picks(finished, ToolCallCompleted) if event.call_id == "p1"] == ["child done"]
-    assert [header.id for header in await store.list(parent_id=sid)] == [child_sid]
-    assert len([event for event in await history(store, sid) if isinstance(event, ChildSessionSpawned)]) == 1
-
-
-async def test_a_busy_child_leaves_the_parent_turn_incomplete_instead_of_answering_the_spawn() -> None:
-    attempts: list[int] = []
-
-    @tool
-    async def flaky(ctx: Context) -> str:
-        """Reports progress, then stalls on the first attempt."""
-        attempts.append(1)
-        await ctx.emit("working")
-        if len(attempts) == 1:
-            await asyncio.sleep(5.0)
-        return "child work"
-
-    class Slow(Agent):
-        tools = [flaky]
-
-    class Overseer(Agent):
-        subagents = [Slow]
-
-    store = MemoryStore()
-    harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("slow", '{"task": "grind"}', cid="p1")]),
-                Sample(tool_calls=[call("flaky", "{}", cid="k1")]),
-                Sample(text="child done"),
-                Sample(text="parent done"),
-            ]
-        ),
-        store,
-        [Overseer],
-        default_model="fake/model",
-    )
-    sid = (await harness.create_session(Overseer)).id
-
-    stream = harness.run(sid, "go")
-    child_sid = ""
-    async for event in stream:
-        if isinstance(event.event, ChildSessionSpawned):
-            child_sid = event.event.child_session_id
-        if isinstance(event.event, ToolProgress):
-            break
-    await stream.aclose()
-
-    assert await store.acquire_lease(child_sid, "intruder", 60.0)
-
-    with pytest.raises(SessionBusy, match="is busy: lease held by another writer"):
-        await collect(harness.resume(sid))
-
+    children: list[SessionHeader] = []
+    while not children:
+        children = await store.list(parent_id=sid)
+        await asyncio.sleep(0)
+    child = children[0].id
+    child_log = await history(store, child)
+    while not any(isinstance(event, AskRaised) for event in child_log):
+        await asyncio.sleep(0)
+        child_log = await history(store, child)
     parent_log = await history(store, sid)
-    assert not [event for event in parent_log if isinstance(event, ToolCallCompleted)]
-    assert not [event for event in parent_log if isinstance(event, TurnCompleted)]
-    assert len(attempts) == 1
+    while not any(isinstance(event, ToolCallRequested) and event.call_id == "wait" for event in parent_log):
+        await asyncio.sleep(0)
+        parent_log = await history(store, sid)
 
-    await store.release_lease(child_sid, "intruder")
-    resumed = await collect(harness.resume(sid))
+    raised = next(event for event in child_log if isinstance(event, AskRaised))
+    direct = await collect(harness.resume(child, raised.ask_id, FreeTextResponse(text="blue")))
+    events = await asyncio.wait_for(parent, 2)
+    notices = [event for event in await history(store, sid) if isinstance(event, TaskNoticeQueued)]
 
-    assert len(attempts) == 2
-    assert [event.result for event in picks(resumed, ToolCallCompleted) if event.call_id == "p1"] == ["child done"]
-    assert picks(resumed, TurnCompleted)[-1].stop_reason == "completed"
-    assert [header.id for header in await store.list(parent_id=sid)] == [child_sid]
+    assert len(notices) == 1
+    assert notices[0].task_session_id == child
+    assert len([item for item in events if isinstance(item.event, TaskNoticeQueued)]) == 1
+    assert not [item for item in direct if isinstance(item.event, TaskNoticeQueued)]
 
 
-async def test_a_cancelled_child_becomes_an_error_result_not_a_silent_success() -> None:
-    @tool
-    async def bail(ctx: Context) -> str:
-        """Flags its own session for cancellation mid-turn."""
-        header = await ctx.store.header(ctx.session_id)
-        await ctx.store.append(ctx.session_id, [CancelRequested(turn_id=ctx.turn_id)], expect_seq=header.last_seq)
-        return "bailed"
-
-    class Quitter(Agent):
-        tools = [bail]
-
-    class Employer(Agent):
-        subagents = [Quitter]
-
+async def test_status_messages_result_bounds_lineage_and_redaction() -> None:
     store = MemoryStore()
-    harness = Harness(
-        FakeProvider(
+    harness = Harness(FakeProvider([]), store, [Root])
+    root = (await harness.create_session(Root)).id
+    child = SessionHeader(id="child", agent="worker", parent_id=root, depth=1, task_input="secret")
+    grandchild = SessionHeader(id="grand", agent="worker", parent_id="child", depth=2, task_input="nested")
+    outsider = (await harness.create_session(Root)).id
+    for header in (child, grandchild):
+        await store.create(header)
+        await store.append(
+            header.id,
             [
-                Sample(tool_calls=[call("quitter", '{"task": "go"}', cid="p1")]),
-                Sample(tool_calls=[call("bail", "{}", cid="k1")]),
-                Sample(text="parent done"),
-            ]
-        ),
-        store,
-        [Employer],
-        default_model="fake/model",
-    )
-    sid = (await harness.create_session(Employer)).id
+                SessionCreated(agent=header.agent, parent_id=header.parent_id, depth=header.depth),
+                TurnStarted(turn_id=f"turn-{header.id}", input=header.task_input or ""),
+                SampleStarted(turn_id=f"turn-{header.id}", sample_id="sample", model="worker"),
+                ReasoningPart(sample_id="sample", text="hidden"),
+                TextPart(sample_id="sample", text="visible"),
+                TurnCompleted(turn_id=f"turn-{header.id}", stop_reason="completed"),
+            ],
+            expect_seq=0,
+        )
+    supervisor = TaskSupervisor(harness, root)
 
-    events = await collect(harness.run(sid, "go"))
-
-    child_sid = picks(events, ChildSessionSpawned)[0].child_session_id
-    child_terminal = [event for event in await history(store, child_sid) if isinstance(event, TurnCompleted)][0]
-    assert child_terminal.stop_reason == "cancelled"
-
-    delegated = [event for event in picks(events, ToolCallCompleted) if event.call_id == "p1"][0]
-    assert delegated.is_error
-    assert "sub-agent turn cancelled" in delegated.result
-    assert picks(events, TurnCompleted)[-1].stop_reason == "completed"
-
-
-async def test_a_child_that_hits_max_steps_without_output_becomes_an_error_result() -> None:
-    class Capped(Agent):
-        tools = [look]
-        max_steps = 1
-
-    class Employer(Agent):
-        subagents = [Capped]
-
-    store = MemoryStore()
-    harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("capped", '{"task": "go"}', cid="p1")]),
-                Sample(tool_calls=[call("look", '{"q": "a"}', cid="k1")]),
-                Sample(text="parent done"),
-            ]
-        ),
-        store,
-        [Employer],
-        default_model="fake/model",
-    )
-    sid = (await harness.create_session(Employer)).id
-
-    events = await collect(harness.run(sid, "go"))
-
-    child_sid = picks(events, ChildSessionSpawned)[0].child_session_id
-    child_terminal = [event for event in await history(store, child_sid) if isinstance(event, TurnCompleted)][0]
-    assert child_terminal.stop_reason == "max_steps"
-
-    delegated = [event for event in picks(events, ToolCallCompleted) if event.call_id == "p1"][0]
-    assert delegated.is_error
-    assert "hit max_steps without producing output" in delegated.result
-    assert picks(events, TurnCompleted)[-1].stop_reason == "completed"
+    status = await supervisor.status(root, "grand", 1, 2)
+    assert status["parent"] == "child"
+    assert status["depth"] == 2
+    assert [event["seq"] for event in status["events"]] == [2, 3]
+    assert status["next_seq"] == 3
+    assert status["has_more"]
+    messages = await supervisor.messages(root, "grand", 100)
+    assert messages == [
+        {"role": "user", "content": "nested"},
+        {"role": "assistant", "text": "visible", "tool_calls": []},
+    ]
+    assert await supervisor.result(root, "grand") == {
+        "task_id": "grand",
+        "state": "completed",
+        "text": "visible",
+    }
+    for bad in (0, 101):
+        with pytest.raises(TantraError, match="between 1 and 100"):
+            await supervisor.status(root, "child", None, bad)
+        with pytest.raises(TantraError, match="between 1 and 100"):
+            await supervisor.messages(root, "child", bad)
+    with pytest.raises(TantraError, match="not a descendant"):
+        await supervisor.status(outsider, "child", None, 20)
 
 
-async def test_a_missing_ancestor_header_fails_closed_instead_of_widening_permissions() -> None:
-    store = MemoryStore()
-    harness = Harness(FakeProvider([Sample(text="never")]), store, [Boss], default_model="fake/model")
-    await store.create(SessionHeader(id="orphan", agent="researcher", parent_id="vanished", depth=1))
-    await store.append(
-        "orphan",
-        [SessionCreated(agent="researcher", parent_id="vanished", depth=1)],
-        expect_seq=0,
-    )
-
-    with pytest.raises(TantraError, match="parent session 'vanished' is missing"):
-        await collect(harness.run("orphan", "go"))
-
-
-async def test_a_parent_deny_rule_beats_a_child_allow_rule() -> None:
-    executed: list[str] = []
-
+async def test_generated_tools_refs_validation_reserved_names_and_hook_forwarding() -> None:
     @tool
-    async def risky(ctx: Context) -> str:
-        """Does something the parent forbids."""
-        executed.append("ran")
-        return "ran"
+    async def launch(ctx: Context) -> TaskRef:
+        return await ctx.spawn(Worker, "one")
 
-    class Worker(Agent):
-        tools = [risky]
-        permissions = {"risky": "allow"}
-
-    class Governor(Agent):
+    class CustomRoot(Agent):
+        model = "root"
+        max_steps = 10
+        tools = [launch]
         subagents = [Worker]
-        permissions = {"risky": "deny"}
 
-    store = MemoryStore()
-    harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("worker", '{"task": "go"}', cid="p1")]),
-                Sample(tool_calls=[call("risky", "{}", cid="k1")]),
-                Sample(text="child done"),
-                Sample(text="parent done"),
-            ]
-        ),
-        store,
-        [Governor],
-        default_model="fake/model",
-    )
-    sid = (await harness.create_session(Governor)).id
-
-    events = await collect(harness.run(sid, "go"))
-
-    denied = [event for event in picks(events, ToolCallCompleted) if event.call_id == "k1"][0]
-    assert denied.is_error
-    assert denied.result == "denied by permissions: risky"
-    assert executed == []
-    assert picks(events, TurnCompleted)[-1].stop_reason == "completed"
-
-
-async def test_the_permission_chain_is_rebuilt_when_a_child_resumes_in_a_fresh_harness() -> None:
-    executed: list[str] = []
-
-    @tool
-    async def risky() -> str:
-        """Does something the parent forbids."""
-        executed.append("ran")
-        return "ran"
-
-    @tool
-    async def confirm(ctx: Context) -> str:
-        """Asks the human first."""
-        reply = await ctx.ask(FreeText(prompt="ok?"))
-        return f"heard {reply.text}"
-
-    class Worker(Agent):
-        tools = [confirm, risky]
-        permissions = {"risky": "allow"}
-
-    class Governor(Agent):
-        subagents = [Worker]
-        permissions = {"risky": "deny"}
-
-    store = MemoryStore()
-    opening_harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("worker", '{"task": "go"}', cid="p1")]),
-                Sample(tool_calls=[call("confirm", "{}", cid="k1"), call("risky", "{}", cid="k2")]),
-            ]
-        ),
-        store,
-        [Governor],
-        default_model="fake/model",
-    )
-    sid = (await opening_harness.create_session(Governor)).id
-
-    opening = await collect(opening_harness.run(sid, "go"))
-    child_sid = picks(opening, ChildSessionSpawned)[0].child_session_id
-    raised = picks(opening, AskRaised)[0]
-
-    del opening_harness
-    fresh = Harness(
-        FakeProvider([Sample(text="child done"), Sample(text="parent done")]),
-        store,
-        [Governor],
-        default_model="fake/model",
-    )
-
-    answered = await collect(fresh.resume(child_sid, raised.ask_id, FreeTextResponse(text="yes")))
-
-    denied = [event for event in picks(answered, ToolCallCompleted) if event.call_id == "k2"][0]
-    assert denied.is_error
-    assert denied.result == "denied by permissions: risky"
-    assert executed == []
-
-    finished = await collect(fresh.resume(sid))
-    assert picks(finished, TurnCompleted)[0].stop_reason == "completed"
-
-
-async def test_a_forwarded_child_event_fires_on_event_exactly_once() -> None:
     seen: list[tuple[str, int]] = []
 
     class Recorder(Hook):
@@ -822,26 +421,59 @@ async def test_a_forwarded_child_event_fires_on_event_exactly_once() -> None:
             if emitted.seq is not None:
                 seen.append((emitted.session_id, emitted.seq))
 
+    provider = RoutedProvider()
+    provider.root_samples = [
+        Sample(tool_calls=[call("launch", "{}", "custom")]),
+        *wait_calls(9),
+    ]
+    provider.release.set()
+    provider.two_started.set()
     store = MemoryStore()
-    harness = Harness(
-        FakeProvider(
-            [
-                Sample(tool_calls=[call("researcher", '{"task": "dig"}', cid="p1")]),
-                Sample(tool_calls=[call("look", '{"q": "a"}', cid="k1")]),
-                Sample(text="child answer"),
-                Sample(text="parent answer"),
-            ]
-        ),
-        store,
-        [Boss],
-        default_model="fake/model",
-        hooks=[Recorder()],
-    )
-    sid = (await harness.create_session(Boss)).id
-
-    events = await collect(harness.run(sid, "go"))
-
-    child_sid = picks(events, ChildSessionSpawned)[0].child_session_id
+    harness = Harness(provider, store, [CustomRoot], max_concurrency=1, hooks=[Recorder()])
+    sid = (await harness.create_session(CustomRoot)).id
+    events = await asyncio.wait_for(collect(harness.run(sid, "go")), 2)
+    launched = next(event for event in picks(events, ToolCallCompleted) if event.call_id == "custom")
+    assert isinstance(launched.result, TaskRef)
+    generated = harness.tools["custom_root"]["worker"]
+    assert generated.schema.parameters["properties"]["task"]["type"] == "string"
+    builtins = {entry.name for entry in harness.tools["custom_root"].values()} - {"launch", "worker"}
+    assert TASK_TOOL_NAMES.issuperset(builtins)
     assert len(seen) == len(set(seen))
-    assert [key for key in seen if key[0] == child_sid]
-    assert len([event for event in picks(events, TextPart) if event.text == "child answer"]) == 1
+
+    with pytest.raises(TantraError, match="max_concurrency"):
+        Harness(FakeProvider([]), MemoryStore(), [Root], max_concurrency=0)
+
+    for name in TASK_TOOL_NAMES | {"submit_output"}:
+        reserved = tool(lambda: None, name=name)
+
+        class Bad(Agent):
+            tools = [reserved]
+
+        with pytest.raises(TantraError, match="reserved tool name"):
+            Harness(FakeProvider([]), MemoryStore(), [Bad])
+
+
+def test_task_messages_use_provider_visible_shapes() -> None:
+    events: list[SessionEvent] = [
+        TurnStarted(turn_id="turn", input="go"),
+        SampleStarted(turn_id="turn", sample_id="sample", model="worker"),
+        ReasoningPart(sample_id="sample", text="hidden"),
+        TextPart(sample_id="sample", text="shown"),
+        ToolCallRequested(sample_id="sample", call_id="call", name="x", args={"q": 1}),
+        ToolCallCompleted(call_id="call", result="ok"),
+    ]
+    visible = [
+        message.model_dump(mode="json", exclude={"reasoning"})
+        if message.role == "assistant"
+        else message.model_dump(mode="json")
+        for message in build_messages(events)
+    ]
+    assert visible == [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "text": "shown",
+            "tool_calls": [{"type": "tool_call", "id": "call", "name": "x", "args": '{"q": 1}'}],
+        },
+        {"role": "tool", "call_id": "call", "content": "ok", "is_error": False},
+    ]

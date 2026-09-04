@@ -251,7 +251,14 @@ async def test_capture_content_records_the_prompt_and_the_completion() -> None:
     assert output[0]["parts"] == [{"type": "text", "content": "p99 is fine."}]
     assert output[0]["finish_reason"] == "stop"
     tools = json.loads(chat.attributes["gen_ai.tool.definitions"])
-    assert {schema["name"] for schema in tools} == {"search", "explode"}
+    assert {schema["name"] for schema in tools} == {
+        "search",
+        "explode",
+        "task_status",
+        "task_messages",
+        "task_result",
+        "task_wait",
+    }
 
     root = one(exporter, "invoke_agent ")
     assert json.loads(root.attributes["gen_ai.input.messages"])[0]["parts"][0]["content"] == "how is p99?"
@@ -449,11 +456,11 @@ async def test_a_spawned_child_turn_nests_under_the_spawning_tool_span() -> None
     assert child.attributes["tantra.depth"] == 1
 
 
-async def test_fan_out_nests_both_children_under_the_same_tool_span() -> None:
+async def test_repeated_async_spawns_nest_both_children_under_the_same_tool_span() -> None:
     @tool
     async def survey(ctx: Context) -> list[Any]:
-        """Fans out to two researchers."""
-        return await ctx.fan_out([(Researcher, "a"), (Researcher, "b")])
+        """Launches two researchers."""
+        return [await ctx.spawn(Researcher, "a"), await ctx.spawn(Researcher, "b")]
 
     class Chief(Agent):
         tools = [survey]
@@ -466,6 +473,7 @@ async def test_fan_out_nests_both_children_under_the_same_tool_span() -> None:
                 Sample(text="first child"),
                 Sample(text="second child"),
                 Sample(text="parent answer"),
+                Sample(text="extra answer"),
             ]
         ),
         agent=Chief,

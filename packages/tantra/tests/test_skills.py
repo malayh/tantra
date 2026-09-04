@@ -442,7 +442,12 @@ async def test_a_harness_without_skills_offers_no_skill_tool_and_one_system_bloc
 
     request = harness.provider.requests[0]
     assert len(request.system) == 1
-    assert [schema.name for schema in request.tools] == []
+    assert [schema.name for schema in request.tools] == [
+        "task_status",
+        "task_messages",
+        "task_result",
+        "task_wait",
+    ]
 
 
 async def test_an_agent_opting_out_gets_neither_the_tool_nor_the_block(root: Path) -> None:
@@ -456,7 +461,12 @@ async def test_an_agent_opting_out_gets_neither_the_tool_nor_the_block(root: Pat
 
     request = harness.provider.requests[0]
     assert len(request.system) == 1
-    assert [schema.name for schema in request.tools] == []
+    assert [schema.name for schema in request.tools] == [
+        "task_status",
+        "task_messages",
+        "task_result",
+        "task_wait",
+    ]
 
 
 async def test_a_user_tool_named_skill_collides_at_construction(root: Path) -> None:

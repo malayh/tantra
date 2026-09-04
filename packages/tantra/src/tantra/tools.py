@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, get_type_hints
 
 from pydantic import BaseModel, create_model
@@ -14,6 +15,12 @@ if TYPE_CHECKING:
     from tantra.agent import Agent
     from tantra.memory import Memory
     from tantra.stores.base import Store
+
+
+@dataclass(frozen=True)
+class TaskRef:
+    task_id: str
+    agent: str
 
 
 class Context:
@@ -33,8 +40,11 @@ class Context:
         store: Store,
         emit: Callable[[str], Awaitable[None]],
         ask: Callable[[AskRequest], Awaitable[AskResponse]] | None = None,
-        spawn: Callable[[type[Agent] | str, str], Awaitable[Any]] | None = None,
-        fan_out: Callable[[Sequence[tuple[type[Agent] | str, str]], int], Awaitable[list[Any]]] | None = None,
+        spawn: Callable[[type[Agent] | str, str], Awaitable[TaskRef]] | None = None,
+        task_status: Callable[[str, int | None, int], Awaitable[dict[str, Any]]] | None = None,
+        task_messages: Callable[[str, int], Awaitable[list[dict[str, Any]]]] | None = None,
+        task_result: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+        task_wait: Callable[[list[str] | None], Awaitable[dict[str, Any]]] | None = None,
         memory: Memory | None = None,
     ) -> None:
         self.session_id = session_id
@@ -47,7 +57,10 @@ class Context:
         self._emit = emit
         self._ask = ask
         self._spawn = spawn
-        self._fan_out = fan_out
+        self._task_status = task_status
+        self._task_messages = task_messages
+        self._task_result = task_result
+        self._task_wait = task_wait
 
     async def emit(self, message: str) -> None:
         """Record progress for the running tool call as a persisted `ToolProgress` event."""
@@ -64,25 +77,31 @@ class Context:
             raise TantraError("ctx.ask is only available inside a running tool call")
         return await self._ask(request)
 
-    async def spawn(self, agent: type[Agent] | str, input: str) -> Any:
-        """Run `agent` as a child session and return its final text, or its parsed `output_schema`.
-
-        Re-entrant: a resumed turn re-executes the tool and attaches to the child already recorded
-        for this call rather than creating a second one. A child that asks suspends this turn too.
-        """
+    async def spawn(self, agent: type[Agent] | str, input: str) -> TaskRef:
+        """Create an attached child task and return its durable reference immediately."""
         if self._spawn is None:
             raise TantraError("ctx.spawn is only available inside a running tool call")
         return await self._spawn(agent, input)
 
-    async def fan_out(self, tasks: Sequence[tuple[type[Agent] | str, str]], max_concurrency: int = 4) -> list[Any]:
-        """Run `(agent, input)` pairs as concurrent child sessions.
+    async def task_status(self, task_id: str, after_seq: int | None, limit: int) -> dict[str, Any]:
+        if self._task_status is None:
+            raise TantraError("task_status is only available inside a running tool call")
+        return await self._task_status(task_id, after_seq, limit)
 
-        Results are positionally aligned with `tasks`; a task that fails contributes its exception
-        in place of a result instead of failing the turn.
-        """
-        if self._fan_out is None:
-            raise TantraError("ctx.fan_out is only available inside a running tool call")
-        return await self._fan_out(tasks, max_concurrency)
+    async def task_messages(self, task_id: str, limit: int) -> list[dict[str, Any]]:
+        if self._task_messages is None:
+            raise TantraError("task_messages is only available inside a running tool call")
+        return await self._task_messages(task_id, limit)
+
+    async def task_result(self, task_id: str) -> dict[str, Any]:
+        if self._task_result is None:
+            raise TantraError("task_result is only available inside a running tool call")
+        return await self._task_result(task_id)
+
+    async def task_wait(self, task_ids: list[str] | None) -> dict[str, Any]:
+        if self._task_wait is None:
+            raise TantraError("task_wait is only available inside a running tool call")
+        return await self._task_wait(task_ids)
 
 
 def _args_model(fn: Callable[..., Any], name: str) -> tuple[str | None, type[BaseModel]]:

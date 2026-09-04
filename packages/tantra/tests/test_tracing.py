@@ -528,11 +528,11 @@ async def test_a_spawned_child_turn_parents_on_the_spawning_tool_span() -> None:
     assert current_span.get() is None
 
 
-async def test_fan_out_parents_every_child_turn_on_the_same_tool_span() -> None:
+async def test_repeated_async_spawns_parent_every_child_turn_on_the_same_tool_span() -> None:
     @tool
     async def survey(ctx: Context) -> list[Any]:
-        """Fans out to two researchers."""
-        return await ctx.fan_out([(Researcher, "a"), (Researcher, "b")])
+        """Launches two researchers."""
+        return [await ctx.spawn(Researcher, "a"), await ctx.spawn(Researcher, "b")]
 
     class Chief(Agent):
         tools = [survey]
@@ -545,6 +545,7 @@ async def test_fan_out_parents_every_child_turn_on_the_same_tool_span() -> None:
                 Sample(text="first child"),
                 Sample(text="second child"),
                 Sample(text="parent answer"),
+                Sample(text="extra answer"),
             ]
         ),
         agent=Chief,

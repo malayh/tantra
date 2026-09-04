@@ -102,6 +102,8 @@ def call_policy(tool: str, args: dict[str, Any], *, answer: str = "done") -> Pol
     payload = json.dumps(args)
 
     def policy(req: SampleRequest, state: PolicyState) -> Sample:
+        if last_user(req).startswith("[task notice "):
+            return Sample(text=answer)
         if turn_step(req) < 1:
             return Sample(tool_calls=[ToolCall(id=state.next_call_id(), name=tool, args=payload)])
         return Sample(text=answer)

@@ -324,7 +324,14 @@ async def test_submit_output_ends_the_turn_with_the_parsed_output() -> None:
     assert [event.call_id for event in picks(events, ToolCallStarted)] == ["c1"]
 
     offered = harness.provider.requests[0].tools
-    assert [t.name for t in offered] == ["search_metrics", "submit_output"]
+    assert [t.name for t in offered] == [
+        "search_metrics",
+        "task_status",
+        "task_messages",
+        "task_result",
+        "task_wait",
+        "submit_output",
+    ]
     assert offered[-1].parameters["type"] == "object"
 
 
@@ -388,7 +395,15 @@ async def test_the_second_sample_sees_the_system_prompt_and_the_tool_result() ->
     assert [(c.id, c.name, c.args) for c in assistant.tool_calls] == [("c1", "search_metrics", '{"query": "p99"}')]
     assert request.messages[2].call_id == "c1"
     assert request.messages[2].content == '["metric:p99"]'
-    assert sorted(t.name for t in request.tools) == ["boom", "noisy", "search_metrics"]
+    assert sorted(t.name for t in request.tools) == [
+        "boom",
+        "noisy",
+        "search_metrics",
+        "task_messages",
+        "task_result",
+        "task_status",
+        "task_wait",
+    ]
 
 
 async def test_one_tool_call_produces_exactly_one_requested_event() -> None:

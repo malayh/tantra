@@ -52,7 +52,7 @@ from tantra.stores.fs import FileSystemStore
 from tantra.stores.memory import MemoryStore
 from tantra.stores.postgres import PostgresStore
 from tantra.stores.sqlite import SQLiteStore
-from tantra.tools import Context, Tool, tool
+from tantra.tools import Context, TaskRef, Tool, tool
 from tantra.tracing import NullTracer, Tracer
 
 __all__ = [
@@ -111,6 +111,7 @@ __all__ = [
     "Stamped",
     "Store",
     "TantraError",
+    "TaskRef",
     "Tool",
     "Tracer",
     "TurnContext",

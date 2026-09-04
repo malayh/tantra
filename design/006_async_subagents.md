@@ -210,20 +210,21 @@ P0 durable live inbox
 - **Follow-up:** PostgreSQL conformance remains pending because Docker/PostgreSQL is unavailable in this environment.
 
 ### Phase 1 — attached async task lifecycle · deps: P0 · —
-- Add `TaskRef`, `Harness.max_concurrency`, and the root-scoped supervisor; change generated delegates and `Context.spawn`; remove `fan_out` and migrate all core, Agni, and Sarathi agent callers.
+- Add `TaskRef`, `Harness.max_concurrency`, and the root-scoped supervisor; change generated delegates and `Context.spawn`; remove `fan_out`, and migrate core callers. ~~Migrate Agni and Sarathi agent callers in P1.~~ **Moved to P4 by user scope decision.**
 - Implement deterministic child identity/link recovery, durable queued state, tree reconstruction, merged live events, lease heartbeat, task completion notices, and no-orphan parent completion.
 - Add `task_status`, `task_messages`, `task_result`, and `task_wait` with lineage authorization and fixed bounds.
 - Preserve existing child asks: `awaiting_input` remains visible, answering the child and resuming the root reconstructs the attached tree.
 - Update tracing tests for concurrently active child spans and exactly-once hook/event forwarding.
 - **Verify:** one parent launches six children with `max_concurrency=2`, continues sampling before they finish, inspects queued/running transcripts, waits without additional provider calls, receives ordered terminal notices, and reads all results; abandoning then resuming with a fresh harness creates no twins, never exceeds two active children, and completes the same task IDs.
 - Checklist:
-  - [ ] `TaskRef`, async spawn, generated launch tools, `fan_out` removal
-  - [ ] Tree-wide supervisor, queue cap, event merge, and heartbeat
-  - [ ] Deterministic child creation and fresh-harness reconstruction
-  - [ ] Status, transcript, result, and wait tools
-  - [ ] Parent completion guard and actionable terminal notices
-  - [ ] Ask, tracing, hook, abandonment, and nested-tree regressions
+  - [x] `TaskRef`, async spawn, generated launch tools, `fan_out` removal
+  - [x] Tree-wide supervisor, queue cap, event merge, and heartbeat
+  - [x] Deterministic child creation and fresh-harness reconstruction
+  - [x] Status, transcript, result, and wait tools
+  - [x] Parent completion guard and actionable terminal notices
+  - [x] Ask, tracing, hook, abandonment, and nested-tree regressions
   - [ ] `just lint` + `just test` + targeted stress scenario
+- **Follow-up:** PostgreSQL stress remains skipped because Docker is unavailable; the exact `just` wrappers could not run because `just` and `uv` are absent, so `.venv` Ruff/Pytest equivalents were used.
 
 ### Phase 2 — task communication and force kill · deps: P1 · —
 - Add `task_send`, `notify_parent`, and `task_kill`; enforce descendant/direct-parent authority and message bounds.
@@ -257,6 +258,7 @@ P0 durable live inbox
   - [ ] Root `just lint` + `just test`
 
 ### Phase 4 — documentation and 0.5 release · deps: P3 · —
+- Migrate Agni and Sarathi agent callers and instructions to the async task lifecycle.
 - Rewrite `docs/guides/subagents.md`, `docs/concepts/durability.md`, `docs/concepts/turn-loop.md`, `docs/reference/{events,harness,loop,tools}.md`, and `docs/sharp-edges.md` for async task ownership, messaging, inspection, waiting, cancellation versus kill, and recovery.
 - Update package/readme examples and all blocking `spawn`/`fan_out` references. Include a 0.4-to-0.5 migration showing launch, wait, inspect, result, notify, message, and kill.
 - Bump `packages/tantra/pyproject.toml` and exported version to 0.5.0; update Sarathi's dependency floor and lockfile.

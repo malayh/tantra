@@ -158,6 +158,42 @@ test("deduplicates messages and notices and replaying frames twice is stable", (
   assert.deepEqual(messages[0].attachments, []);
 });
 
+test("finishes replay with sequential-equivalent state in one subscriber update", () => {
+  const sequential = createChatStore(root);
+  const batched = createChatStore(root);
+  const frames = [
+    rootStart,
+    ...launchChild,
+    frame(child, 1, { type: "turn_started", turn_id: "child-turn", input: "research" }),
+    frame(child, 1, { type: "sample_started", turn_id: "child-turn", sample_id: "child-sample", model: "test" }),
+    frame(child, 1, { type: "text_part", sample_id: "child-sample", text: "result" }),
+    frame(child, 1, { type: "turn_completed", turn_id: "child-turn", stop_reason: "completed" }),
+  ];
+
+  for (const item of frames) sequential.getState().dispatch(item);
+  sequential.getState().setReady(true);
+  let updates = 0;
+  let observedReady = false;
+  const unsubscribe = batched.subscribe((state) => {
+    updates += 1;
+    observedReady = state.ready;
+  });
+  batched.getState().finishReplay(frames);
+  unsubscribe();
+
+  const snapshot = (store: ReturnType<typeof createChatStore>) => ({
+    turns: store.getState().turns,
+    ready: store.getState().ready,
+    banner: store.getState().banner,
+    sampleId: store.getState().sampleId,
+    messageIds: store.getState().messageIds,
+    noticeIds: store.getState().noticeIds,
+  });
+  assert.deepEqual(snapshot(batched), snapshot(sequential));
+  assert.equal(updates, 1);
+  assert.equal(observedReady, true);
+});
+
 test("parses attachments from durable active user messages without exposing markers", () => {
   const store = createChatStore(root);
   store.getState().dispatch(rootStart);

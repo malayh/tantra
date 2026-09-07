@@ -108,6 +108,7 @@ export type ChatState = {
   messageIds: string[];
   noticeIds: string[];
   dispatch: (frame: Emitted) => void;
+  finishReplay: (frames: Emitted[]) => void;
   reset: () => void;
   setReady: (ready: boolean) => void;
   setBanner: (banner: Banner | null) => void;
@@ -544,6 +545,11 @@ export const createChatStore = (sessionId: string) =>
     messageIds: [],
     noticeIds: [],
     dispatch: (frame) => set((state) => reduce(state, frame, sessionId)),
+    finishReplay: (frames) =>
+      set((state) => ({
+        ...frames.reduce((next, frame) => ({ ...next, ...reduce(next, frame, sessionId) }), state),
+        ready: true,
+      })),
     reset: () => set({ turns: [], banner: null, sampleId: null, messageIds: [], noticeIds: [] }),
     setReady: (ready) => set({ ready }),
     setBanner: (banner) => set({ banner }),

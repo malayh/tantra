@@ -12,10 +12,30 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _normalize_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.replace("\0", "\ufffd")
+    if isinstance(value, dict):
+        return {
+            _normalize_payload(key) if isinstance(key, str) else key: _normalize_payload(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [_normalize_payload(item) for item in value]
+    if isinstance(value, BaseModel):
+        return _normalize_payload(value.model_dump(mode="json"))
+    return value
+
+
 class EventBase(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     version: int = 1
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_payload(cls, value: Any) -> Any:
+        return _normalize_payload(value)
 
 
 class Usage(BaseModel):

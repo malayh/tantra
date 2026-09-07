@@ -10,10 +10,12 @@ import httpx
 import pytest
 from conftest import SharedProvider, SharedStore
 from httpx_ws import AsyncWebSocketSession, WebSocketDisconnect
+from starlette.websockets import WebSocketDisconnect as StarletteWebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from sarathi.agent import HarnessFactory, Researcher, Sarathi, _wire_tools
-from sarathi.api.ws import CONNECTIONS
-from tantra import BuiltinMemory, Context, MemoryWrite, Sample, tool
+from sarathi.api.ws import CONNECTIONS, Connection
+from tantra import BuiltinMemory, Context, MemoryWrite, Sample, SessionBusy, tool
 from tantra.events import AgentMessageQueued, CancelRequested, TurnCompleted, TurnStarted
 from tantra.providers.base import ToolCall
 
@@ -250,6 +252,70 @@ async def test_unknown_session_closes_socket(socket: Socket, signup: Signup) -> 
         async with socket("missing", token) as ws:
             await ws.receive_text(timeout=RECEIVE_TIMEOUT)
     assert _disconnect_code(raised.value) == 1008
+
+
+async def test_unexpected_pump_failure_sends_error_and_closes_1011(
+    socket: Socket,
+    signup: Signup,
+    new_session: NewSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail(_connection: Connection) -> None:
+        raise RuntimeError("raw tool result")
+
+    monkeypatch.setattr(Connection, "pump_loop", fail)
+    token = await signup()
+    sid = await new_session(token)
+
+    with pytest.raises((WebSocketDisconnect, BaseExceptionGroup)) as raised:
+        async with socket(sid, token) as ws:
+            replay = await _until(ws, "replay_done")
+            assert [_kind(frame) for frame in replay] == ["session_created", "replay_done"]
+            error = json.loads(await ws.receive_text(timeout=RECEIVE_TIMEOUT))
+            assert error == {"type": "server_error", "message": "Unexpected server error", "request_id": None}
+            await ws.receive_text(timeout=RECEIVE_TIMEOUT)
+    assert _disconnect_code(raised.value) == 1011
+
+
+@pytest.mark.parametrize("failure", [SessionBusy("busy"), StarletteWebSocketDisconnect(1006)])
+async def test_expected_pump_exit_is_not_reported_as_server_error(
+    socket: Socket,
+    signup: Signup,
+    new_session: NewSession,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    async def fail(_connection: Connection) -> None:
+        raise failure
+
+    monkeypatch.setattr(Connection, "pump_loop", fail)
+    token = await signup()
+    sid = await new_session(token)
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        with pytest.raises(TimeoutError):
+            await ws.receive_text(timeout=SILENCE_TIMEOUT)
+
+
+async def test_pump_failure_does_not_send_or_close_after_disconnect(
+    socket: Socket,
+    signup: Signup,
+    new_session: NewSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail(connection: Connection) -> None:
+        connection.websocket.application_state = WebSocketState.DISCONNECTED
+        raise RuntimeError("raw tool result")
+
+    monkeypatch.setattr(Connection, "pump_loop", fail)
+    token = await signup()
+    sid = await new_session(token)
+
+    async with socket(sid, token) as ws:
+        await _until(ws, "replay_done")
+        with pytest.raises(TimeoutError):
+            await ws.receive_text(timeout=SILENCE_TIMEOUT)
 
 
 async def test_cancel_without_running_turn_keeps_socket_usable(

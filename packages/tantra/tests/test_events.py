@@ -1,7 +1,7 @@
 from typing import get_args
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, Json, ValidationError, computed_field
 
 from tantra.events import (
     SESSION_EVENT_ADAPTER,
@@ -37,6 +37,16 @@ PERSISTED = {
 }
 
 
+class NestedPayload(BaseModel):
+    raw: Json[list[str]]
+    text: str
+
+    @computed_field
+    @property
+    def computed(self) -> str:
+        return f"computed:{self.text}"
+
+
 def test_union_covers_every_persisted_event() -> None:
     members = get_args(get_args(SessionEvent)[0])
     assert {member.__name__ for member in members} == PERSISTED
@@ -54,6 +64,40 @@ def test_unknown_fields_survive_a_round_trip() -> None:
     assert event.version == 7
     assert event.model_extra == {"future_field": {"a": 1}}
     assert "future_field" in event.model_dump_json()
+
+
+def test_event_payloads_replace_nuls_recursively() -> None:
+    event = ToolCallCompleted(
+        call_id="c1",
+        result={"text": "a\0b", "nested": ["\0", ("c\0d",)]},
+        future_field={"key\0": "value\0"},
+    )
+
+    assert event.result == {"text": "a\ufffdb", "nested": ["\ufffd", ["c\ufffdd"]]}
+    assert event.model_extra == {"future_field": {"key\ufffd": "value\ufffd"}}
+
+
+def test_parsed_event_payloads_replace_nuls_recursively() -> None:
+    event = SESSION_EVENT_ADAPTER.validate_json(
+        '{"type":"tool_call_completed","call_id":"c1","result":{"text":"a\\u0000b"},"future_field":["\\u0000"]}'
+    )
+
+    assert isinstance(event, ToolCallCompleted)
+    assert event.result == {"text": "a\ufffdb"}
+    assert event.model_extra == {"future_field": ["\ufffd"]}
+
+
+def test_nested_models_keep_their_durable_serialization_shape() -> None:
+    event = ToolCallCompleted(
+        call_id="c1",
+        result=NestedPayload(raw='["a\\u0000b"]', text="x\0y"),
+    )
+
+    assert event.result == {
+        "raw": ["a\ufffdb"],
+        "text": "x\ufffdy",
+        "computed": "computed:x\ufffdy",
+    }
 
 
 def test_stamped_round_trip_restores_the_event_class() -> None:

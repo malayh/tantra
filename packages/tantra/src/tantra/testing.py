@@ -57,6 +57,7 @@ async def store_conformance(store_factory: StoreFactory) -> None:
     await _check_create_and_header(store_factory)
     await _check_create_rejects_a_duplicate(store_factory)
     await _check_append_and_read(store_factory)
+    await _check_nul_normalization(store_factory)
     await _check_stale_expect_seq(store_factory)
     await _check_blind_append(store_factory)
     await _check_control_event_retention(store_factory)
@@ -172,6 +173,22 @@ async def _check_append_and_read(factory: StoreFactory) -> None:
     await store.create(empty)
     assert await _drain(store, empty.id) == []
     assert await store.append(empty.id, [], expect_seq=0) == 0
+
+
+async def _check_nul_normalization(factory: StoreFactory) -> None:
+    store = factory()
+    header = _header()
+    await store.create(header)
+    event = ToolCallCompleted(
+        call_id="c1",
+        result={"text": "a\0b", "nested": ["\0", ("c\0d",)]},
+        future_field={"key\0": "value\0"},
+    )
+
+    assert event.result == {"text": "a\ufffdb", "nested": ["\ufffd", ["c\ufffdd"]]}
+    assert await store.append(header.id, [event], expect_seq=0) == 1
+    stamped = await _drain(factory(), header.id)
+    assert stamped == [Stamped(seq=1, event=event)]
 
 
 async def _check_stale_expect_seq(factory: StoreFactory) -> None:

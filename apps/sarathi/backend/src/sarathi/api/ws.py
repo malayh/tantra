@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from datetime import UTC, datetime
@@ -11,6 +12,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 from sarathi.agent import FactoryDep, close_harness
 from sarathi.auth import resolve_user
@@ -55,7 +57,9 @@ FALLBACK_RETRY_IN = 5.0
 BUSY_TRANSITION_TIMEOUT = 0.5
 BUSY_POLL_INTERVAL = 0.01
 POLICY_VIOLATION = 1008
+INTERNAL_ERROR = 1011
 ATTACHMENT_MARKER = "[attachment: "
+logger = logging.getLogger(__name__)
 
 
 def _typed_response(kind: str, response: str) -> AskResponse:
@@ -412,9 +416,28 @@ async def session_socket(
             await CONNECTIONS.activate(connection)
             await connection.send(ReplayDoneFrame())
 
-            tasks = [asyncio.create_task(connection.read_loop()), asyncio.create_task(connection.pump_loop())]
+            read_task = asyncio.create_task(connection.read_loop())
+            pump_task = asyncio.create_task(connection.pump_loop())
+            tasks = [read_task, pump_task]
             try:
-                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                if pump_task in done:
+                    try:
+                        pump_task.result()
+                    except (SessionBusy, WebSocketDisconnect):
+                        pass
+                    except Exception:
+                        logger.exception("session pump failed")
+                        if (
+                            websocket.client_state is WebSocketState.CONNECTED
+                            and websocket.application_state is WebSocketState.CONNECTED
+                        ):
+                            try:
+                                await connection.send(ServerErrorFrame(message="Unexpected server error"))
+                            except Exception:
+                                pass
+                            if websocket.application_state is WebSocketState.CONNECTED:
+                                await websocket.close(code=INTERNAL_ERROR)
             finally:
                 for task in tasks:
                     task.cancel()

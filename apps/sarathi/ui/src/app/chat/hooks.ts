@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { useStore } from "zustand";
 
 import { getListSessionsQueryKey } from "@/generated/api/sessions/sessions";
+import type { Emitted } from "@/generated/models";
 import { getToken } from "@/lib/apiClient";
 import {
   type ChatStore,
@@ -21,6 +22,7 @@ import {
 const RECONNECT_ATTEMPTS = 30;
 const RECONNECT_INTERVAL = 2000;
 const POLICY_VIOLATION = 1008;
+const INTERNAL_ERROR = 1011;
 
 const route = (
   store: ChatStore,
@@ -28,16 +30,18 @@ const route = (
   onTitle: () => void,
   onAccepted: (requestId: string) => void,
   onRejected: (requestId: string, message: string) => void,
+  replay: Emitted[],
 ) => {
   const frame = JSON.parse(data) as ServerFrame;
   const state = store.getState();
 
   if ("event" in frame) {
-    state.dispatch(frame);
+    if (state.ready) state.dispatch(frame);
+    else replay.push(frame);
     return;
   }
   if (frame.type === "replay_done") {
-    state.setReady(true);
+    state.finishReplay(replay.splice(0));
     return;
   }
   if (frame.type === "title_updated") {
@@ -69,6 +73,7 @@ export const useChatSocket = (sessionId: string, store: ChatStore) => {
     resolve: () => void;
     reject: (error: Error) => void;
   } | null>(null);
+  const replay = useRef<Emitted[]>([]);
 
   useEffect(() => {
     setPending(pendingMessages.get(sessionId));
@@ -120,10 +125,11 @@ export const useChatSocket = (sessionId: string, store: ChatStore) => {
   const { sendJsonMessage, readyState } = useWebSocket(
     getSocketUrl,
     {
-      shouldReconnect: (event) => event.code !== POLICY_VIOLATION,
+      shouldReconnect: (event) => event.code !== POLICY_VIOLATION && event.code !== INTERNAL_ERROR,
       reconnectAttempts: RECONNECT_ATTEMPTS,
       reconnectInterval: RECONNECT_INTERVAL,
       onOpen: () => {
+        replay.current = [];
         store.getState().reset();
         store.getState().setReady(false);
       },
@@ -134,6 +140,7 @@ export const useChatSocket = (sessionId: string, store: ChatStore) => {
           () => queryClient.invalidateQueries({ queryKey: getListSessionsQueryKey() }),
           accept,
           reject,
+          replay.current,
         );
       },
     },

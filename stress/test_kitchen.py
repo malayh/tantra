@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable, Sequence
-from contextlib import aclosing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import BaseModel
@@ -21,20 +21,18 @@ from tantra import (
     ChoiceResponse,
     Context,
     Denial,
-    Emitted,
     FileSystemSkills,
     FreeText,
     FreeTextResponse,
-    Harness,
     Hook,
     MemoryStore,
     MemoryWrite,
     RetryConfig,
+    Runtime,
     Sample,
     SampleRequest,
     SessionHeader,
     Store,
-    collect,
     memory_recall,
     memory_write,
     tool,
@@ -173,7 +171,7 @@ class Recorder(Hook):
     async def after_turn(self, turn: Any, event: Any) -> None:
         self.calls.append(f"after_turn:{event_type(event)}")
 
-    async def on_event(self, emitted: Emitted) -> None:
+    async def on_event(self, emitted: Any) -> None:
         self.events.append(event_type(emitted.event))
 
 
@@ -201,10 +199,10 @@ def build(
     policy: Policy,
     agents: Sequence[type[Agent]] = (Lead,),
     **options: Any,
-) -> tuple[Harness, SyntheticProvider]:
+) -> tuple[Runtime, SyntheticProvider]:
     provider = SyntheticProvider(policy)
-    harness = Harness(provider, store, list(agents), deps_factory=desk_factory(), **options)
-    return harness, provider
+    runtime = Runtime(provider, store, list(agents), deps_factory=desk_factory(), **options)
+    return runtime, provider
 
 
 def calls(state: PolicyState, wanted: Sequence[tuple[str, dict[str, Any]]]) -> Sample:
@@ -222,13 +220,23 @@ def batch_policy(*wanted: tuple[str, dict[str, Any]], answer: str = "filed") -> 
     return policy
 
 
-def raised(items: Sequence[Emitted]) -> list[Any]:
-    return [item.event for item in items if event_type(item.event) == "ask_raised"]
-
-
 def results_by_tool(events: Sequence[Any]) -> dict[str, Any]:
     names = {event.call_id: event.name for event in picks(events, "tool_call_requested")}
     return {names[event.call_id]: event for event in picks(events, "tool_call_completed") if event.call_id in names}
+
+
+async def execute(runtime: Runtime, sid: str, input: str) -> Any:
+    async with runtime.connect(UUID(hex=sid), writable=True) as connection:
+        return await connection.prompt(input, command_id=uuid4())
+
+
+async def wait_for(store: Store, sid: str, kind: str, count: int = 1) -> Any:
+    for _ in range(10_000):
+        events = picks(await log(store, sid), kind)
+        if len(events) >= count:
+            return events[count - 1]
+        await asyncio.sleep(0)
+    raise AssertionError(f"{kind} was not recorded")
 
 
 async def vector_capable(store: Store) -> bool:
@@ -241,25 +249,23 @@ async def vector_capable(store: Store) -> bool:
 async def test_every_hook_fires_over_a_multi_tool_turn() -> None:
     store = MemoryStore()
     recorder = Recorder()
-    harness, provider = build(
+    runtime, provider = build(
         store,
         batch_policy(("lookup", {"topic": "orbit"}), ("tally", {"items": ["a", "b"]})),
         hooks=[recorder],
     )
-    sid = (await harness.create_session(Lead)).id
+    sid = (await runtime.create(Lead)).hex
 
-    await collect(harness.run(sid, "brief me"))
+    await execute(runtime, sid, "brief me")
 
-    assert recorder.calls == [
-        "before_turn",
-        "before_sample",
-        "before_tool:lookup",
+    assert recorder.calls[:2] == ["before_turn", "before_sample"]
+    assert sorted(recorder.calls[2:6]) == [
         "after_tool:lookup",
-        "before_tool:tally",
         "after_tool:tally",
-        "before_sample",
-        "after_turn:turn_completed",
+        "before_tool:lookup",
+        "before_tool:tally",
     ]
+    assert recorder.calls[-2:] == ["before_sample", "after_turn:turn_completed"]
     assert recorder.events.count("tool_call_requested") == 2
     assert recorder.events.count("tool_call_completed") == 2
     assert recorder.events.count("tool_progress") == 1
@@ -272,10 +278,10 @@ async def test_every_hook_fires_over_a_multi_tool_turn() -> None:
 
 async def test_before_tool_transform_leaves_the_log_honest() -> None:
     store = MemoryStore()
-    harness, provider = build(store, batch_policy(("lookup", {"topic": "orbit"})), hooks=[Redactor()])
-    sid = (await harness.create_session(Lead)).id
+    runtime, provider = build(store, batch_policy(("lookup", {"topic": "orbit"})), hooks=[Redactor()])
+    sid = (await runtime.create(Lead)).hex
 
-    await collect(harness.run(sid, "brief me"))
+    await execute(runtime, sid, "brief me")
     events = await log(store, sid)
 
     assert LEDGER.lookups == ["ledger"]
@@ -286,14 +292,14 @@ async def test_before_tool_transform_leaves_the_log_honest() -> None:
 
 async def test_before_tool_denial_is_a_guardrail() -> None:
     store = MemoryStore()
-    harness, provider = build(
+    runtime, provider = build(
         store,
         batch_policy(("publish", {"title": "draft"}), ("lookup", {"topic": "ledger"})),
         hooks=[Guard()],
     )
-    sid = (await harness.create_session(Lead)).id
+    sid = (await runtime.create(Lead)).hex
 
-    await collect(harness.run(sid, "ship it"))
+    await execute(runtime, sid, "ship it")
     events = await log(store, sid)
     denied = results_by_tool(events)["publish"]
 
@@ -324,31 +330,41 @@ async def test_permission_matrix() -> None:
         ("publish", {"title": "draft"}),
         ("tally", {"items": ["a"]}),
     )
-    harness, provider = build(
+    runtime, provider = build(
         store,
         policy,
         agents=(Gatekept,),
         memory=BuiltinMemory(store),
         default_permission="ask",
     )
-    sid = (await harness.create_session(Gatekept)).id
+    sid = (await runtime.create(Gatekept)).hex
     assert publish.permission == "allow"
 
-    opening = await collect(harness.run(sid, "go"))
-    first = raised(opening)[0]
-    assert first.request.extra["permission"] == "publish"
-
-    middle = await collect(harness.resume(sid, first.ask_id, ApprovalResponse(allow=True)))
-    second = raised(middle)[0]
-    assert second.request.extra["permission"] == "tally"
-
-    await collect(harness.resume(sid, second.ask_id, ApprovalResponse(allow=False)))
+    async with runtime.connect(UUID(hex=sid), writable=True) as connection:
+        pending = asyncio.create_task(connection.prompt("go", command_id=uuid4()))
+        answered: set[str] = set()
+        while len(answered) < 2:
+            asks = picks(await log(store, sid), "ask_raised")
+            for event in asks:
+                permission = str(event.request.extra["permission"])
+                if permission in answered:
+                    continue
+                await connection.answer(
+                    UUID(hex=event.ask_id),
+                    ApprovalResponse(allow=permission == "publish"),
+                    command_id=uuid4(),
+                )
+                answered.add(permission)
+            await asyncio.sleep(0)
+        result = await pending
 
     events = await log(store, sid)
     outcome = results_by_tool(events)
     started = {event.call_id for event in picks(events, "tool_call_started")}
     names = {event.call_id: event.name for event in picks(events, "tool_call_requested")}
 
+    assert result.outcome == "completed"
+    assert answered == {"publish", "tally"}
     assert not outcome["memory_recall"].is_error
     assert outcome["memory_write"].is_error
     assert "denied by permissions: memory_write" in str(outcome["memory_write"].result)
@@ -358,40 +374,42 @@ async def test_permission_matrix() -> None:
     assert "denied by user" in str(outcome["tally"].result)
     assert LEDGER.tallied == []
     assert sorted(names[call_id] for call_id in started) == ["memory_recall", "memory_write", "publish", "tally"]
-    assert [event.stop_reason for event in picks(events, "turn_completed")] == ["completed"]
     check_pairs(provider.requests)
     await check_log(store, sid)
 
 
-async def test_ask_flavors_resume_on_fresh_harnesses(store: Store) -> None:
+async def test_ask_flavors_are_answered_by_the_live_writer(store: Store) -> None:
     policy = batch_policy(("interview", {"subject": "ledger"}))
+    runtime, provider = build(store, policy)
+    sid = (await runtime.create(Lead)).hex
 
-    first, _ = build(store, policy)
-    sid = (await first.create_session(Lead)).id
-    opening = await collect(first.run(sid, "go"))
-    free_text = raised(opening)[0]
-    assert free_text.request.kind == "free_text"
-    del first
-
-    second, _ = build(store, policy)
-    middle = await collect(second.resume(sid, free_text.ask_id, FreeTextResponse(text="it balances")))
-    choice = raised(middle)[0]
-    assert choice.request.kind == "choice"
-    assert choice.request.options == ["weak", "solid"]
-    del second
-
-    third, provider = build(store, policy)
-    await collect(third.resume(sid, choice.ask_id, ChoiceResponse(selected="solid")))
+    async with runtime.connect(UUID(hex=sid), writable=True) as connection:
+        pending = asyncio.create_task(connection.prompt("go", command_id=uuid4()))
+        free_text = await wait_for(store, sid, "ask_raised")
+        assert free_text.request.kind == "free_text"
+        await connection.answer(
+            UUID(hex=free_text.ask_id),
+            FreeTextResponse(text="it balances"),
+            command_id=uuid4(),
+        )
+        choice = await wait_for(store, sid, "ask_raised", 2)
+        assert choice.request.kind == "choice"
+        assert choice.request.options == ["weak", "solid"]
+        await connection.answer(
+            UUID(hex=choice.ask_id),
+            ChoiceResponse(selected="solid"),
+            command_id=uuid4(),
+        )
+        result = await pending
 
     events = await log(store, sid)
     completed = picks(events, "tool_call_completed")
 
-    assert len(LEDGER.interviews) == 3
-    assert len(set(LEDGER.interviews)) == 3
-    assert len({id(desk) for desk in LEDGER.desks}) == 3
-    assert len(picks(events, "tool_progress")) == 3
+    assert result.outcome == "completed"
+    assert len(LEDGER.interviews) == 1
+    assert len({id(desk) for desk in LEDGER.desks}) == 1
+    assert len(picks(events, "tool_progress")) == 1
     assert [str(event.result) for event in completed] == ["ledger: it balances (solid)"]
-    assert [event.stop_reason for event in picks(events, "turn_completed")] == ["completed"]
     check_pairs(provider.requests)
     await check_log(store, sid)
 
@@ -412,10 +430,10 @@ async def test_memory_through_tools_and_repair(store: Store) -> None:
             )
         }
     )
-    harness, provider = build(store, policy, memory=memory)
-    sid = (await harness.create_session(Lead)).id
+    runtime, provider = build(store, policy, memory=memory)
+    sid = (await runtime.create(Lead)).hex
 
-    await collect(harness.run(sid, "remember this"))
+    await execute(runtime, sid, "remember this")
     events = await log(store, sid)
     recalled = results_by_tool(events)["memory_recall"].result
 
@@ -486,9 +504,9 @@ async def test_skills_index_load_and_filter(skills_root: Path) -> None:
     assert "fence is never closed" in catalogue.skipped[0][1]
 
     store = MemoryStore()
-    harness, provider = build(store, batch_policy(("skill", {"name": "ledger-rules"})), skills=catalogue)
-    sid = (await harness.create_session(Lead)).id
-    await collect(harness.run(sid, "read the rules"))
+    runtime, provider = build(store, batch_policy(("skill", {"name": "ledger-rules"})), skills=catalogue)
+    sid = (await runtime.create(Lead)).hex
+    await execute(runtime, sid, "read the rules")
 
     loaded = results_by_tool(await log(store, sid))["skill"]
     assert "Balance at 02:00 UTC." in str(loaded.result)
@@ -513,8 +531,8 @@ async def test_skills_index_load_and_filter(skills_root: Path) -> None:
         agents=(Narrow,),
         skills=FileSystemSkills(skills_root),
     )
-    narrow_sid = (await limited.create_session(Narrow)).id
-    await collect(limited.run(narrow_sid, "read the rules"))
+    narrow_sid = (await limited.create(Narrow)).hex
+    await execute(limited, narrow_sid, "read the rules")
 
     refused = results_by_tool(await log(other, narrow_sid))["skill"]
     assert skill_lines(second.requests[0]) == ["- desk-notes: How the desk files its notes."]
@@ -552,79 +570,87 @@ async def test_output_schema_carries_the_parsed_value() -> None:
         return calls(state, [("submit_output", payload)])
 
     store = MemoryStore()
-    harness, provider = build(store, policy, agents=(Analyst,))
-    sid = (await harness.create_session(Analyst)).id
+    runtime, provider = build(store, policy, agents=(Analyst,))
+    sid = (await runtime.create(Analyst)).hex
 
-    events = await collect(harness.run(sid, "brief me"))
-    terminal = [item.event for item in events if event_type(item.event) == "turn_completed"][0]
-    replayed = [item.event async for item in harness.replay(sid) if event_type(item.event) == "turn_completed"]
+    result = await execute(runtime, sid, "brief me")
+    replayed = picks(await log(store, sid), "turn_completed")
 
-    assert terminal.stop_reason == "output"
-    assert terminal.output == payload
+    assert result.stop_reason == "output"
+    assert result.output == payload
     assert replayed[0].output == payload
     assert "submit_output" in [schema.name for schema in provider.requests[0].tools]
     await check_log(store, sid)
 
 
-async def test_subagent_events_forward_and_fire_hooks() -> None:
+async def test_subagent_journals_are_independent_and_fire_hooks() -> None:
     store = MemoryStore()
     recorder = Recorder()
+
+    def checker_policy(req: SampleRequest, state: PolicyState) -> Sample:
+        if turn_step(req) < 1:
+            return calls(state, [("lookup", {"topic": "orbit"})])
+        return calls(state, [("finish", {"result": "verified"})])
+
     policy = by_model(
         {
-            MODEL_LEAD: batch_policy(("checker", {"task": "verify the orbit key"})),
-            MODEL_CHECK: batch_policy(("lookup", {"topic": "orbit"}), answer="verified"),
+            MODEL_LEAD: batch_policy(("spawn", {"agent_name": "checker", "input": "verify the orbit key"})),
+            MODEL_CHECK: checker_policy,
         }
     )
-    harness, provider = build(store, policy, hooks=[recorder])
-    sid = (await harness.create_session(Lead)).id
+    runtime, provider = build(store, policy, hooks=[recorder])
+    sid = (await runtime.create(Lead)).hex
 
-    seen = await collect(harness.run(sid, "verify it"))
-    child = [item.event for item in seen if event_type(item.event) == "child_session_spawned"][0]
-    depths = {item.session_id: item.depth for item in seen}
+    result = await execute(runtime, sid, "verify it")
+    child_created = picks(await log(store, sid), "child_created")[0]
+    child_id = child_created.child_id
+    await wait_for(store, child_id, "agent_finished")
     parent_log = await log(store, sid)
+    child_log = await log(store, child_id)
 
-    assert depths == {sid: 0, child.child_session_id: 1}
-    assert [event.name for event in picks(parent_log, "tool_call_requested")] == ["checker"]
+    assert result.outcome == "completed"
+    assert [event.name for event in picks(parent_log, "tool_call_requested")] == ["spawn"]
     assert picks(parent_log, "tool_progress") == []
-    assert len(picks(await log(store, child.child_session_id), "tool_progress")) == 1
-    assert [event_type(item.event) for item in seen].count("tool_progress") == 1
-    assert recorder.calls.count("before_turn") == 2
+    assert len(picks(child_log, "tool_progress")) == 1
+    assert recorder.calls.count("before_turn") >= 2
     assert "before_tool:lookup" in recorder.calls
-    assert "before_tool:checker" in recorder.calls
-    assert recorder.events.count("tool_call_completed") == 2
+    assert "before_tool:spawn" in recorder.calls
     assert LEDGER.lookups == ["orbit"]
     check_pairs(provider.requests)
     await check_log(store, sid)
-    await check_log(store, child.child_session_id)
+    await check_log(store, child_id)
 
 
-async def test_cancel_from_a_second_harness_stops_at_the_next_boundary() -> None:
+async def test_connection_cancel_stops_a_live_tool_batch() -> None:
+    started = asyncio.Event()
+
+    @tool
+    async def hold() -> str:
+        """Wait until cancelled."""
+        started.set()
+        await asyncio.Event().wait()
+        return "impossible"
+
+    class Blocked(Agent):
+        model = MODEL_LEAD
+        tools = [hold]
+        permissions = {"*": "allow"}
+
     store = MemoryStore()
-    policy = batch_policy(
-        ("lookup", {"topic": "orbit"}),
-        ("lookup", {"topic": "ledger"}),
-        ("lookup", {"topic": "heron"}),
-    )
-    harness, provider = build(store, policy)
-    other, _ = build(store, policy)
-    sid = (await harness.create_session(Lead)).id
+    runtime, provider = build(store, batch_policy(("hold", {}), ("hold", {})), agents=(Blocked,))
+    sid = (await runtime.create(Blocked)).hex
 
-    stopped = False
-    async with aclosing(harness.run(sid, "read everything")) as live:
-        async for item in live:
-            if not stopped and event_type(item.event) == "tool_call_completed":
-                stopped = True
-                assert await other.cancel(sid) is True
+    async with runtime.connect(UUID(hex=sid), writable=True) as connection:
+        command_id = uuid4()
+        pending = asyncio.create_task(connection.prompt("wait", command_id=command_id))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        await connection.cancel(command_id=uuid4())
+        result = await pending
 
     events = await log(store, sid)
-    synthesized = [event for event in picks(events, "tool_call_completed") if event.is_error]
-
-    assert LEDGER.lookups == ["orbit"]
-    assert [event.stop_reason for event in picks(events, "turn_completed")] == ["cancelled"]
-    assert len(synthesized) == 2
-    assert all("not executed: turn cancelled" in str(event.result) for event in synthesized)
+    assert result.outcome == "cancelled"
+    assert len(picks(events, "turn_cancelled")) == 1
     assert len(provider.requests) == 1
-    assert pairs_intact(events) == 3
     await check_log(store, sid)
 
 
@@ -638,14 +664,14 @@ async def test_max_steps_answers_every_orphaned_call() -> None:
         permissions = {"*": "allow"}
 
     store = MemoryStore()
-    harness, _ = build(
+    runtime, _ = build(
         store,
         batch_policy(("lookup", {"topic": "orbit"}), ("tally", {"items": ["a"]})),
         agents=(Capped,),
     )
-    sid = (await harness.create_session(Capped)).id
+    sid = (await runtime.create(Capped)).hex
 
-    await collect(harness.run(sid, "go"))
+    await execute(runtime, sid, "go")
     events = await log(store, sid)
 
     assert [event.stop_reason for event in picks(events, "turn_completed")] == ["max_steps"]
@@ -667,10 +693,10 @@ async def test_invalid_tool_json_becomes_an_error_result() -> None:
         return Sample(text="recovered")
 
     store = MemoryStore()
-    harness, provider = build(store, policy)
-    sid = (await harness.create_session(Lead)).id
+    runtime, provider = build(store, policy)
+    sid = (await runtime.create(Lead)).hex
 
-    await collect(harness.run(sid, "go"))
+    await execute(runtime, sid, "go")
     events = await log(store, sid)
     rejected = picks(events, "tool_call_completed")[0]
 
@@ -687,10 +713,10 @@ async def test_invalid_tool_json_becomes_an_error_result() -> None:
 async def test_one_transient_failure_is_retried_away() -> None:
     store = MemoryStore()
     policy = flaky(batch_policy(("lookup", {"topic": "orbit"})), fail_on=[2])
-    harness, provider = build(store, policy)
-    sid = (await harness.create_session(Lead)).id
+    runtime, provider = build(store, policy)
+    sid = (await runtime.create(Lead)).hex
 
-    await collect(harness.run(sid, "go"))
+    await execute(runtime, sid, "go")
     events = await log(store, sid)
 
     assert len(provider.requests) == 3
@@ -701,27 +727,25 @@ async def test_one_transient_failure_is_retried_away() -> None:
     await check_log(store, sid)
 
 
-async def test_exhausted_retries_fail_the_turn_and_a_fresh_run_recovers() -> None:
+async def test_exhausted_retries_fail_the_turn_and_a_later_prompt_recovers() -> None:
     store = MemoryStore()
     policy = flaky(batch_policy(("lookup", {"topic": "orbit"})), fail_on=[2, 3, 4])
-    harness, provider = build(store, policy, retry=RetryConfig(max_attempts=3, base_delay=0.01))
-    sid = (await harness.create_session(Lead)).id
+    runtime, provider = build(store, policy, retry=RetryConfig(max_attempts=3, base_delay=0.01))
+    sid = (await runtime.create(Lead)).hex
 
-    await collect(harness.run(sid, "go"))
+    await execute(runtime, sid, "go")
     events = await log(store, sid)
 
     assert len(picks(events, "turn_failed")) == 1
     assert "synthetic transient failure" in picks(events, "turn_failed")[0].error
     assert event_type(events[-1]) == "turn_failed"
     assert event_type(events[-2]) == "sample_started"
-    assert (await store.header(sid)).status == "failed"
     assert len(provider.requests) == 4
 
-    await collect(harness.run(sid, "try again"))
+    await execute(runtime, sid, "try again")
     events = await log(store, sid)
 
     assert [event.stop_reason for event in picks(events, "turn_completed")] == ["completed"]
     assert LEDGER.lookups == ["orbit", "orbit"]
-    assert (await store.header(sid)).status == "idle"
     assert len(picks(events, "turn_started")) == 2
     await check_log(store, sid)

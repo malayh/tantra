@@ -1,15 +1,6 @@
-"""Manual live smoke for OTel telemetry — run by a human, never collected by pytest.
+"""Manual OpenTelemetry smoke using Runtime and independent actor turns.
 
-    OTEL_EXPORTER_OTLP_ENDPOINT=… OTEL_EXPORTER_OTLP_HEADERS=… uv run python stress/live_telemetry.py
-
-Drives one scripted turn — tool call, subagent spawn, final answer — through a real OTLP batch exporter
-with `capture_content=True`, prints the trace id and every span it emitted, then flushes. The exporter
-and the resource are built with no arguments, so the OTel SDK reads the standard `OTEL_*` environment
-itself: `OTEL_EXPORTER_OTLP_ENDPOINT` is required, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`
-(defaulted to `tantra-smoke`) and `OTEL_RESOURCE_ATTRIBUTES` are optional. The model is faked, so
-nothing but the collector is contacted. Check the backend for an agent observation with input/output,
-a generation per model call, a tool observation with arguments and result, and a nested agent under
-the spawning tool.
+OTEL_EXPORTER_OTLP_ENDPOINT=… uv run python stress/live_telemetry.py
 """
 
 from __future__ import annotations
@@ -17,22 +8,21 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Sequence
-from contextlib import aclosing
-from typing import Any
+from uuid import uuid4
 
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
 
-from tantra import Agent, FakeProvider, Harness, MemoryStore, Sample, tool
+from stress.driver import PolicyState, SyntheticProvider, by_model, last_user, turn_step
+from tantra import Agent, MemoryStore, Runtime, Sample, SampleRequest, tool
 from tantra.providers.base import ToolCall
 from tantra.telemetry import Telemetry
 
-MODEL = "fake/model"
-
-TASK = "Find out how the p99 panel is doing and have the scribe count the words in what you found."
-
+MODEL_LEAD = "fake/lead"
+MODEL_SCRIBE = "fake/scribe"
+TASK = "Look up p99 and spawn the scribe to count the words."
 FINDING = "the p99 panel reads four hundred milliseconds at the ninety ninth percentile"
 
 
@@ -44,30 +34,45 @@ async def lookup(query: str) -> str:
 
 @tool
 async def word_count(text: str) -> int:
-    """Count the whitespace-separated words in `text`."""
+    """Count whitespace-separated words."""
     return len(text.split())
 
 
 class Scribe(Agent):
-    """Counts the words in a passage and replies with the number alone."""
-
-    prompt = "You count words. Reply with the number alone."
+    model = MODEL_SCRIBE
     tools = [word_count]
+    permissions = {"word_count": "allow", "finish": "allow"}
 
 
 class Lead(Agent):
-    prompt = "You are a terse research desk lead. Use your tools; never guess a number you can count."
+    model = MODEL_LEAD
     tools = [lookup]
     subagents = [Scribe]
+    permissions = {"lookup": "allow", "spawn": "allow"}
 
 
-SCRIPT = [
-    Sample(tool_calls=[ToolCall(id="c1", name="lookup", args='{"query": "p99 panel"}')]),
-    Sample(tool_calls=[ToolCall(id="c2", name="scribe", args=f'{{"task": "count the words in: {FINDING}"}}')]),
-    Sample(tool_calls=[ToolCall(id="c3", name="word_count", args=f'{{"text": "{FINDING}"}}')]),
-    Sample(text="11"),
-    Sample(text=f"{FINDING} — 11 words."),
-]
+def lead(req: SampleRequest, state: PolicyState) -> Sample:
+    if last_user(req) == TASK:
+        if turn_step(req) == 0:
+            return Sample(tool_calls=[ToolCall(id=state.next_call_id(), name="lookup", args='{"query":"p99"}')])
+        if turn_step(req) == 1:
+            return Sample(
+                tool_calls=[
+                    ToolCall(
+                        id=state.next_call_id(),
+                        name="spawn",
+                        args=f'{{"agent_name":"scribe","input":"count: {FINDING}"}}',
+                    )
+                ]
+            )
+        return Sample(text="scribe started")
+    return Sample(text=f"{FINDING} — 11 words.")
+
+
+def scribe(req: SampleRequest, state: PolicyState) -> Sample:
+    if turn_step(req) == 0:
+        return Sample(tool_calls=[ToolCall(id=state.next_call_id(), name="word_count", args=f'{{"text":"{FINDING}"}}')])
+    return Sample(tool_calls=[ToolCall(id=state.next_call_id(), name="finish", args='{"result":11}')])
 
 
 class Watcher(SpanProcessor):
@@ -103,56 +108,46 @@ def assemble() -> tuple[TracerProvider, Watcher, Checked]:
     return provider, watcher, exporter
 
 
-async def drive(stream: Any) -> None:
-    async with aclosing(stream) as live:
-        async for _ in live:
-            pass
-
-
-def depth(span: ReadableSpan, by_id: dict[int, ReadableSpan]) -> int:
-    seen = 0
-    while span.parent is not None and span.parent.span_id in by_id:
-        span = by_id[span.parent.span_id]
-        seen += 1
-    return seen
-
-
 def report(watcher: Watcher) -> None:
-    by_id = {span.context.span_id: span for span in watcher.spans}
     for span in sorted(watcher.spans, key=lambda item: item.start_time or 0):
-        print(f"{'  ' * depth(span, by_id)}{span.name}")
+        print(span.name)
+
+
+async def idle(runtime: Runtime) -> None:
+    while runtime.active:
+        await asyncio.sleep(0)
 
 
 async def main() -> int:
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
     if not endpoint:
-        print("live_telemetry needs OTEL_EXPORTER_OTLP_ENDPOINT exported; refusing to run.")
+        print("live_telemetry needs OTEL_EXPORTER_OTLP_ENDPOINT exported; refusing to start.")
         return 2
 
     provider, watcher, exporter = assemble()
-    harness = Harness(
-        FakeProvider(SCRIPT),
+    runtime = Runtime(
+        SyntheticProvider(by_model({MODEL_LEAD: lead, MODEL_SCRIBE: scribe})),
         MemoryStore(),
         [Lead],
-        default_model=MODEL,
         telemetry=Telemetry(provider, capture_content=True),
     )
-    session = await harness.create_session(Lead)
-    print(f"session {session.id} → {endpoint}\n")
-
-    await drive(harness.run(session.id, TASK))
+    root_id = await runtime.create(Lead)
+    print(f"root {root_id} → {endpoint}")
+    print()
+    async with runtime.connect(root_id, writable=True) as connection:
+        result = await connection.prompt(TASK, command_id=uuid4())
+    await idle(runtime)
 
     report(watcher)
     roots = [span for span in watcher.spans if span.parent is None]
-    if not roots:
-        print("\nno root span was recorded; nothing to export.")
+    if result.outcome != "completed" or not roots:
+        print()
+        print("scripted actor turns did not complete or produced no root span.")
         return 1
-    outcome = roots[0].attributes.get("tantra.turn.outcome")
-    if outcome != "completed":
-        print(f"\nthe turn ended {outcome}, not completed; the scripted samples no longer match the agents.")
-        return 1
-    print(f"\ntrace id: {format(roots[0].context.trace_id, '032x')}  spans: {len(watcher.spans)}")
+    print()
+    print(f"trace id: {format(roots[0].context.trace_id, '032x')}  spans: {len(watcher.spans)}")
 
+    await runtime.aclose()
     flushed = provider.force_flush()
     provider.shutdown()
     if not flushed or exporter.rejected:

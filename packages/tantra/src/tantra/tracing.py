@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 
 class Tracer(Protocol):
-    """Span sink for the turn loop. `Harness(telemetry=...)` takes one; the default records nothing.
+    """Span sink for the turn loop. `Runtime(telemetry=...)` takes one; the default records nothing.
 
     Every `start_*` returns an opaque handle the loop hands back to the matching `end_*`; the loop
     never inspects it and `None` is a valid handle. Implementations must be total: a raising tracer

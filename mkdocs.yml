@@ -49,8 +49,8 @@ nav:
       - Quickstart: getting-started/quickstart.md
   - Concepts:
       - The turn loop: concepts/turn-loop.md
-      - Agent, Session, Harness: concepts/architecture.md
-      - Durability & resume: concepts/durability.md
+      - Runtime, Connection, Agent: concepts/architecture.md
+      - Durability & crashes: concepts/durability.md
   - Guides:
       - Defining tools: guides/tools.md
       - Shell & ShellGuard: guides/shell.md
@@ -60,14 +60,15 @@ nav:
       - Permissions & hooks: guides/permissions-hooks.md
       - Skills: guides/skills.md
       - Memory: guides/memory.md
-      - Subagents & fan-out: guides/subagents.md
+      - Actor subagents: guides/subagents.md
+      - Migrate to 1.0: guides/migration-1.0.md
       - Storage backends: guides/storage.md
       - Providers: guides/providers.md
       - Compaction: guides/compaction.md
       - Telemetry: guides/telemetry.md
   - Reference:
       - Agent: reference/agent.md
-      - Harness: reference/harness.md
+      - Runtime & Connection: reference/runtime.md
       - Loop & events flow: reference/loop.md
       - Tools: reference/tools.md
       - Context: reference/context.md

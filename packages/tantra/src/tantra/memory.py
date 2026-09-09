@@ -19,7 +19,7 @@ KEYWORD = "keyword"
 VECTOR = "vector"
 CANDIDATE_FLOOR = 20
 ROW_METHODS = ("memory_put", "memory_get", "memory_all")
-NO_MEMORY = "no memory configured: this harness was built without Harness(memory=...)"
+NO_MEMORY = "no memory configured: this runtime was built without Runtime(memory=...)"
 
 MemoryScope = Callable[[Context], dict[str, Any]]
 

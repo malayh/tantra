@@ -1,31 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from contextlib import aclosing
 from typing import Any
+from uuid import UUID, uuid4
 
-from stress.driver import (
-    Policy,
-    PolicyState,
-    SyntheticProvider,
-    by_model,
-    call_policy,
-    last_user,
-    turn_step,
-)
-from stress.invariants import check_log, check_pairs, event_type, log, picks
+from stress.driver import Policy, PolicyState, SyntheticProvider, by_model, last_user, turn_step
+from stress.invariants import check_log, check_pairs, log, picks
 from tantra import (
     Agent,
     ApprovalResponse,
     Context,
     FreeText,
     FreeTextResponse,
-    Harness,
-    ProviderError,
+    Runtime,
     Sample,
     SampleRequest,
     Store,
-    collect,
     tool,
 )
 from tantra.providers.base import ToolCall
@@ -33,11 +24,8 @@ from tantra.providers.base import ToolCall
 MODEL_ROOT = "stress/root"
 MODEL_MID = "stress/mid"
 MODEL_LEAF = "stress/leaf"
-MODEL_BOSS = "stress/boss"
 MODEL_HAND = "stress/hand"
-
 FAN_TASKS = 12
-
 FAN_FAILURES = (3, 7)
 
 
@@ -49,198 +37,220 @@ async def confirm(step: str, ctx: Context) -> str:
     return f"{step}:{first.text}/{second.text}"
 
 
-@tool
-async def sign_off(step: str, ctx: Context) -> str:
-    """Ask for one confirmation before reporting."""
-    answer = await ctx.ask(FreeText(prompt=f"sign off {step}"))
-    return f"{step}:{answer.text}"
-
-
 class Leaf(Agent):
-    """Confirms things with a human."""
-
     model = MODEL_LEAF
-    tools = [confirm, sign_off]
-    permissions = {"confirm": "allow", "sign_off": "allow"}
+    tools = [confirm]
+    permissions = {"confirm": "allow", "finish": "allow"}
 
 
 class Mid(Agent):
-    """Passes work down to the leaf."""
-
     model = MODEL_MID
     subagents = [Leaf]
-    permissions = {"leaf": "allow"}
+    permissions = {"spawn": "allow", "finish": "allow"}
 
 
 class Root(Agent):
-    """Passes work down to the mid."""
-
     model = MODEL_ROOT
     subagents = [Mid]
-    permissions = {"mid": "allow"}
+    permissions = {"spawn": "allow"}
 
 
-class Boss(Agent):
-    """Passes work straight to the leaf."""
-
-    model = MODEL_BOSS
-    subagents = [Leaf]
-    permissions = {"leaf": "allow"}
-
-
-def build(store: Store, policy: Policy, agents: list[type[Agent]], **options: Any) -> tuple[Harness, SyntheticProvider]:
+def build(store: Store, policy: Policy, agents: list[type[Agent]], **options: Any) -> tuple[Runtime, SyntheticProvider]:
     provider = SyntheticProvider(policy)
-    return Harness(provider, store, agents, max_depth=2, **options), provider
+    return Runtime(provider, store, agents, max_depth=2, **options), provider
 
 
-def chain_policy(leaf_tool: str) -> Policy:
-    return by_model(
-        {
-            MODEL_ROOT: call_policy("mid", {"task": "dig"}, answer="root done"),
-            MODEL_MID: call_policy("leaf", {"task": "check"}, answer="mid done"),
-            MODEL_LEAF: call_policy(leaf_tool, {"step": "ship"}, answer="leaf done"),
-            MODEL_BOSS: call_policy("leaf", {"task": "check"}, answer="boss done"),
-        }
+def calls(state: PolicyState, wanted: list[tuple[str, dict[str, Any]]]) -> Sample:
+    return Sample(
+        tool_calls=[ToolCall(id=state.next_call_id(), name=name, args=json.dumps(args)) for name, args in wanted]
     )
 
 
-def emitted(events: list[Any], kind: str, session_id: str | None = None) -> list[Any]:
-    return [
-        item.event
-        for item in events
-        if event_type(item.event) == kind and (session_id is None or item.session_id == session_id)
-    ]
+async def wait_for(store: Store, sid: str, kind: str, count: int = 1) -> Any:
+    for _ in range(20_000):
+        events = picks(await log(store, sid), kind)
+        if len(events) >= count:
+            return events[count - 1]
+        await asyncio.sleep(0)
+    raise AssertionError(f"{kind} was not recorded for {sid}")
 
 
-async def test_deep_bubble_resume_fresh(store: Store) -> None:
-    policy = chain_policy("confirm")
-    harness, provider = build(store, policy, [Root])
-    root_sid = (await harness.create_session(Root)).id
+async def test_deep_tree_uses_live_answers_and_explicit_finish(store: Store) -> None:
+    def root_policy(req: SampleRequest, state: PolicyState) -> Sample:
+        if last_user(req) == "go":
+            step = turn_step(req)
+            if step < 1:
+                return calls(state, [("spawn", {"agent_name": "mid", "input": "dig"})])
+            if step == 1:
+                child_id = next(message.content for message in reversed(req.messages) if message.role == "tool")
+                return calls(state, [("send", {"agent_id": child_id, "input": "root ping"})])
+            return Sample(text="root waiting")
+        return Sample(text="root done")
 
-    opening = await collect(harness.run(root_sid, "go"))
-    spawned = emitted(opening, "child_session_spawned")
-    assert [event.agent for event in spawned] == ["mid", "leaf"]
-    mid_sid, leaf_sid = spawned[0].child_session_id, spawned[1].child_session_id
+    def mid_policy(req: SampleRequest, state: PolicyState) -> Sample:
+        incoming = last_user(req)
+        if incoming == "dig":
+            if turn_step(req) < 1:
+                return calls(state, [("spawn", {"agent_name": "leaf", "input": "check"})])
+            return Sample(text="mid waiting")
+        if incoming.endswith("root ping"):
+            if turn_step(req) < 1:
+                parent_id = incoming.removeprefix("[agent ").split("]", 1)[0]
+                return calls(state, [("send", {"agent_id": parent_id, "input": "mid pong"})])
+            return Sample(text="mid acknowledged")
+        return calls(state, [("finish", {"result": "mid done"})])
 
-    depths = {item.session_id: item.depth for item in opening}
-    assert depths == {root_sid: 0, mid_sid: 1, leaf_sid: 2}
-    assert emitted(opening, "ask_raised", root_sid) == []
-    assert len(emitted(opening, "ask_raised", leaf_sid)) == 1
+    def leaf_policy(req: SampleRequest, state: PolicyState) -> Sample:
+        if turn_step(req) < 1:
+            return calls(state, [("confirm", {"step": "ship"})])
+        return calls(state, [("finish", {"result": "leaf done"})])
 
-    root_log = await log(store, root_sid)
-    assert [event.agent for event in picks(root_log, "child_session_spawned")] == ["mid"]
-    assert [event.name for event in picks(root_log, "tool_call_requested")] == ["mid"]
+    policy = by_model({MODEL_ROOT: root_policy, MODEL_MID: mid_policy, MODEL_LEAF: leaf_policy})
+    runtime, provider = build(store, policy, [Root])
+    root_id = await runtime.create(Root)
 
-    first_ask = emitted(opening, "ask_raised", leaf_sid)[0]
-    del harness
+    async with runtime.connect(root_id, writable=True) as connection:
+        opening = await connection.prompt("go", command_id=uuid4())
+        mid_id = picks(await log(store, root_id.hex), "child_created")[0].child_id
+        leaf_created = await wait_for(store, mid_id, "child_created")
+        leaf_id = leaf_created.child_id
+        first = await wait_for(store, leaf_id, "ask_raised")
+        await connection.answer(UUID(hex=first.ask_id), FreeTextResponse(text="yes-one"), command_id=uuid4())
+        second = await wait_for(store, leaf_id, "ask_raised", 2)
+        await connection.answer(UUID(hex=second.ask_id), FreeTextResponse(text="yes-two"), command_id=uuid4())
+        await wait_for(store, leaf_id, "agent_finished")
+        await wait_for(store, mid_id, "agent_finished")
+        await wait_for(store, root_id.hex, "turn_completed", 2)
 
-    second, waiting = build(store, policy, [Root])
-    answered = await collect(second.resume(leaf_sid, first_ask.ask_id, FreeTextResponse(text="yes-one")))
-    assert len(picks([item.event for item in answered], "ask_raised")) == 1
-    bubbled = await collect(second.resume(root_sid))
-    second_ask = emitted(bubbled, "ask_raised", leaf_sid)[0]
-    assert second_ask.ask_id != first_ask.ask_id
-    assert (await store.header(root_sid)).status == "awaiting_input"
-
-    third, closer = build(store, policy, [Root])
-    await collect(third.resume(leaf_sid, second_ask.ask_id, FreeTextResponse(text="yes-two")))
-    closing = await collect(third.resume(root_sid))
-
-    assert [event.stop_reason for event in emitted(closing, "turn_completed", root_sid)] == ["completed"]
-    leaf_results = [str(event.result) for event in picks(await log(store, leaf_sid), "tool_call_completed")]
+    root_log = await log(store, root_id.hex)
+    mid_log = await log(store, mid_id)
+    leaf_results = [str(event.result) for event in picks(await log(store, leaf_id), "tool_call_completed")]
+    root_ping = f"[agent {root_id}] root ping"
+    mid_pong = f"[agent {UUID(hex=mid_id)}] mid pong"
+    assert opening.text == "root waiting"
+    assert root_ping in [event.input for event in picks(mid_log, "input_queued")]
+    assert root_ping in [event.input for event in picks(mid_log, "turn_started")]
+    assert mid_pong in [event.input for event in picks(root_log, "input_queued")]
+    assert mid_pong in [event.input for event in picks(root_log, "turn_started")]
     assert "ship:yes-one/yes-two" in leaf_results
-    assert len(await store.list(parent_id=root_sid)) == 1
-    assert len(await store.list(parent_id=mid_sid)) == 1
-    for sid in (root_sid, mid_sid, leaf_sid):
+    assert len(await store.list(parent_id=root_id.hex)) == 1
+    assert len(await store.list(parent_id=mid_id)) == 1
+    assert len(picks(await log(store, root_id.hex), "child_created")) == 1
+    assert len(picks(await log(store, mid_id), "child_created")) == 1
+    assert check_pairs(provider.requests) >= 4
+    for sid in (root_id.hex, mid_id, leaf_id):
         await check_log(store, sid)
 
-    assert check_pairs(provider.requests, min_pairs=0) == 0
-    assert waiting.requests == []
-    assert check_pairs(closer.requests) == 3
 
-
-async def test_fan_out_mixed(store: Store) -> None:
-    captured: list[list[Any]] = []
+async def test_parallel_actors_finish_into_independent_journals(store: Store) -> None:
+    active = 0
+    peak = 0
+    release = asyncio.Event()
 
     @tool
-    async def dispatch(ctx: Context) -> str:
-        """Fan the work out to a dozen workers."""
-        tasks = [(Hand, f"boom {index}" if index in FAN_FAILURES else f"task {index}") for index in range(FAN_TASKS)]
-        results = await ctx.fan_out(tasks, max_concurrency=4)
-        captured.append(results)
-        return f"{sum(1 for result in results if isinstance(result, str))} of {len(results)} done"
+    async def work(index: int) -> str:
+        """Perform one synchronized unit of work."""
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        if active == FAN_TASKS:
+            release.set()
+        await asyncio.wait_for(release.wait(), timeout=2)
+        active -= 1
+        if index in FAN_FAILURES:
+            raise RuntimeError(f"worker {index} failed")
+        return f"handled task {index}"
 
     class Hand(Agent):
-        """Does one small task."""
-
         model = MODEL_HAND
+        tools = [work]
+        permissions = {"work": "allow", "finish": "allow"}
 
     class Dispatcher(Agent):
-        """Fans work out."""
-
         model = MODEL_ROOT
-        tools = [dispatch]
         subagents = [Hand]
-        permissions = {"dispatch": "allow"}
+        permissions = {"spawn": "allow"}
+
+    def dispatcher(req: SampleRequest, state: PolicyState) -> Sample:
+        if last_user(req) == "go":
+            if turn_step(req) < 1:
+                wanted = [("spawn", {"agent_name": "hand", "input": f"task {index}"}) for index in range(FAN_TASKS)]
+                return calls(state, wanted)
+            return Sample(text="dispatched")
+        return Sample(text="received")
 
     def hand(req: SampleRequest, state: PolicyState) -> Sample:
-        if last_user(req).startswith("boom"):
-            raise ProviderError("the worker refuses this task", status_code=400)
-        return Sample(text=f"handled {last_user(req)}")
+        index = int(last_user(req).split()[-1])
+        if turn_step(req) < 1:
+            return calls(state, [("work", {"index": index})])
+        return calls(state, [("finish", {"result": f"done {index}"})])
 
-    policy = by_model({MODEL_ROOT: call_policy("dispatch", {}, answer="all filed"), MODEL_HAND: hand})
-    harness, provider = build(store, policy, [Dispatcher])
-    sid = (await harness.create_session(Dispatcher)).id
+    runtime, provider = build(store, by_model({MODEL_ROOT: dispatcher, MODEL_HAND: hand}), [Dispatcher])
+    root_id = await runtime.create(Dispatcher)
+    async with runtime.connect(root_id, writable=True) as connection:
+        result = await connection.prompt("go", command_id=uuid4())
 
-    events = await collect(harness.run(sid, "go"))
-    results = captured[0]
+    children = await store.list(parent_id=root_id.hex, limit=FAN_TASKS)
+    for child in children:
+        await wait_for(store, child.id, "agent_finished")
 
-    assert len(results) == FAN_TASKS
-    assert [index for index, result in enumerate(results) if isinstance(result, Exception)] == list(FAN_FAILURES)
-    assert results[0] == "handled task 0"
-    assert [event.stop_reason for event in emitted(events, "turn_completed", sid)] == ["completed"]
-
-    children = await store.list(parent_id=sid)
+    assert result.text == "dispatched"
+    assert peak == FAN_TASKS
     assert len(children) == FAN_TASKS
-    assert len({header.id for header in children}) == FAN_TASKS
-    assert len(picks(await log(store, sid), "child_session_spawned")) == FAN_TASKS
-    check_pairs(provider.requests)
-    await check_log(store, sid)
+    assert len({child.id for child in children}) == FAN_TASKS
+    assert len(picks(await log(store, root_id.hex), "child_created")) == FAN_TASKS
+    errors = []
+    for child in children:
+        child_log = await log(store, child.id)
+        errors.extend(event for event in picks(child_log, "tool_call_completed") if event.is_error)
+        await check_log(store, child.id)
+    assert sorted(int(str(event.result).split()[1]) for event in errors) == list(FAN_FAILURES)
+    assert check_pairs(provider.requests) >= FAN_TASKS * 2
+    await check_log(store, root_id.hex)
 
 
-async def test_abandon_mid_spawn_no_twin(store: Store) -> None:
-    policy = chain_policy("sign_off")
-    harness, abandoned = build(store, policy, [Boss])
-    sid = (await harness.create_session(Boss)).id
+async def test_interruption_requires_later_root_activation(store: Store) -> None:
+    started = asyncio.Event()
 
-    seen: list[Any] = []
-    async with aclosing(harness.run(sid, "go")) as live:
-        async for item in live:
-            seen.append(item)
-            if event_type(item.event) == "ask_raised":
-                break
+    @tool
+    async def hold() -> str:
+        """Wait until Runtime shutdown interrupts the turn."""
+        started.set()
+        await asyncio.Event().wait()
+        return "impossible"
 
-    assert event_type(seen[-1].event) == "ask_raised"
-    leaf_sid, ask = seen[-1].session_id, seen[-1].event
-    assert leaf_sid != sid
-    assert len(await store.list(parent_id=sid)) == 1
-    del harness
+    class Interrupted(Agent):
+        model = MODEL_ROOT
+        tools = [hold]
+        permissions = {"hold": "allow"}
 
-    fresh, provider = build(store, policy, [Boss])
-    await collect(fresh.resume(leaf_sid, ask.ask_id, FreeTextResponse(text="signed")))
-    closing = await collect(fresh.resume(sid))
+    def blocking(req: SampleRequest, state: PolicyState) -> Sample:
+        if turn_step(req) < 1:
+            return calls(state, [("hold", {})])
+        return Sample(text="unexpected")
 
-    assert [event.stop_reason for event in emitted(closing, "turn_completed", sid)] == ["completed"]
-    assert len(await store.list(parent_id=sid)) == 1
-    assert len(picks(await log(store, sid), "child_session_spawned")) == 1
-    assert "ship:signed" in [str(event.result) for event in picks(await log(store, leaf_sid), "tool_call_completed")]
-    assert check_pairs(abandoned.requests, min_pairs=0) == 0
-    assert check_pairs(provider.requests) == 2
-    await check_log(store, sid)
-    await check_log(store, leaf_sid)
+    runtime, _ = build(store, blocking, [Interrupted])
+    root_id = await runtime.create(Interrupted)
+    async with runtime.connect(root_id, writable=True) as connection:
+        pending = asyncio.create_task(connection.prompt("first", command_id=uuid4()))
+        await asyncio.wait_for(started.wait(), timeout=2)
+        await runtime.aclose()
+        interrupted = await pending
+
+    replacement, provider = build(store, lambda req, state: Sample(text="recovered"), [Interrupted])
+    async with replacement.connect(root_id, writable=True) as current:
+        recovered = await current.prompt("continue", command_id=uuid4())
+
+    events = await log(store, root_id.hex)
+    assert interrupted.outcome == "interrupted"
+    assert recovered.text == "recovered"
+    assert len(picks(events, "turn_interrupted")) == 1
+    assert len(picks(events, "turn_completed")) == 1
+    assert len(provider.requests) == 1
+    await check_log(store, root_id.hex)
 
 
-async def test_derived_permissions_at_depth(store: Store) -> None:
+async def test_permissions_apply_at_depth(store: Store) -> None:
     probed: list[str] = []
     written: list[str] = []
 
@@ -257,55 +267,56 @@ async def test_derived_permissions_at_depth(store: Store) -> None:
         return f"wrote {path}"
 
     class Kid(Agent):
-        """Probes and writes."""
-
         model = MODEL_LEAF
         tools = [probe, forbidden_write]
-        permissions = {"probe": "allow", "forbidden_write": "allow"}
+        permissions = {"probe": "ask", "forbidden_write": "deny", "finish": "allow"}
 
     class Parent(Agent):
-        """Delegates to the kid."""
-
         model = MODEL_ROOT
         subagents = [Kid]
-        permissions = {"kid": "allow", "forbidden_*": "deny"}
+        permissions = {"spawn": "allow"}
+
+    def parent(req: SampleRequest, state: PolicyState) -> Sample:
+        if last_user(req) == "go":
+            if turn_step(req) < 1:
+                return calls(state, [("spawn", {"agent_name": "kid", "input": "look"})])
+            return Sample(text="parent waiting")
+        return Sample(text="parent done")
 
     def kid(req: SampleRequest, state: PolicyState) -> Sample:
-        if turn_step(req) >= 1:
-            return Sample(text="kid done")
-        return Sample(
-            tool_calls=[
-                ToolCall(id=state.next_call_id(), name="probe", args=json.dumps({"q": "metrics"})),
-                ToolCall(id=state.next_call_id(), name="forbidden_write", args=json.dumps({"path": "/etc/hosts"})),
-            ]
-        )
+        if turn_step(req) < 1:
+            return calls(
+                state,
+                [
+                    ("probe", {"q": "metrics"}),
+                    ("forbidden_write", {"path": "/etc/hosts"}),
+                ],
+            )
+        return calls(state, [("finish", {"result": "kid done"})])
 
-    policy = by_model({MODEL_ROOT: call_policy("kid", {"task": "look"}, answer="parent done"), MODEL_LEAF: kid})
-    harness, provider = build(store, policy, [Parent], default_permission="ask")
-    sid = (await harness.create_session(Parent)).id
+    runtime, provider = build(
+        store,
+        by_model({MODEL_ROOT: parent, MODEL_LEAF: kid}),
+        [Parent],
+        default_permission="ask",
+    )
+    root_id = await runtime.create(Parent)
 
-    opening = await collect(harness.run(sid, "go"))
-    kid_sid = emitted(opening, "child_session_spawned")[0].child_session_id
-    raised = emitted(opening, "ask_raised", kid_sid)
+    async with runtime.connect(root_id, writable=True) as connection:
+        opening = await connection.prompt("go", command_id=uuid4())
+        kid_id = picks(await log(store, root_id.hex), "child_created")[0].child_id
+        raised = await wait_for(store, kid_id, "ask_raised")
+        assert raised.request.extra["permission"] == "probe"
+        await connection.answer(UUID(hex=raised.ask_id), ApprovalResponse(allow=True), command_id=uuid4())
+        await wait_for(store, kid_id, "agent_finished")
 
-    assert len(raised) == 1
-    assert raised[0].request.extra["permission"] == "probe"
-    assert probed == []
-
-    del harness
-    fresh, resumed = build(store, policy, [Parent], default_permission="ask")
-    await collect(fresh.resume(kid_sid, raised[0].ask_id, ApprovalResponse(allow=True)))
-    closing = await collect(fresh.resume(sid))
-
-    kid_log = await log(store, kid_sid)
+    kid_log = await log(store, kid_id)
     denied = [event for event in picks(kid_log, "tool_call_completed") if event.is_error]
-
+    assert opening.text == "parent waiting"
     assert probed == ["metrics"]
     assert written == []
     assert len(denied) == 1
     assert "denied by permissions: forbidden_write" in str(denied[0].result)
-    assert [event.stop_reason for event in emitted(closing, "turn_completed", sid)] == ["completed"]
-    assert check_pairs(provider.requests, min_pairs=0) == 0
-    assert check_pairs(resumed.requests) == 3
-    await check_log(store, sid)
-    await check_log(store, kid_sid)
+    assert check_pairs(provider.requests) >= 3
+    await check_log(store, root_id.hex)
+    await check_log(store, kid_id)

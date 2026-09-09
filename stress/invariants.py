@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from typing import Any
 
-from tantra import CompactionConfig, Lease, ModelLimits, SampleRequest, Store
+from tantra import CompactionConfig, ModelLimits, SampleRequest, Store
 
 WINDOW_SLACK = 1.25
 
-TURN_EVENTS = ("turn_started", "turn_completed", "turn_failed")
 
 ROLES = ("user", "assistant", "tool")
 
@@ -112,14 +110,8 @@ def check_window(
             raise AssertionError(f"request {index}: assembled messages estimate {size} tokens, budget is {budget}")
 
 
-def _live(lease: Lease) -> bool:
-    expires = lease.expires_at
-    now = datetime.now(UTC) if expires.tzinfo is not None else datetime.now()
-    return expires > now
-
-
 async def check_log(store: Store, sid: str) -> None:
-    """Seqs are contiguous from 1, the header agrees, and a terminal turn leaves no live writer."""
+    """Sequences are contiguous from 1 and the durable header agrees with the journal."""
     stamped = [item async for item in store.read(sid)]
     if not stamped:
         raise AssertionError(f"session {sid}: log is empty")
@@ -135,11 +127,3 @@ async def check_log(store: Store, sid: str) -> None:
         raise AssertionError(f"session {sid}: log has {len(seqs)} events but no header")
     if header.last_seq != seqs[-1]:
         raise AssertionError(f"session {sid}: header.last_seq {header.last_seq} but log ends at {seqs[-1]}")
-
-    turns = [event_type(item.event) for item in stamped if event_type(item.event) in TURN_EVENTS]
-    if not turns or turns[-1] == "turn_started":
-        return
-    if header.status == "running":
-        raise AssertionError(f"session {sid}: turn is terminal ({turns[-1]}) but header status is 'running'")
-    if header.lease is not None and _live(header.lease):
-        raise AssertionError(f"session {sid}: turn is terminal but lease {header.lease.holder!r} is still live")

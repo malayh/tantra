@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -22,17 +22,16 @@ from tantra import (
     FileSystemStore,
     FreeText,
     FreeTextResponse,
-    Harness,
     MemoryStore,
     MemoryWrite,
     PostgresStore,
+    Runtime,
     Sample,
     SampleRequest,
-    SeqConflict,
     SessionHeader,
     SQLiteStore,
     Store,
-    collect,
+    WriterReplaced,
     tool,
 )
 from tantra.providers.base import ToolCall
@@ -114,9 +113,9 @@ class Runner(Agent):
     permissions = {"confirm": "allow"}
 
 
-def build(store: Store, policy: Policy) -> tuple[Harness, SyntheticProvider]:
+def build(store: Store, policy: Policy) -> tuple[Runtime, SyntheticProvider]:
     provider = SyntheticProvider(policy)
-    return Harness(provider, store, [Runner]), provider
+    return Runtime(provider, store, [Runner]), provider
 
 
 def plain(text: str) -> Policy:
@@ -137,13 +136,40 @@ def confirming(step: str) -> Policy:
     return policy
 
 
-async def seeded(store: Store) -> tuple[str, Any]:
-    """Run one real turn and hand back its session id plus a `TextPart` to clone in bulk."""
-    harness, _ = build(store, plain("seeded"))
-    sid = (await harness.create_session(Runner)).id
-    await collect(harness.run(sid, "seed the log"))
+async def execute(runtime: Runtime, sid: str, input: str) -> Any:
+    async with runtime.connect(UUID(hex=sid), writable=True) as connection:
+        return await connection.prompt(input, command_id=uuid4())
+
+
+async def wait_for(store: Store, sid: str, kind: str) -> Any:
+    for _ in range(10_000):
+        events = [event for event in await log(store, sid) if event_type(event) == kind]
+        if events:
+            return events[-1]
+        await asyncio.sleep(0)
+    raise AssertionError(f"{kind} was not recorded")
+
+
+async def public_log(runtime: Runtime, sid: str, last_seq: int) -> list[Any]:
+    stream = runtime.events(UUID(hex=sid))
+    events: list[Any] = []
+    try:
+        async for item in stream:
+            events.append(item)
+            if item.seq == last_seq:
+                return events
+    finally:
+        await stream.aclose()
+    return events
+
+
+async def seeded(store: Store) -> tuple[Runtime, str, Any]:
+    """Create one actor turn and return its Runtime, id, and a `TextPart` to clone in bulk."""
+    runtime, _ = build(store, plain("seeded"))
+    sid = (await runtime.create(Runner)).hex
+    await execute(runtime, sid, "seed the log")
     template = next(event for event in await log(store, sid) if event_type(event) == "text_part")
-    return sid, template
+    return runtime, sid, template
 
 
 def report(backend: str, label: str, elapsed: float, detail: str = "") -> None:
@@ -152,7 +178,7 @@ def report(backend: str, label: str, elapsed: float, detail: str = "") -> None:
 
 async def test_ten_thousand_events(substrate: Substrate) -> None:
     store = await substrate.make()
-    sid, template = await seeded(store)
+    runtime, sid, template = await seeded(store)
     seed_count = len(await log(store, sid))
 
     start = time.perf_counter()
@@ -166,9 +192,8 @@ async def test_ten_thousand_events(substrate: Substrate) -> None:
     stamped = [item async for item in store.read(sid)]
     read = time.perf_counter() - start
 
-    harness, _ = build(store, plain("unused"))
     start = time.perf_counter()
-    replayed = [item async for item in harness.replay(sid)]
+    replayed = await public_log(runtime, sid, stamped[-1].seq)
     replay = time.perf_counter() - start
 
     report(substrate.backend, "append", appended, f"{EVENTS} events in {EVENTS // BATCH} batches")
@@ -292,59 +317,50 @@ async def test_memory_at_scale(substrate: Substrate) -> None:
         assert {hit.mode for hit in live} == {"keyword"}
 
 
-async def test_cross_instance_handoff(substrate: Substrate) -> None:
-    if substrate.backend == "memory":
-        pytest.skip("MemoryStore has no shared substrate: a second instance starts empty")
+async def test_same_runtime_writer_answers_live_ask(substrate: Substrate) -> None:
+    store = await substrate.make()
+    runtime, _ = build(store, confirming("ship"))
+    sid = (await runtime.create(Runner)).hex
 
-    first = await substrate.make()
-    policy = confirming("ship")
-    harness, _ = build(first, policy)
-    sid = (await harness.create_session(Runner)).id
+    async with runtime.connect(UUID(hex=sid), writable=True) as connection:
+        pending = asyncio.create_task(connection.prompt("go", command_id=uuid4()))
+        ask = await wait_for(store, sid, "ask_raised")
+        await connection.answer(
+            UUID(hex=ask.ask_id),
+            FreeTextResponse(text="approved"),
+            command_id=uuid4(),
+        )
+        result = await pending
 
-    opening = await collect(harness.run(sid, "go"))
-    ask = [item.event for item in opening if event_type(item.event) == "ask_raised"][0]
-    assert (await first.header(sid)).status == "awaiting_input"
-    del harness
-
-    second = await substrate.make()
-    fresh, _ = build(second, policy)
-    await collect(fresh.resume(sid, ask.ask_id, FreeTextResponse(text="approved")))
-
-    events = await log(second, sid)
+    events = await log(store, sid)
     completed = [event for event in events if event_type(event) == "tool_call_completed"]
-
+    assert result.outcome == "completed"
     assert [str(event.result) for event in completed] == ["ship:approved"]
-    assert [event.stop_reason for event in events if event_type(event) == "turn_completed"] == ["completed"]
-    assert (await second.header(sid)).status == "idle"
-    await check_log(second, sid)
+    await check_log(store, sid)
 
 
-async def test_lease_contention(substrate: Substrate) -> None:
-    if substrate.backend == "memory":
-        pytest.skip("MemoryStore has no shared substrate: two instances share no lease")
+async def test_writer_takeover_and_independent_roots(substrate: Substrate) -> None:
+    store = await substrate.make()
+    runtime, _ = build(store, plain("done"))
+    first = await runtime.create(Runner)
+    second = await runtime.create(Runner)
 
-    first = await substrate.make()
-    second = await substrate.make()
-    sid, template = await seeded(first)
+    async with runtime.connect(first, writable=True) as stale:
+        await stale.send("queued", command_id=uuid4())
+        async with runtime.connect(first, writable=True) as current:
+            with pytest.raises(WriterReplaced):
+                await stale.send("rejected", command_id=uuid4())
+            first_result = await current.prompt("accepted", command_id=uuid4())
 
-    verdicts = await asyncio.gather(
-        first.acquire_lease(sid, "writer-a", 60.0),
-        second.acquire_lease(sid, "writer-b", 60.0),
-    )
-    assert sorted(verdicts) == [False, True]
+    async with runtime.connect(second, writable=True) as independent:
+        second_result = await independent.prompt("separate", command_id=uuid4())
 
-    holder = (await first.header(sid)).lease
-    assert holder is not None
-    assert holder.holder == ("writer-a" if verdicts[0] else "writer-b")
-
-    last = (await first.header(sid)).last_seq
-    await first.append(sid, [template.model_copy(update={"text": "winner"})], expect_seq=last)
-    with pytest.raises(SeqConflict):
-        await second.append(sid, [template.model_copy(update={"text": "loser"})], expect_seq=last)
-
-    tail: Sequence[Any] = await log(second, sid)
-    assert tail[-1].text == "winner"
-
-    await first.release_lease(sid, holder.holder)
-    assert (await second.header(sid)).lease is None
-    await check_log(second, sid)
+    first_log = await log(store, first.hex)
+    second_log = await log(store, second.hex)
+    assert first_result.outcome == second_result.outcome == "completed"
+    assert len([event for event in first_log if event_type(event) == "turn_completed"]) == 2
+    assert len([event for event in second_log if event_type(event) == "turn_completed"]) == 1
+    assert first_log[0].root_id == first.hex
+    assert second_log[0].root_id == second.hex
+    await check_log(store, first.hex)
+    await check_log(store, second.hex)

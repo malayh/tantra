@@ -4,81 +4,68 @@
 
 # tantra
 
-The agent turn loop as a library. Install name `tantra-harness`, import name `tantra`.
+The agent actor runtime as a Python library. Install name `tantra-harness`, import name `tantra`.
 
-## What it is
-
-- The harness owns the loop — sampling, tool dispatch, permissions, approval/suspend-resume, subagents, compaction, persistence. You supply an `Agent` (a declarative class of values and function references) and run turns against it.
-- Tools, hooks and skills plug in. An `Agent` declares `tools`; a `Harness` takes `hooks` and a `Skills` source.
-- Agents hold no live I/O. A resume can run in another process and look the agent up by name from the persisted session header.
-- Configuration is explicit construction: tools are built by factories (`web_search(api_key=...)`) in your own module, so keys are per-agent and a misconfiguration fails at construction, not mid-turn. The library never reads the environment.
-- Shipped tools live under `tantra.extratools.*` and their dependencies are **extras**, so the base install stays light — `pydantic`, `httpx`, `openai` only. The shell tools are stdlib and need no extra.
+Tantra gives each agent a durable FIFO inbox, an independent event journal, and one active turn. A process-wide `Runtime` owns providers, stores, tools, hooks, permissions, skills, memory, compaction, telemetry, actor tasks, and writer connections.
 
 ## Install
 
 | Command | Adds |
 |---|---|
-| `pip install tantra-harness` | core + `tantra.extratools.shell` (`bash`, `ShellGuard`) |
-| `pip install "tantra-harness[web]"` | `web_search` (Brave) + `web_fetch` |
-| `pip install "tantra-harness[doc]"` | `read_doc` for PDF / docx |
-| `pip install "tantra-harness[postgres]"` | the psycopg driver that `PostgresStore` needs at use time; the class itself imports without it |
-| `pip install "tantra-harness[telemetry]"` | `tantra.telemetry.Telemetry` — OpenTelemetry tracing for `Harness(telemetry=...)` |
-| `pip install "tantra-harness[web,doc]"` | combine freely |
+| `pip install tantra-harness` | Core runtime and shell tools |
+| `pip install "tantra-harness[web]"` | Brave web search and web fetch |
+| `pip install "tantra-harness[doc]"` | PDF and Word document reading |
+| `pip install "tantra-harness[postgres]"` | PostgreSQL storage |
+| `pip install "tantra-harness[telemetry]"` | OpenTelemetry tracing |
 
-**Import-name collision.** The unrelated PyPI project `tantra` also installs an `import tantra`. Installing both into one environment clobbers the import silently. Do not co-install them.
+The unrelated PyPI project `tantra` installs the same import name. Do not install both projects in one environment.
 
 ## Basic usage
 
 ```python
 import asyncio
+from uuid import uuid4
 
-from tantra import Agent, Harness, OpenAICompatible, SQLiteStore
-from tantra.extratools.doc import read_doc
-from tantra.extratools.shell import ShellGuard, bash
-from tantra.extratools.web import web_fetch, web_search
-from tantra.providers.base import TextDelta
+from tantra import Agent, OpenAICompatible, Runtime, SQLiteStore
+from tantra.extratools.web import web_search
 
 
 class Researcher(Agent):
     model = "gpt-5"
-    prompt = "You answer questions using the web, local documents and the shell."
-    tools = [bash(), web_search(api_key=BRAVE_API_KEY), web_fetch(), read_doc()]
-    permissions = {"bash": "allow"}
+    prompt = "Answer with current, sourced information."
+    tools = [web_search(api_key=BRAVE_API_KEY)]
 
 
 async def main() -> None:
     store = SQLiteStore("sessions.db")
     await store.setup()
-    harness = Harness(
+    runtime = Runtime(
         OpenAICompatible("https://api.openai.com/v1", OPENAI_API_KEY),
         store,
         [Researcher],
-        hooks=[ShellGuard()],
     )
-    session = await harness.create_session(Researcher)
-    async for emitted in harness.run(session.id, "What changed in Python 3.13?"):
-        if isinstance(emitted.event, TextDelta):
-            print(emitted.event.text, end="", flush=True)
+    root_id = await runtime.create(Researcher)
+    async with runtime.connect(root_id, writable=True) as connection:
+        result = await connection.prompt(
+            "What changed in Python 3.13?",
+            command_id=uuid4(),
+        )
+    print(result.text)
+    await runtime.aclose()
 
 
 asyncio.run(main())
 ```
 
-Notes on the snippet:
+`Connection.prompt()` accepts a durable command and waits for its terminal result. For streaming, call `send()` and iterate the connection. Reconnect with the last scalar `seq` as `after`; use `Runtime.events()` for a child journal. Command IDs are UUIDs and make acceptance idempotent.
 
-- `harness.run(...)` is an async iterator of `Emitted`. The turn only advances while the stream is consumed; `tantra.collect` drains it into a list.
-- `bash` declares `permission="ask"`, so a headless run must override it — hence `permissions = {"bash": "allow"}`. Globs work (`"web_*": "allow"`).
-- `ShellGuard()` denies destructive commands with a reason the model sees. `ShellGuard(on_trip="ask")` escalates to the human approval flow instead. It is a guardrail, not a sandbox.
+Subagents are independent actors. Models use the injected `spawn`, `send`, and `finish` tools; no parent stream merges child events. A live typed ask suspends only its actor turn and must be answered through the current writable root connection.
 
-## Docs
+See the [documentation](https://malayh.github.io/tantra/docs/) and the [1.0 migration guide](https://malayh.github.io/tantra/docs/guides/migration-1.0/).
 
-- https://malayh.github.io/tantra/
-- https://malayh.github.io/tantra/docs/
+## Reference app
 
-## Reference apps
-
-- `apps/sarthi` in apps/sarathi — a fully usable Perplexity clone with multi tanancy, memoery, parallel agents, web search built in 
-- `apps/agni` in apps/agni — a terminal coding agent built on this library: REPL, permission prompts, skills, memory, compaction.
+`apps/sarathi` is the repository's interactive web application.
 
 ## License
 

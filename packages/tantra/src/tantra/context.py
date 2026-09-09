@@ -160,5 +160,5 @@ async def resolve_prompt(prompt: Any, turn: TurnContext) -> str:
 def resolve_model(agent: type[Agent], default_model: str | None) -> str:
     model = agent.model or default_model
     if not model:
-        raise TantraError(f"agent {agent_name(agent)!r} sets no model and the harness has no default_model")
+        raise TantraError(f"agent {agent_name(agent)!r} sets no model and the runtime has no default_model")
     return model

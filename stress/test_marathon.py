@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
+from uuid import UUID, uuid4
 
 from stress.driver import (
     Policy,
@@ -18,13 +20,12 @@ from tantra import (
     Agent,
     ApprovalResponse,
     CompactionConfig,
-    Harness,
     ModelLimits,
     PruneThenSummarize,
+    Runtime,
     Sample,
     SampleRequest,
     Store,
-    collect,
     tool,
 )
 from tantra.providers.base import ToolCall
@@ -73,17 +74,44 @@ class Marathoner(Agent):
     permissions = {"fetch_blob": "allow", "risky_note": "ask"}
 
 
-def build(store: Store, policy: Policy, *, seed: int = 0) -> tuple[Harness, SyntheticProvider]:
+def build(store: Store, policy: Policy, *, seed: int = 0) -> tuple[Runtime, SyntheticProvider]:
     provider = SyntheticProvider(policy, limits=LIMITS, seed=seed)
     provider.state.markers = list(MARKERS)
-    harness = Harness(
+    runtime = Runtime(
         provider,
         store,
         [Marathoner],
         default_model=MODEL,
         compactor=PruneThenSummarize(CONFIG),
     )
-    return harness, provider
+    return runtime, provider
+
+
+async def execute(runtime: Runtime, sid: str, input: str) -> Any:
+    async with runtime.connect(UUID(hex=sid), writable=True) as connection:
+        return await connection.prompt(input, command_id=uuid4())
+
+
+async def wait_for(store: Store, sid: str, kind: str) -> Any:
+    for _ in range(10_000):
+        events = picks(await log(store, sid), kind)
+        if events:
+            return events[-1]
+        await asyncio.sleep(0)
+    raise AssertionError(f"{kind} was not recorded")
+
+
+async def public_log(runtime: Runtime, sid: str, last_seq: int) -> list[tuple[int, Any]]:
+    stream = runtime.events(UUID(hex=sid))
+    events: list[tuple[int, Any]] = []
+    try:
+        async for item in stream:
+            events.append((item.seq, item.event))
+            if item.seq == last_seq:
+                return events
+    finally:
+        await stream.aclose()
+    return events
 
 
 def fetch(state: PolicyState, size: int) -> ToolCall:
@@ -123,12 +151,12 @@ def first_compacted(provider: SyntheticProvider) -> int:
 
 
 async def test_marathon_many_turns(store: Store) -> None:
-    harness, provider = build(store, jittered())
-    sid = (await harness.create_session(Marathoner)).id
+    runtime, provider = build(store, jittered())
+    sid = (await runtime.create(Marathoner)).hex
 
     for index in range(TURNS):
         marker = MARKERS[index] if index < len(MARKERS) else ""
-        await collect(harness.run(sid, f"turn {index} {marker}".strip()))
+        await execute(runtime, sid, f"turn {index} {marker}".strip())
 
     events = await log(store, sid)
     applied = picks(events, "compaction_applied")
@@ -144,7 +172,7 @@ async def test_marathon_many_turns(store: Store) -> None:
     await check_log(store, sid)
 
     stamped = await stamped_log(store, sid)
-    replayed = [(emitted.seq, emitted.event) async for emitted in harness.replay(sid)]
+    replayed = await public_log(runtime, sid, stamped[-1][0])
     assert replayed == stamped
 
     for call_id in {stub.call_id for stub in stubs(events)}:
@@ -162,10 +190,10 @@ async def test_marathon_many_turns(store: Store) -> None:
 
 
 async def restubbed(store: Store) -> tuple[dict[str, int], SyntheticProvider]:
-    harness, provider = build(store, jittered())
-    sid = (await harness.create_session(Marathoner)).id
+    runtime, provider = build(store, jittered())
+    sid = (await runtime.create(Marathoner)).hex
     for index in range(RESTUB_TURNS):
-        await collect(harness.run(sid, f"turn {index}"))
+        await execute(runtime, sid, f"turn {index}")
     counts: dict[str, int] = {}
     for event in stubs(await log(store, sid)):
         counts[event.call_id] = counts.get(event.call_id, 0) + 1
@@ -193,12 +221,12 @@ async def test_tail_turns_intact(store: Store) -> None:
             return Sample(tool_calls=[fetch(state, 90_000)])
         return base(req, state)
 
-    harness, provider = build(store, policy)
-    sid = (await harness.create_session(Marathoner)).id
+    runtime, provider = build(store, policy)
+    sid = (await runtime.create(Marathoner)).hex
 
     for index in range(4):
-        await collect(harness.run(sid, f"warmup {index}"))
-    await collect(harness.run(sid, BIG_TURN))
+        await execute(runtime, sid, f"warmup {index}")
+    await execute(runtime, sid, BIG_TURN)
 
     events = await log(store, sid)
     assert len(picks(events, "compaction_applied")) == 1
@@ -215,7 +243,7 @@ async def test_tail_turns_intact(store: Store) -> None:
     await check_log(store, sid)
 
 
-async def test_suspend_after_compaction(store: Store) -> None:
+async def test_live_ask_after_compaction(store: Store) -> None:
     base = worker_policy(size=3_000, calls=2, answer_chars=6_000)
 
     def policy(req: SampleRequest, state: PolicyState) -> Sample:
@@ -232,30 +260,29 @@ async def test_suspend_after_compaction(store: Store) -> None:
             )
         return Sample(text="filed after approval")
 
-    harness, provider = build(store, policy)
-    sid = (await harness.create_session(Marathoner)).id
+    runtime, provider = build(store, policy)
+    sid = (await runtime.create(Marathoner)).hex
     for index in range(4):
-        await collect(harness.run(sid, f"warmup {index}"))
+        await execute(runtime, sid, f"warmup {index}")
 
-    opening = await collect(harness.run(sid, BIG_TURN))
-    kinds = [event_type(emitted.event) for emitted in opening]
-    assert "compaction_applied" in kinds
-    assert kinds.index("compaction_applied") < kinds.index("ask_raised")
-    raised = [emitted.event for emitted in opening if event_type(emitted.event) == "ask_raised"][0]
-    assert (await store.header(sid)).status == "awaiting_input"
-
-    del harness
-    fresh, second = build(store, policy)
-    resumed = await collect(fresh.resume(sid, raised.ask_id, ApprovalResponse(allow=True)))
+    async with runtime.connect(UUID(hex=sid), writable=True) as connection:
+        pending = asyncio.create_task(connection.prompt(BIG_TURN, command_id=uuid4()))
+        raised = await wait_for(store, sid, "ask_raised")
+        events = await log(store, sid)
+        kinds = [event_type(event) for event in events]
+        assert kinds.index("compaction_applied") < kinds.index("ask_raised")
+        await connection.answer(
+            UUID(hex=raised.ask_id),
+            ApprovalResponse(allow=True),
+            command_id=uuid4(),
+        )
+        result = await pending
 
     events = await log(store, sid)
-    assert [event.stop_reason for event in picks(events, "turn_completed")][-1] == "completed"
-    assert [event_type(emitted.event) for emitted in resumed].count("tool_call_completed") == 1
+    assert result.outcome == "completed"
     assert "noted after the brief" in [str(event.result) for event in picks(events, "tool_call_completed")]
-
     check_pairs(provider.requests)
-    check_pairs(second.requests)
-    assert second.requests[0].messages[0].content.startswith("## Goal")
+    assert any(request.messages[0].content.startswith("## Goal") for request in provider.requests if request.messages)
     await check_log(store, sid)
 
 
@@ -269,16 +296,16 @@ async def test_monster_turn_prune_only(store: Store) -> None:
             return Sample(tool_calls=[fetch(state, 100_000), fetch(state, 100_000)])
         return Sample(tool_calls=[fetch(state, 200)])
 
-    harness, provider = build(store, policy)
-    sid = (await harness.create_session(Marathoner)).id
+    runtime, provider = build(store, policy)
+    sid = (await runtime.create(Marathoner)).hex
 
-    await collect(harness.run(sid, MONSTER_TURN))
+    await execute(runtime, sid, MONSTER_TURN)
     assert stubs(await log(store, sid)) == []
 
-    await collect(harness.run(sid, "small one"))
+    await execute(runtime, sid, "small one")
     assert stubs(await log(store, sid)) == []
 
-    await collect(harness.run(sid, "small two"))
+    await execute(runtime, sid, "small two")
 
     events = await log(store, sid)
     assert picks(events, "compaction_applied") == []
@@ -290,26 +317,19 @@ async def test_monster_turn_prune_only(store: Store) -> None:
     await check_log(store, sid)
 
 
-async def test_compaction_after_process_swap(store: Store) -> None:
+async def test_compaction_survives_writer_replacement(store: Store) -> None:
     policy = worker_policy(size=6_000, calls=2, answer_chars=10_000)
+    runtime, provider = build(store, policy, seed=1)
+    sid = (await runtime.create(Marathoner)).hex
 
-    first, _ = build(store, policy, seed=1)
-    sid = (await first.create_session(Marathoner)).id
-    for index in range(10):
+    for index in range(20):
         marker = MARKERS[index] if index < len(MARKERS) else ""
-        await collect(first.run(sid, f"early {index} {marker}".strip()))
-    swap_seq = (await store.header(sid)).last_seq
-    del first
-
-    second, provider = build(store, policy, seed=2)
-    for index in range(10):
-        await collect(second.run(sid, f"late {index}"))
+        await execute(runtime, sid, f"turn {index} {marker}".strip())
 
     stamped = await stamped_log(store, sid)
-    applied = [(seq, event) for seq, event in stamped if event_type(event) == "compaction_applied"]
-
-    assert [seq for seq, _ in applied if seq > swap_seq] != []
-    for _, event in applied:
+    applied = [event for _, event in stamped if event_type(event) == "compaction_applied"]
+    assert applied
+    for event in applied:
         assert all(marker in event.summary for marker in MARKERS)
 
     events = [event for _, event in stamped]

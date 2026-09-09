@@ -558,21 +558,29 @@ application contracts.
   - [x] Deep-tree and finish rules
   - [x] Tree cancellation
 
-### Phase 3 — 1.0 preparation and Agni removal · deps: P2 · —
+### Phase 3 — 1.0 preparation and Agni removal · deps: P2 · DONE
 
 - Remove `apps/agni` and its workspace, documentation, and test references.
 - Convert package examples and non-Sarathi internal callers to Runtime.
 - Draft Runtime, actor, subagent, durability, tool, and migration documentation.
 - Mark Harness as internal transitional code used only by Sarathi until P4; do
   not publish 1.0 yet.
-- **Verify:** all non-Sarathi examples use Runtime; the workspace contains no
+- ~~**Verify:** all non-Sarathi examples use Runtime; the workspace contains no
   Agni references; library lint, unit, store, stress, and strict documentation
-  checks pass while Sarathi remains functional on the transitional Harness.
+  checks pass while Sarathi remains functional on the transitional Harness.~~
+- **Verified with approved boundary:** all public examples and non-Sarathi
+  callers use Runtime; active Agni references are gone outside preserved design
+  history and untouched Sarathi; library, store, stress, lint, lock, and strict
+  documentation checks pass. Sarathi integration and checks remain deferred to
+  P4 by user direction.
+- **Implementation note:** Harness remains exported and covered by its legacy
+  package tests solely as the transitional Sarathi dependency until P4; the
+  public documentation presents Runtime only.
 - Checklist:
-  - [ ] Agni deletion
-  - [ ] Non-Sarathi caller migration
-  - [ ] 1.0 documentation draft
-  - [ ] Transitional Harness isolation
+  - [x] Agni deletion
+  - [x] Non-Sarathi caller migration
+  - [x] 1.0 documentation draft
+  - [x] Transitional Harness isolation
 
 ### Phase 4 — Sarathi migration and Tantra 1.0.0 · deps: P3 · final · —
 

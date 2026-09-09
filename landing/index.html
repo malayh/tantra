@@ -6,7 +6,7 @@
     <title>tantra — the agent turn loop as a library</title>
     <meta
       name="description"
-      content="tantra is a Python agent harness: the turn loop as a library, with durable re-entrant turns, pluggable tools, hooks, skills and memory."
+      content="tantra is a Python agent actor runtime with durable journals, FIFO inboxes, parallel tools, typed asks, and independent subagents."
     />
     <style>
       :root {
@@ -454,11 +454,11 @@
 
     <main>
       <div class="wrap hero">
-        <p class="eyebrow">Python agent harness</p>
+        <p class="eyebrow">Python agent runtime</p>
         <h1>The agent turn loop,<br />as a <em>library</em>.</h1>
         <p class="lede">
-          tantra owns the loop — sampling, tool dispatch, permissions, approval and suspend/resume, subagents,
-          compaction, persistence — so your agent stays a declaration instead of a framework.
+          tantra owns the actor loop — durable input, sampling, parallel tools, live approvals, subagents,
+          compaction and journals — so your agent stays a declaration instead of a framework.
         </p>
 
         <div class="cta">
@@ -477,41 +477,40 @@
             <button class="copy" type="button" data-copy="sample">Copy</button>
           </div>
           <pre id="sample"><span class="k">import</span> asyncio
+<span class="k">from</span> uuid <span class="k">import</span> uuid4
 
-<span class="k">from</span> tantra <span class="k">import</span> <span class="t">Agent</span>, <span class="t">Harness</span>, <span class="t">OpenAICompatible</span>, <span class="t">SQLiteStore</span>
-<span class="k">from</span> tantra.extratools.doc <span class="k">import</span> read_doc
-<span class="k">from</span> tantra.extratools.shell <span class="k">import</span> <span class="t">ShellGuard</span>, bash
-<span class="k">from</span> tantra.extratools.web <span class="k">import</span> web_fetch, web_search
-<span class="k">from</span> tantra.providers.base <span class="k">import</span> <span class="t">TextDelta</span>
+<span class="k">from</span> tantra <span class="k">import</span> <span class="t">Agent</span>, <span class="t">OpenAICompatible</span>, <span class="t">Runtime</span>, <span class="t">SQLiteStore</span>
+<span class="k">from</span> tantra.extratools.web <span class="k">import</span> web_search
 
 
 <span class="k">class</span> <span class="t">Researcher</span>(<span class="t">Agent</span>):
     model = <span class="s">"gpt-5"</span>
-    prompt = <span class="s">"You answer questions using the web, local documents and the shell."</span>
-    tools = [<span class="f">bash</span>(), <span class="f">web_search</span>(api_key=BRAVE_API_KEY), <span class="f">web_fetch</span>(), <span class="f">read_doc</span>()]
-    permissions = {<span class="s">"bash"</span>: <span class="s">"allow"</span>}
+    prompt = <span class="s">"Answer with current, sourced information."</span>
+    tools = [<span class="f">web_search</span>(api_key=BRAVE_API_KEY)]
 
 
 <span class="k">async</span> <span class="k">def</span> <span class="f">main</span>() -&gt; <span class="k">None</span>:
     store = <span class="t">SQLiteStore</span>(<span class="s">"sessions.db"</span>)
     <span class="k">await</span> store.<span class="f">setup</span>()
-    harness = <span class="t">Harness</span>(
+    runtime = <span class="t">Runtime</span>(
         <span class="t">OpenAICompatible</span>(<span class="s">"https://api.openai.com/v1"</span>, OPENAI_API_KEY),
         store,
         [<span class="t">Researcher</span>],
-        hooks=[<span class="t">ShellGuard</span>()],
     )
-    session = <span class="k">await</span> harness.<span class="f">create_session</span>(<span class="t">Researcher</span>)
-    <span class="k">async for</span> emitted <span class="k">in</span> harness.<span class="f">run</span>(session.id, <span class="s">"What changed in Python 3.13?"</span>):
-        <span class="k">if</span> <span class="f">isinstance</span>(emitted.event, <span class="t">TextDelta</span>):
-            <span class="f">print</span>(emitted.event.text, end=<span class="s">""</span>, flush=<span class="k">True</span>)
+    root_id = <span class="k">await</span> runtime.<span class="f">create</span>(<span class="t">Researcher</span>)
+    <span class="k">async with</span> runtime.<span class="f">connect</span>(root_id, writable=<span class="k">True</span>) <span class="k">as</span> connection:
+        result = <span class="k">await</span> connection.<span class="f">prompt</span>(
+            <span class="s">"What changed in Python 3.13?"</span>, command_id=<span class="f">uuid4</span>()
+        )
+    <span class="f">print</span>(result.text)
+    <span class="k">await</span> runtime.<span class="f">aclose</span>()
 
 
 asyncio.<span class="f">run</span>(<span class="f">main</span>())</pre>
         </div>
         <p class="note">
-          <code>harness.run(...)</code> is an async iterator of <code>Emitted</code>. The turn only advances while the
-          stream is consumed.
+          <code>Connection.prompt(...)</code> accepts one durable UUID command and returns its terminal result.
+          Use <code>send(...)</code> plus event iteration when you need streaming.
         </p>
       </div>
 
@@ -521,22 +520,22 @@ asyncio.<span class="f">run</span>(<span class="f">main</span>())</pre>
           <div class="card">
             <h3>The loop is the library</h3>
             <p>
-              The harness runs the turn. Tools, hooks, skills and memory plug into it. You write an
+              The Runtime activates actors. Tools, hooks, skills and memory plug into it. You write an
               <code>Agent</code> — values and function references — not an orchestration layer.
             </p>
           </div>
           <div class="card">
-            <h3>Durable, re-entrant turns</h3>
+            <h3>Durable actor journals</h3>
             <p>
-              A turn can suspend on a question and resume in another process. Agents hold no live I/O, so a resume
-              looks the agent up by name from the persisted session header.
+              Every agent has a FIFO inbox and independent scalar cursor. Live asks suspend one actor; crashes
+              interrupt in-flight work without repeating model calls or tools.
             </p>
           </div>
           <div class="card">
             <h3>One engine, many drivers</h3>
             <p>
-              A CLI, an HTTP server and a background worker share one <code>Harness</code>. The loop never learns
-              which one it is running under.
+              A CLI, an HTTP server and a background worker share one <code>Runtime</code>. Readers never own
+              execution, and a newer writable connection replaces the previous writer.
             </p>
           </div>
           <div class="card">

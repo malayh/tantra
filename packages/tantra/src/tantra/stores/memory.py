@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import threading
 from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
-from tantra.errors import InvalidCommandReuse, SeqConflict, SessionExists, SessionNotFound
-from tantra.events import InputQueued, Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
+from tantra.errors import InvalidCommandReuse, SessionExists, SessionNotFound
+from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
 from tantra.stores.base import UNSET, EnqueueResult, apply_patch, select_headers, select_memories
 
@@ -15,7 +15,6 @@ class MemoryStore:
     def __init__(self) -> None:
         self._headers: dict[str, SessionHeader] = {}
         self._events: dict[str, list[Stamped]] = {}
-        self._leases: dict[str, Lease] = {}
         self._memories: dict[str, MemoryRecord] = {}
         self._lock = threading.Lock()
 
@@ -27,14 +26,13 @@ class MemoryStore:
             if header.id in self._headers:
                 raise SessionExists(header.id)
             stored = header.model_copy(deep=True)
-            stored.lease = None
             self._headers[stored.id] = stored
             self._events[stored.id] = []
 
     async def header(self, sid: str) -> SessionHeader | None:
         with self._lock:
             header = self._headers.get(sid)
-            return self._with_lease(header) if header is not None else None
+            return header.model_copy(deep=True) if header is not None else None
 
     async def put_header(self, h: SessionHeader) -> None:
         with self._lock:
@@ -43,7 +41,6 @@ class MemoryStore:
                 raise SessionNotFound(h.id)
             stored = h.model_copy(deep=True)
             stored.last_seq = current.last_seq
-            stored.lease = None
             self._headers[h.id] = stored
 
     async def patch_header(
@@ -51,6 +48,7 @@ class MemoryStore:
         sid: str,
         *,
         title: str | None = UNSET,
+        model: str | None = UNSET,
         status: SessionStatus = UNSET,
         pending_ask: str | None = UNSET,
         usage: Usage = UNSET,
@@ -64,6 +62,7 @@ class MemoryStore:
             stored = apply_patch(
                 current,
                 title=title,
+                model=model,
                 status=status,
                 pending_ask=pending_ask,
                 usage=usage,
@@ -71,15 +70,13 @@ class MemoryStore:
                 finished=finished,
             )
             self._headers[sid] = stored
-            return self._with_lease(stored)
+            return stored.model_copy(deep=True)
 
-    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
+    async def append(self, sid: str, events: Sequence[SessionEvent]) -> int:
         with self._lock:
             header = self._headers.get(sid)
             if header is None:
                 raise SessionNotFound(sid)
-            if expect_seq is not None and expect_seq != header.last_seq:
-                raise SeqConflict(f"{sid}: expected seq {header.last_seq}, got {expect_seq}")
             log = self._events.setdefault(sid, [])
             seq = header.last_seq
             for event in events:
@@ -137,24 +134,7 @@ class MemoryStore:
                 limit=limit,
                 before=before,
             )
-            return [self._with_lease(h) for h in rows]
-
-    async def acquire_lease(self, sid: str, holder: str, ttl: float) -> bool:
-        with self._lock:
-            if sid not in self._headers:
-                raise SessionNotFound(sid)
-            now = datetime.now(UTC)
-            lease = self._leases.get(sid)
-            if lease is not None and lease.holder != holder and lease.expires_at > now:
-                return False
-            self._leases[sid] = Lease(holder=holder, expires_at=now + timedelta(seconds=ttl))
-            return True
-
-    async def release_lease(self, sid: str, holder: str) -> None:
-        with self._lock:
-            lease = self._leases.get(sid)
-            if lease is not None and lease.holder == holder:
-                del self._leases[sid]
+            return [h.model_copy(deep=True) for h in rows]
 
     async def memory_put(self, row: MemoryRecord) -> None:
         with self._lock:
@@ -177,9 +157,3 @@ class MemoryStore:
 
     async def memory_search(self, vector: list[float], k: int) -> list[tuple[MemoryRecord, float]] | None:
         return None
-
-    def _with_lease(self, header: SessionHeader) -> SessionHeader:
-        snapshot = header.model_copy(deep=True)
-        lease = self._leases.get(header.id)
-        snapshot.lease = lease.model_copy() if lease is not None else None
-        return snapshot

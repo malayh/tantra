@@ -26,6 +26,7 @@ from tantra.events import (
     CancellationRequested,
     ChildCreated,
     InputQueued,
+    LoggedEvent,
     SampleCompleted,
     SessionCreated,
     SessionEvent,
@@ -39,7 +40,6 @@ from tantra.events import (
     TurnStarted,
     Usage,
 )
-from tantra.harness import _skill_tool, _tool_table
 from tantra.hooks import Hook
 from tantra.loop import DEFAULT_RETRY, FinishResult, RetryConfig, TurnEngine
 from tantra.permissions import check_permission
@@ -53,12 +53,53 @@ if TYPE_CHECKING:
     from tantra.compaction import Compactor
     from tantra.memory import Memory
 
+TYPED_KEYS = frozenset({"type", "anyOf", "allOf", "oneOf", "$ref", "enum", "const"})
 
-@dataclass(frozen=True)
-class LoggedEvent:
-    agent_id: UUID
-    seq: int
-    event: SessionEvent
+
+def _check_schema(label: str, entry: Tool) -> None:
+    parameters = entry.schema.parameters
+    if not isinstance(parameters, dict) or parameters.get("type") != "object":
+        raise TantraError(f"{label}: tool {entry.name!r} produced an invalid JSON schema: {parameters!r}")
+    properties = parameters.get("properties") or {}
+    if "ctx" in properties:
+        raise TantraError(
+            f"{label}: tool {entry.name!r} has an unannotated 'ctx' parameter; annotate it `ctx: Context`"
+        )
+    for name in parameters.get("required") or []:
+        spec = properties.get(name)
+        if not isinstance(spec, dict) or not TYPED_KEYS & set(spec):
+            raise TantraError(f"{label}: tool {entry.name!r} parameter {name!r} has no inferable JSON type: {spec!r}")
+
+
+def _skill_tool(skills: Skills, allowed: list[str] | None) -> Tool:
+    async def skill(name: str) -> str:
+        if allowed is not None and name not in allowed:
+            raise TantraError(f"skill {name!r} is not available to this agent")
+        loaded = await skills.load(name)
+        if not loaded.files:
+            return loaded.body
+        return loaded.body + "\n\n## Files\n" + "\n".join(loaded.files)
+
+    return Tool(skill, permission="allow")
+
+
+def _tool_table(agent: type[Agent]) -> dict[str, Tool]:
+    label = f"agent {agent_name(agent)!r}"
+    table: dict[str, Tool] = {}
+    if agent.max_steps < 1:
+        raise TantraError(f"{label}: max_steps must be at least 1, got {agent.max_steps}")
+    for pattern, value in agent.permissions.items():
+        check_permission(f"{label}: permission rule {pattern!r}", value)
+    for entry in agent.tools:
+        if not isinstance(entry, Tool):
+            raise TantraError(f"{label}: {entry!r} is not decorated with @tool")
+        _check_schema(label, entry)
+        if entry.permission is not None:
+            check_permission(f"{label}: tool {entry.name!r}", entry.permission)
+        if entry.name in table:
+            raise TantraError(f"{label}: duplicate tool name {entry.name!r}")
+        table[entry.name] = entry
+    return table
 
 
 @dataclass(frozen=True)
@@ -144,7 +185,7 @@ class Runtime:
         self.compactor = compactor
         self.tracer = telemetry if telemetry is not None else NULL_TRACER
         self.agents = build_name_table(agents)
-        self.tools = {name: _tool_table(agent, include_subagents=False) for name, agent in self.agents.items()}
+        self.tools = {name: _tool_table(agent) for name, agent in self.agents.items()}
         if skills is not None:
             for name, agent in self.agents.items():
                 if agent.skills == []:
@@ -205,7 +246,7 @@ class Runtime:
     async def _append(self, agent_id: str, events: Sequence[SessionEvent]) -> list[Stamped]:
         if not events:
             return []
-        last = await self.store.append(agent_id, events, expect_seq=None)
+        last = await self.store.append(agent_id, events)
         first = last - len(events) + 1
         stamped = [Stamped(seq=first + index, event=event) for index, event in enumerate(events)]
         await self._notify(agent_id)

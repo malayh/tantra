@@ -5,9 +5,12 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface ReasoningDelta {
+export interface ChildCreated {
   version?: number;
-  type?: 'reasoning_delta';
-  text: string;
+  type?: 'child_created';
+  child_id: string;
+  agent: string;
+  turn_id: string;
+  call_id: string;
   [key: string]: unknown;
  }

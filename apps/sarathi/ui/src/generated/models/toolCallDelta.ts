@@ -6,6 +6,7 @@
  */
 
 export interface ToolCallDelta {
+  version?: number;
   type?: 'tool_call_delta';
   index: number;
   id?: string | null;

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from tantra.errors import CorruptLog, SeqConflict
+from tantra.errors import CorruptLog
 from tantra.events import SessionHeader, TextPart
 from tantra.memory import BuiltinMemory, MemoryRecord, MemoryWrite
 from tantra.stores.base import select_headers
@@ -79,14 +79,11 @@ def _append_in_thread(dsn: str, schema: str, sid: str, barrier: threading.Barrie
         store = PostgresStore(dsn, schema=schema)
         try:
             barrier.wait(timeout=30)
-            return await store.append(sid, [TextPart(sample_id="s1", text="x" * 4096)], expect_seq=0)
+            return await store.append(sid, [TextPart(sample_id="s1", text="x" * 4096)])
         finally:
             await store.close()
 
-    try:
-        return asyncio.run(attempt())
-    except SeqConflict:
-        return None
+    return asyncio.run(attempt())
 
 
 def _setup_in_thread(dsn: str, schema: str, barrier: threading.Barrier) -> None:
@@ -133,23 +130,18 @@ async def test_a_second_store_instance_sees_the_first_ones_writes(postgres_dsn: 
     writer = await _store(postgres_dsn, pg_schema)
     header = SessionHeader(id=uuid.uuid4().hex, agent="build", metadata={"company": 42})
     await writer.create(header)
-    await writer.append(header.id, [TextPart(sample_id="s1", text="one")], expect_seq=0)
-    assert await writer.acquire_lease(header.id, "worker-a", 30) is True
+    await writer.append(header.id, [TextPart(sample_id="s1", text="one")])
 
     reader = PostgresStore(postgres_dsn, schema=pg_schema)
 
     loaded = await reader.header(header.id)
     assert loaded is not None
     assert loaded.last_seq == 1
-    assert loaded.lease is not None
-    assert loaded.lease.holder == "worker-a"
     assert [s.event.text async for s in reader.read(header.id)] == ["one"]
     assert [h.id for h in await reader.list(metadata={"company": 42})] == [header.id]
-    assert await reader.acquire_lease(header.id, "worker-b", 30) is False
 
-    with pytest.raises(SeqConflict):
-        await reader.append(header.id, [TextPart(sample_id="s1", text="two")], expect_seq=0)
-    assert [s.seq async for s in writer.read(header.id)] == [1]
+    assert await reader.append(header.id, [TextPart(sample_id="s1", text="two")]) == 2
+    assert [s.seq async for s in writer.read(header.id)] == [1, 2]
 
 
 async def test_a_corrupt_stored_event_row_raises_corrupt_log_naming_the_session(
@@ -158,7 +150,7 @@ async def test_a_corrupt_stored_event_row_raises_corrupt_log_naming_the_session(
     store = await _store(postgres_dsn, pg_schema)
     header = SessionHeader(id=uuid.uuid4().hex, agent="build")
     await store.create(header)
-    await store.append(header.id, [TextPart(sample_id="s1", text=f"part {i}") for i in range(2)], expect_seq=0)
+    await store.append(header.id, [TextPart(sample_id="s1", text=f"part {i}") for i in range(2)])
 
     damaged = _query(
         postgres_dsn,
@@ -258,7 +250,7 @@ async def test_a_non_finite_embedding_is_the_embed_failed_case_and_never_reaches
     assert [(hit.memory.id, hit.mode) for hit in await memory.recall(QUERY)] == [(mid, "keyword")]
 
 
-async def test_racing_appends_from_separate_instances_lose_with_seq_conflict(postgres_dsn: str, pg_schema: str) -> None:
+async def test_racing_appends_from_separate_instances_are_serialized(postgres_dsn: str, pg_schema: str) -> None:
     store = await _store(postgres_dsn, pg_schema)
 
     for _ in range(ROUNDS):
@@ -273,11 +265,11 @@ async def test_racing_appends_from_separate_instances_lose_with_seq_conflict(pos
             )
         )
 
-        assert results.count(1) == 1, f"{results.count(1)} writers appended at seq 1"
-        assert [s.seq async for s in store.read(header.id)] == [1]
+        assert sorted(results) == list(range(1, CONTENDERS + 1))
+        assert [s.seq async for s in store.read(header.id)] == list(range(1, CONTENDERS + 1))
         loaded = await store.header(header.id)
         assert loaded is not None
-        assert loaded.last_seq == 1
+        assert loaded.last_seq == CONTENDERS
 
 
 async def test_racing_setups_on_a_fresh_schema_all_succeed(postgres_dsn: str, pg_schema: str) -> None:

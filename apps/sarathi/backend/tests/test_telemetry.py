@@ -3,9 +3,10 @@ from collections.abc import Iterator
 
 import pytest
 
-from sarathi.agent import Researcher, Sarathi, _wire_tools, make_harness
+from sarathi.agent import Researcher, Sarathi, _wire_tools
 from sarathi.config import get_settings
 from sarathi.telemetry import get_telemetry, shutdown_telemetry
+from tantra import FakeProvider, MemoryStore, Runtime
 from tantra.telemetry import Telemetry
 
 ENDPOINT = "http://ingest.example.invalid"
@@ -39,7 +40,7 @@ def test_telemetry_is_off_without_an_endpoint(monkeypatch: pytest.MonkeyPatch, u
     shutdown_telemetry()
 
 
-def test_an_endpoint_wires_an_env_configured_tracer_onto_the_harness(
+def test_an_endpoint_wires_an_env_configured_tracer_onto_the_runtime(
     monkeypatch: pytest.MonkeyPatch, uninstalled: list[object], unwired: None
 ) -> None:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", ENDPOINT)
@@ -55,7 +56,11 @@ def test_an_endpoint_wires_an_env_configured_tracer_onto_the_harness(
     assert configured.capture_content is True
     assert len(uninstalled) == 1
     assert configured._provider.resource.attributes["service.name"] == "sarathi"
-    assert make_harness().tracer is configured
+    assert Runtime(FakeProvider([]), MemoryStore(), [Sarathi], default_model="test").tracer is not configured
+    assert (
+        Runtime(FakeProvider([]), MemoryStore(), [Sarathi], default_model="test", telemetry=configured).tracer
+        is configured
+    )
 
 
 def test_dotenv_settings_are_bridged_into_the_environment(

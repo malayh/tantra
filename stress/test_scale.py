@@ -182,10 +182,10 @@ async def test_ten_thousand_events(substrate: Substrate) -> None:
     seed_count = len(await log(store, sid))
 
     start = time.perf_counter()
-    last = (await store.header(sid)).last_seq
+    last = 0
     for offset in range(0, EVENTS, BATCH):
         batch = [template.model_copy(update={"text": f"{offset + index}:{FILLER}"}) for index in range(BATCH)]
-        last = await store.append(sid, batch, expect_seq=last)
+        last = await store.append(sid, batch)
     appended = time.perf_counter() - start
 
     start = time.perf_counter()

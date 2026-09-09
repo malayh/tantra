@@ -13,6 +13,7 @@ export interface AskAnswered {
   type?: 'ask_answered';
   ask_id: string;
   response: ApprovalResponse | ChoiceResponse | FreeTextResponse;
+  command_id?: string | null;
   answered_by?: string | null;
   [key: string]: unknown;
  }

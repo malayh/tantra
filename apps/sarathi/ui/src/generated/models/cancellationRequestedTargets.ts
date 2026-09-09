@@ -5,7 +5,4 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface BusyFrame {
-  type?: 'busy';
-  retry_in: number;
-}
+export type CancellationRequestedTargets = {[key: string]: string[]};

@@ -1,4 +1,3 @@
-from tantra.adapters.collect import collect
 from tantra.agent import Agent, agent_name, build_name_table
 from tantra.ask import (
     Approval,
@@ -17,26 +16,22 @@ from tantra.errors import (
     InvalidCommandReuse,
     MaxDepthExceeded,
     ProviderError,
-    SeqConflict,
-    SessionBusy,
     SessionNotFound,
     TantraError,
-    TurnIncomplete,
     WriterReplaced,
     WriterRequired,
 )
 from tantra.events import (
     CompactionApplied,
-    Lease,
+    LoggedEvent,
     SessionEvent,
     SessionHeader,
     SessionStatus,
     Stamped,
     Usage,
 )
-from tantra.harness import Harness
 from tantra.hooks import Denial, Escalation, Hook
-from tantra.loop import Emitted, RetryConfig
+from tantra.loop import RetryConfig
 from tantra.memory import (
     BuiltinMemory,
     Memory,
@@ -51,7 +46,7 @@ from tantra.memory import (
 from tantra.providers.base import Embedder, ModelLimits, Provider, ProviderEvent, SampleRequest
 from tantra.providers.fake import FakeProvider, Sample
 from tantra.providers.openai_compat import OpenAICompatible, OpenAICompatibleEmbedder
-from tantra.runtime import CommandReceipt, Connection, LoggedEvent, Runtime, TurnResult
+from tantra.runtime import CommandReceipt, Connection, Runtime, TurnResult
 from tantra.skills import FileSystemSkills, Skill, SkillInfo, Skills
 from tantra.stores.base import Store
 from tantra.stores.fs import FileSystemStore
@@ -79,17 +74,14 @@ __all__ = [
     "Context",
     "Denial",
     "Embedder",
-    "Emitted",
     "Escalation",
     "FakeProvider",
     "FileSystemSkills",
     "FileSystemStore",
     "FreeText",
     "FreeTextResponse",
-    "Harness",
     "Hook",
     "InvalidCommandReuse",
-    "Lease",
     "LoggedEvent",
     "MaxDepthExceeded",
     "Memory",
@@ -112,8 +104,6 @@ __all__ = [
     "SQLiteStore",
     "Sample",
     "SampleRequest",
-    "SeqConflict",
-    "SessionBusy",
     "SessionEvent",
     "SessionHeader",
     "SessionNotFound",
@@ -127,14 +117,12 @@ __all__ = [
     "Tool",
     "Tracer",
     "TurnContext",
-    "TurnIncomplete",
     "TurnResult",
     "Usage",
     "WriterReplaced",
     "WriterRequired",
     "agent_name",
     "build_name_table",
-    "collect",
     "memory_recall",
     "memory_tools",
     "memory_write",

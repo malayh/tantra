@@ -12,11 +12,11 @@ from httpx_ws.transport import ASGIWebSocketTransport
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from sarathi.agent import HarnessFactory, Sarathi, _wire_tools, deps_factory, harness_factory
+from sarathi.agent import RuntimeResources, Sarathi, _wire_tools, deps_factory
 from sarathi.config import get_settings
 from sarathi.db import get_db
 from sarathi.models import Base
-from tantra import BuiltinMemory, FakeProvider, Harness, MemoryStore, Sample
+from tantra import BuiltinMemory, FakeProvider, MemoryStore, Runtime, Sample
 from tantra.providers.base import ProviderEvent, SampleRequest, TextDelta
 
 PASSWORD = "hunter2hunter2"
@@ -39,12 +39,16 @@ class SharedProvider(FakeProvider):
         super().__init__(samples)
         self.gate = asyncio.Event()
         self.gate.set()
+        self.route: Callable[[SampleRequest], Sample] | None = None
 
     async def aclose(self) -> None:
         return None
 
     async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
-        async for event in super().stream(req):
+        stream = FakeProvider([self.route(req)]).stream(req) if self.route is not None else super().stream(req)
+        if self.route is not None:
+            self.requests.append(req)
+        async for event in stream:
             yield event
             if isinstance(event, TextDelta):
                 await self.gate.wait()
@@ -79,31 +83,44 @@ def provider() -> SharedProvider:
 
 
 @pytest.fixture
-def factory(store: SharedStore, provider: SharedProvider) -> HarnessFactory:
-    def build(model: str | None = None) -> Harness:
-        _wire_tools()
-        return Harness(
-            provider,
-            store,
-            [Sarathi],
-            default_model=model or "test-model",
-            deps_factory=deps_factory,
-            memory=BuiltinMemory(store),
-        )
-
-    return build
+async def resources(store: SharedStore, provider: SharedProvider) -> AsyncIterator[RuntimeResources]:
+    _wire_tools()
+    await store.setup()
+    memory = BuiltinMemory(store)
+    runtime = Runtime(
+        provider,
+        store,
+        [Sarathi],
+        default_model="test-model",
+        deps_factory=deps_factory,
+        memory=memory,
+    )
+    resources = RuntimeResources(
+        runtime=runtime,
+        provider=provider,
+        store=store,
+        memory=memory,
+        embedder=None,
+    )
+    yield resources
+    await runtime.aclose()
 
 
 @pytest.fixture
-async def app(session_factory: async_sessionmaker[AsyncSession], factory: HarnessFactory) -> AsyncIterator[FastAPI]:
-    from sarathi.main import app as application
+async def app(
+    session_factory: async_sessionmaker[AsyncSession],
+    resources: RuntimeResources,
+) -> AsyncIterator[FastAPI]:
+    from sarathi.main import create_app
+
+    application = create_app()
 
     async def override_get_db() -> AsyncIterator[AsyncSession]:
         async with session_factory() as session:
             yield session
 
+    application.state.resources = resources
     application.dependency_overrides[get_db] = override_get_db
-    application.dependency_overrides[harness_factory] = lambda: factory
     yield application
     application.dependency_overrides.clear()
 

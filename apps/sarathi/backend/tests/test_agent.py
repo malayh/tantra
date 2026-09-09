@@ -86,4 +86,6 @@ def test_memory_write_asks_before_it_runs() -> None:
 def test_the_researcher_is_a_sarathi_subagent_with_a_delegate_description() -> None:
     assert Sarathi.subagents == [Researcher]
     assert Researcher.__doc__ is not None
-    assert Researcher.__doc__.strip().startswith("Delegate a focused research task")
+    assert Researcher.__doc__.strip() == "Research the web and return sourced findings."
+    assert "finish(result)" in Researcher.prompt
+    assert "spawn('researcher', task)" in Sarathi.prompt

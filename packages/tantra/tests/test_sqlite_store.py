@@ -54,7 +54,7 @@ async def test_a_corrupt_stored_event_row_raises_corrupt_log_naming_the_session(
     store = await _store(tmp_path)
     header = SessionHeader(id=uuid.uuid4().hex, agent="build")
     await store.create(header)
-    await store.append(header.id, [TextPart(sample_id="s1", text=f"part {i}") for i in range(2)], expect_seq=0)
+    await store.append(header.id, [TextPart(sample_id="s1", text=f"part {i}") for i in range(2)])
 
     conn = sqlite3.connect(store.path)
     conn.execute("UPDATE events SET stamped = ? WHERE seq = 2", ('{"seq": 2}',))

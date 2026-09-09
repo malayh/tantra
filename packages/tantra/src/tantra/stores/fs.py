@@ -4,14 +4,14 @@ import fcntl
 import os
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
-from tantra.errors import CorruptLog, InvalidCommandReuse, SeqConflict, SessionExists, SessionNotFound
-from tantra.events import InputQueued, Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
+from tantra.errors import CorruptLog, InvalidCommandReuse, SessionExists, SessionNotFound
+from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
 from tantra.stores.base import UNSET, EnqueueResult, apply_patch, select_headers, select_memories
 
@@ -38,15 +38,10 @@ class FileSystemStore:
         (directory / EVENTS_FILE).touch()
         (directory / LOCK_FILE).touch()
         stored = header.model_copy(deep=True)
-        stored.lease = None
         self._write_header(stored)
 
     async def header(self, sid: str) -> SessionHeader | None:
-        header = self._read_header(sid)
-        if header is None:
-            return None
-        header.lease = self._read_lease(sid)
-        return header
+        return self._read_header(sid)
 
     async def put_header(self, h: SessionHeader) -> None:
         if not (self.root / h.id).is_dir():
@@ -57,7 +52,6 @@ class FileSystemStore:
                 raise SessionNotFound(h.id)
             stored = h.model_copy(deep=True)
             stored.last_seq = current.last_seq
-            stored.lease = None
             self._write_header(stored)
 
     async def patch_header(
@@ -65,6 +59,7 @@ class FileSystemStore:
         sid: str,
         *,
         title: str | None = UNSET,
+        model: str | None = UNSET,
         status: SessionStatus = UNSET,
         pending_ask: str | None = UNSET,
         usage: Usage = UNSET,
@@ -80,6 +75,7 @@ class FileSystemStore:
             stored = apply_patch(
                 current,
                 title=title,
+                model=model,
                 status=status,
                 pending_ask=pending_ask,
                 usage=usage,
@@ -87,10 +83,9 @@ class FileSystemStore:
                 finished=finished,
             )
             self._write_header(stored)
-        stored.lease = self._read_lease(sid)
         return stored
 
-    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
+    async def append(self, sid: str, events: Sequence[SessionEvent]) -> int:
         if not (self.root / sid).is_dir():
             raise SessionNotFound(sid)
         with self._flock(sid, fcntl.LOCK_EX):
@@ -102,8 +97,6 @@ class FileSystemStore:
             if tail > header.last_seq:
                 header.last_seq = tail
                 self._write_header(header)
-            if expect_seq is not None and expect_seq != header.last_seq:
-                raise SeqConflict(f"{sid}: expected seq {header.last_seq}, got {expect_seq}")
             seq = header.last_seq
             lines = []
             for event in events:
@@ -195,28 +188,7 @@ class FileSystemStore:
                 if header is not None:
                     headers.append(header)
         rows = select_headers(headers, metadata=metadata, parent_id=parent_id, limit=limit, before=before)
-        for header in rows:
-            header.lease = self._read_lease(header.id)
         return rows
-
-    async def acquire_lease(self, sid: str, holder: str, ttl: float) -> bool:
-        if not (self.root / sid).is_dir():
-            raise SessionNotFound(sid)
-        with self._flock(sid, fcntl.LOCK_EX) as fd:
-            now = datetime.now(UTC)
-            lease = _load_lease(fd)
-            if lease is not None and lease.holder != holder and lease.expires_at > now:
-                return False
-            _store_lease(fd, Lease(holder=holder, expires_at=now + timedelta(seconds=ttl)))
-            return True
-
-    async def release_lease(self, sid: str, holder: str) -> None:
-        if not (self.root / sid).is_dir():
-            return
-        with self._flock(sid, fcntl.LOCK_EX) as fd:
-            lease = _load_lease(fd)
-            if lease is not None and lease.holder == holder:
-                _store_lease(fd, None)
 
     async def memory_put(self, row: MemoryRecord) -> None:
         directory = self.root / MEMORY_DIR
@@ -295,12 +267,6 @@ class FileSystemStore:
         line = _tail_line(path, size)
         return _parse(sid, line).seq if line else 0
 
-    def _read_lease(self, sid: str) -> Lease | None:
-        if not (self.root / sid).is_dir():
-            return None
-        with self._flock(sid, fcntl.LOCK_SH) as fd:
-            return _load_lease(fd)
-
     def _read_header(self, sid: str) -> SessionHeader | None:
         try:
             raw = (self.root / sid / HEADER_FILE).read_text(encoding="utf-8")
@@ -352,22 +318,3 @@ def _tail_line(path: Path, size: int) -> bytes:
             if start == 0:
                 return body
     return b""
-
-
-def _load_lease(fd: int) -> Lease | None:
-    os.lseek(fd, 0, os.SEEK_SET)
-    raw = os.read(fd, 4096).decode("utf-8").strip()
-    if not raw:
-        return None
-    try:
-        return Lease.model_validate_json(raw)
-    except ValidationError:
-        return None
-
-
-def _store_lease(fd: int, lease: Lease | None) -> None:
-    os.ftruncate(fd, 0)
-    os.lseek(fd, 0, os.SEEK_SET)
-    if lease is not None:
-        os.write(fd, lease.model_dump_json().encode("utf-8"))
-    os.fsync(fd)

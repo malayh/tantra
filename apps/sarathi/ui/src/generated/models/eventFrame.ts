@@ -4,11 +4,13 @@
  * sarathi
  * OpenAPI spec version: 0.1.0
  */
+import type { AgentFinished } from './agentFinished';
 import type { AskAnswered } from './askAnswered';
 import type { AskRaised } from './askRaised';
-import type { CancelRequested } from './cancelRequested';
-import type { ChildSessionSpawned } from './childSessionSpawned';
+import type { CancellationRequested } from './cancellationRequested';
+import type { ChildCreated } from './childCreated';
 import type { CompactionApplied } from './compactionApplied';
+import type { InputQueued } from './inputQueued';
 import type { ReasoningDelta } from './reasoningDelta';
 import type { ReasoningPart } from './reasoningPart';
 import type { SampleCompleted } from './sampleCompleted';
@@ -21,14 +23,17 @@ import type { ToolCallDelta } from './toolCallDelta';
 import type { ToolCallRequested } from './toolCallRequested';
 import type { ToolCallStarted } from './toolCallStarted';
 import type { ToolProgress } from './toolProgress';
+import type { TurnCancelled } from './turnCancelled';
 import type { TurnCompleted } from './turnCompleted';
 import type { TurnFailed } from './turnFailed';
+import type { TurnInterrupted } from './turnInterrupted';
 import type { TurnStarted } from './turnStarted';
 
-export interface Emitted {
-  session_id: string;
-  depth?: number;
-  seq?: number | null;
-  event: SessionCreated | TurnStarted | SampleStarted | TextPart | ReasoningPart | ToolCallRequested | ToolCallStarted | ToolProgress | ToolCallCompleted | ChildSessionSpawned | AskRaised | AskAnswered | SampleCompleted | CompactionApplied | CancelRequested | TurnCompleted | TurnFailed | TextDelta | ReasoningDelta | ToolCallDelta;
-  [key: string]: unknown;
- }
+export interface EventFrame {
+  type?: 'event';
+  /** @pattern ^[0-9a-f]{32}$ */
+  agent_id: string;
+  /** @minimum 1 */
+  seq: number;
+  event: SessionCreated | InputQueued | TurnStarted | SampleStarted | TextDelta | ReasoningDelta | ToolCallDelta | TextPart | ReasoningPart | ToolCallRequested | ToolCallStarted | ToolProgress | ToolCallCompleted | ChildCreated | AgentFinished | AskRaised | AskAnswered | SampleCompleted | CompactionApplied | CancellationRequested | TurnCompleted | TurnFailed | TurnCancelled | TurnInterrupted;
+}

@@ -582,7 +582,7 @@ application contracts.
   - [x] 1.0 documentation draft
   - [x] Transitional Harness isolation
 
-### Phase 4 — Sarathi migration and Tantra 1.0.0 · deps: P3 · final · —
+### Phase 4 — Sarathi migration and Tantra 1.0.0 · deps: P3 · final · CODE DONE, VERIFICATION PENDING
 
 - Create one Runtime in FastAPI lifespan and move all execution ownership to it.
 - Replace the WebSocket coordinator with writer connections and explicit
@@ -608,6 +608,15 @@ application contracts.
   - [ ] Harness and legacy execution removal
   - [ ] Full repository verification
   - [ ] Tantra 1.0.0 metadata
+
+- Verification status (2026-09-09): Ruff check and format, 467 package tests,
+  66 stress tests, 67 Sarathi backend tests, four native Node reducer tests,
+  UI lint and production build, strict documentation build, lock validation,
+  package build, diff checks, and legacy-symbol audits pass. Fifteen package
+  tests and 18 stress tests skip for unavailable external services or optional
+  environments. Real PostgreSQL contracts and the credentialed live browser
+  runbook remain outstanding because Docker and provider credentials are not
+  available in this shell.
 
 ## Open Decisions
 

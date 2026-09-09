@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
@@ -25,13 +27,6 @@ class Usage(BaseModel):
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
-
-
-class Lease(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    holder: str
-    expires_at: datetime
 
 
 class SessionCreated(EventBase):
@@ -120,13 +115,6 @@ class ToolCallCompleted(EventBase):
     is_error: bool = False
 
 
-class ChildSessionSpawned(EventBase):
-    type: Literal["child_session_spawned"] = "child_session_spawned"
-    call_id: str
-    child_session_id: str
-    agent: str
-
-
 class ChildCreated(EventBase):
     type: Literal["child_created"] = "child_created"
     child_id: str
@@ -169,11 +157,6 @@ class CompactionApplied(EventBase):
     tokens_after: int
     summary: str
     floor_turn_id: str | None = None
-
-
-class CancelRequested(EventBase):
-    type: Literal["cancel_requested"] = "cancel_requested"
-    turn_id: str
 
 
 class CancellationRequested(EventBase):
@@ -221,14 +204,12 @@ SessionEvent = Annotated[
     | ToolCallStarted
     | ToolProgress
     | ToolCallCompleted
-    | ChildSessionSpawned
     | ChildCreated
     | AgentFinished
     | AskRaised
     | AskAnswered
     | SampleCompleted
     | CompactionApplied
-    | CancelRequested
     | CancellationRequested
     | TurnCompleted
     | TurnFailed
@@ -249,6 +230,13 @@ class Stamped(BaseModel):
     event: SessionEvent
 
 
+@dataclass(frozen=True)
+class LoggedEvent:
+    agent_id: UUID
+    seq: int
+    event: SessionEvent
+
+
 class SessionHeader(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -265,6 +253,5 @@ class SessionHeader(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     last_seq: int = 0
     usage: Usage = Field(default_factory=Usage)
-    lease: Lease | None = None
     pending_ask: str | None = None
     finished: bool = False

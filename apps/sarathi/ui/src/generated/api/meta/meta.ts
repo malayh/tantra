@@ -24,15 +24,17 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AskExpiredFrame,
   AskResponseFrame,
-  BusyFrame,
   CancelFrame,
-  Emitted,
+  EventFrame,
   HTTPValidationError,
   Health200,
-  ReplayDoneFrame,
   ServerErrorFrame,
+  SubscribeFrame,
+  SubscriptionReadyFrame,
   TitleUpdatedFrame,
+  UnsubscribeFrame,
   UserMessageFrame
 } from '../../models';
 
@@ -155,15 +157,15 @@ export function useHealth<TData = Awaited<ReturnType<typeof health>>, TError = E
  * @summary Ws Types
  */
 export const wsTypes = (
-    userMessageFrameAskResponseFrameCancelFrame: BodyType<UserMessageFrame | AskResponseFrame | CancelFrame>| AskResponseFrame | CancelFrame,
+    subscribeFrameUnsubscribeFrameUserMessageFrameAskResponseFrameCancelFrame: BodyType<SubscribeFrame | UnsubscribeFrame | UserMessageFrame | AskResponseFrame | CancelFrame>| UnsubscribeFrame | UserMessageFrame | AskResponseFrame | CancelFrame,
  options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
 ) => {
 
 
-      return customInstance<ReplayDoneFrame | BusyFrame | TitleUpdatedFrame | ServerErrorFrame | Emitted>(
+      return customInstance<EventFrame | SubscriptionReadyFrame | AskExpiredFrame | TitleUpdatedFrame | ServerErrorFrame>(
       {url: `/api/meta/ws-types`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
-      data: userMessageFrameAskResponseFrameCancelFrame, signal
+      data: subscribeFrameUnsubscribeFrameUserMessageFrameAskResponseFrameCancelFrame, signal
     },
       options);
     }
@@ -172,8 +174,8 @@ export const wsTypes = (
 
 
 export const getWsTypesMutationOptions = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof wsTypes>>, TError,{data: BodyType<UserMessageFrame | AskResponseFrame | CancelFrame>}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof wsTypes>>, TError,{data: BodyType<UserMessageFrame | AskResponseFrame | CancelFrame>}, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof wsTypes>>, TError,{data: BodyType<SubscribeFrame | UnsubscribeFrame | UserMessageFrame | AskResponseFrame | CancelFrame>}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof wsTypes>>, TError,{data: BodyType<SubscribeFrame | UnsubscribeFrame | UserMessageFrame | AskResponseFrame | CancelFrame>}, TContext> => {
 
 const mutationKey = ['wsTypes'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -185,7 +187,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof wsTypes>>, {data: BodyType<UserMessageFrame | AskResponseFrame | CancelFrame>}> = (props) => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof wsTypes>>, {data: BodyType<SubscribeFrame | UnsubscribeFrame | UserMessageFrame | AskResponseFrame | CancelFrame>}> = (props) => {
           const {data} = props ?? {};
 
           return  wsTypes(data,requestOptions)
@@ -199,18 +201,18 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   return  { mutationFn, ...mutationOptions }}
 
     export type WsTypesMutationResult = NonNullable<Awaited<ReturnType<typeof wsTypes>>>
-    export type WsTypesMutationBody = BodyType<UserMessageFrame | AskResponseFrame | CancelFrame>
+    export type WsTypesMutationBody = BodyType<SubscribeFrame | UnsubscribeFrame | UserMessageFrame | AskResponseFrame | CancelFrame>
     export type WsTypesMutationError = ErrorType<HTTPValidationError>
 
     /**
  * @summary Ws Types
  */
 export const useWsTypes = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof wsTypes>>, TError,{data: BodyType<UserMessageFrame | AskResponseFrame | CancelFrame>}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof wsTypes>>, TError,{data: BodyType<SubscribeFrame | UnsubscribeFrame | UserMessageFrame | AskResponseFrame | CancelFrame>}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof wsTypes>>,
         TError,
-        {data: BodyType<UserMessageFrame | AskResponseFrame | CancelFrame>},
+        {data: BodyType<SubscribeFrame | UnsubscribeFrame | UserMessageFrame | AskResponseFrame | CancelFrame>},
         TContext
       > => {
       return useMutation(getWsTypesMutationOptions(options), queryClient);

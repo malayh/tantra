@@ -10,8 +10,10 @@ export interface SessionCreated {
   version?: number;
   type?: 'session_created';
   agent: string;
+  root_id?: string | null;
   parent_id?: string | null;
   depth?: number;
+  model?: string | null;
   metadata?: SessionCreatedMetadata;
   [key: string]: unknown;
  }

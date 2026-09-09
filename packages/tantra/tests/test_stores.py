@@ -39,7 +39,6 @@ async def test_memory_read_page_selects_only_the_requested_slice() -> None:
     await store.append(
         header.id,
         [TextPart(sample_id="sample", text=str(index)) for index in range(100)],
-        expect_seq=0,
     )
     store._events[header.id] = SliceOnlyLog(store._events[header.id])
 

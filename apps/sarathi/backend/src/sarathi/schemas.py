@@ -3,7 +3,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Discriminator, Field
 
-from tantra import Emitted
+from tantra import SessionEvent
 
 
 class SignupRequest(BaseModel):
@@ -55,32 +55,65 @@ class Attachment(BaseModel):
     name: str
 
 
+WireId = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
+
+
+class SubscribeFrame(BaseModel):
+    type: Literal["subscribe"] = "subscribe"
+    agent_id: WireId
+    after: int = Field(default=0, ge=0)
+    writable: bool = False
+
+
+class UnsubscribeFrame(BaseModel):
+    type: Literal["unsubscribe"] = "unsubscribe"
+    agent_id: WireId
+
+
 class UserMessageFrame(BaseModel):
     type: Literal["user_message"] = "user_message"
+    command_id: WireId
     text: str
     attachments: list[Attachment] = Field(default_factory=list)
 
 
 class AskResponseFrame(BaseModel):
     type: Literal["ask_response"] = "ask_response"
-    ask_id: str
+    command_id: WireId
+    ask_id: WireId
     response: str
 
 
 class CancelFrame(BaseModel):
     type: Literal["cancel"] = "cancel"
+    command_id: WireId
 
 
-ClientFrame = Annotated[UserMessageFrame | AskResponseFrame | CancelFrame, Discriminator("type")]
+ClientFrame = Annotated[
+    SubscribeFrame | UnsubscribeFrame | UserMessageFrame | AskResponseFrame | CancelFrame,
+    Discriminator("type"),
+]
 
 
-class ReplayDoneFrame(BaseModel):
-    type: Literal["replay_done"] = "replay_done"
+class EventFrame(BaseModel):
+    type: Literal["event"] = "event"
+    agent_id: WireId
+    seq: int = Field(ge=1)
+    event: SessionEvent
 
 
-class BusyFrame(BaseModel):
-    type: Literal["busy"] = "busy"
-    retry_in: float
+class SubscriptionReadyFrame(BaseModel):
+    type: Literal["subscription_ready"] = "subscription_ready"
+    agent_id: WireId
+    seq: int = Field(ge=0)
+    active: bool
+
+
+class AskExpiredFrame(BaseModel):
+    type: Literal["ask_expired"] = "ask_expired"
+    agent_id: WireId
+    ask_id: WireId
+    message: str
 
 
 class TitleUpdatedFrame(BaseModel):
@@ -93,4 +126,4 @@ class ServerErrorFrame(BaseModel):
     message: str
 
 
-ServerFrame = ReplayDoneFrame | BusyFrame | TitleUpdatedFrame | ServerErrorFrame | Emitted
+ServerFrame = EventFrame | SubscriptionReadyFrame | AskExpiredFrame | TitleUpdatedFrame | ServerErrorFrame

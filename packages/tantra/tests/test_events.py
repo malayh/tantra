@@ -23,14 +23,12 @@ PERSISTED = {
     "ToolCallStarted",
     "ToolProgress",
     "ToolCallCompleted",
-    "ChildSessionSpawned",
     "ChildCreated",
     "AgentFinished",
     "AskRaised",
     "AskAnswered",
     "SampleCompleted",
     "CompactionApplied",
-    "CancelRequested",
     "CancellationRequested",
     "TurnCompleted",
     "TurnFailed",
@@ -71,7 +69,6 @@ def test_header_defaults() -> None:
 
     assert header.status == "idle"
     assert header.last_seq == 0
-    assert header.lease is None
     assert header.pending_ask is None
     assert header.finished is False
     assert header.metadata == {}

@@ -4,9 +4,7 @@ from typing import Any
 
 import pytest
 
-from tantra.adapters.collect import collect
 from tantra.agent import Agent
-from tantra.ask import ApprovalResponse
 from tantra.compaction import (
     MIN_RESULT_CHARS,
     STRATEGY,
@@ -18,7 +16,6 @@ from tantra.compaction import (
 from tantra.context import TurnContext, assemble_messages, build_messages, compaction_window
 from tantra.errors import ProviderError
 from tantra.events import (
-    AskRaised,
     CompactionApplied,
     SampleCompleted,
     SampleStarted,
@@ -29,23 +26,18 @@ from tantra.events import (
     ToolCallRequested,
     ToolCallStarted,
     TurnCompleted,
-    TurnFailed,
     TurnStarted,
     Usage,
 )
-from tantra.harness import Harness
-from tantra.hooks import Hook
 from tantra.providers.base import (
     AssistantMessage,
     Message,
     ModelLimits,
-    SampleRequest,
     ToolCall,
     ToolResultMessage,
     UserMessage,
 )
 from tantra.providers.fake import FakeProvider, Sample
-from tantra.stores.memory import MemoryStore
 from tantra.tools import tool
 
 MODEL = "fake/model"
@@ -617,167 +609,3 @@ class Noter(Agent):
 
 def call(name: str, args: str, cid: str = "c1") -> ToolCall:
     return ToolCall(id=cid, name=name, args=args)
-
-
-async def test_a_harness_without_a_compactor_builds_the_requests_an_idle_compactor_also_builds() -> None:
-    script = [
-        Sample(tool_calls=[call("fetch", '{"path": "a.md"}')]),
-        Sample(text="done"),
-    ]
-    plain = Harness(FakeProvider(list(script)), MemoryStore(), [Fetcher], default_model=MODEL)
-    plain_sid = (await plain.create_session(Fetcher)).id
-    plain_events = await collect(plain.run(plain_sid, "read it"))
-
-    guarded_store = MemoryStore()
-    guarded = Harness(
-        FakeProvider(list(script)),
-        guarded_store,
-        [Fetcher],
-        default_model=MODEL,
-        compactor=PruneThenSummarize(),
-    )
-    guarded_sid = (await guarded.create_session(Fetcher)).id
-    guarded_events = await collect(guarded.run(guarded_sid, "read it"))
-
-    def bodies(requests: list[SampleRequest]) -> list[dict[str, Any]]:
-        return [request.model_dump() for request in requests]
-
-    assert bodies(plain.provider.requests) == bodies(guarded.provider.requests)
-    assert [type(emitted.event) for emitted in plain_events] == [type(emitted.event) for emitted in guarded_events]
-    assert applied_in([emitted.event for emitted in guarded_events]) == []
-    assert dumps(plain.provider.requests[-1].messages) == dumps(
-        [
-            UserMessage(content="read it"),
-            AssistantMessage(tool_calls=[ToolCall(id="c1", name="fetch", args='{"path": "a.md"}')]),
-            ToolResultMessage(call_id="c1", content="d" * 500_000),
-        ]
-    )
-
-
-async def test_a_harness_run_prunes_between_two_samples_of_a_turn_that_then_completes() -> None:
-    provider = TinyProvider(
-        [
-            Sample(tool_calls=[call("fetch", '{"path": "a.md"}')]),
-            Sample(text="one done"),
-            Sample(text="two done"),
-            Sample(tool_calls=[call("fetch", '{"path": "b.md"}', cid="c2")]),
-            Sample(text="three done"),
-        ],
-        context_window=220_000,
-    )
-    store = MemoryStore()
-    harness = Harness(provider, store, [Fetcher], default_model=MODEL, compactor=PruneThenSummarize())
-    sid = (await harness.create_session(Fetcher)).id
-
-    await collect(harness.run(sid, "one"))
-    await collect(harness.run(sid, "two"))
-    events = await collect(harness.run(sid, "three"))
-
-    assert picks(events, TurnCompleted)[0].stop_reason == "completed"
-    assert picks(events, CompactionApplied) == []
-    assert len(provider.requests) == 5
-
-    logged = [stamped.event async for stamped in store.read(sid)]
-    stubbed = [event for event in logged if isinstance(event, ToolCallCompleted) and event.call_id == "c1"]
-    assert [event.result for event in stubbed] == [
-        "d" * 500_000,
-        "[pruned: fetch output, 500000 chars omitted]",
-    ]
-
-    opening = [message.content for message in provider.requests[3].messages if isinstance(message, ToolResultMessage)]
-    final = [message.content for message in provider.requests[4].messages if isinstance(message, ToolResultMessage)]
-    assert opening == ["d" * 500_000]
-    assert final == ["[pruned: fetch output, 500000 chars omitted]", "d" * 500_000]
-
-
-class Terminals(Hook):
-    def __init__(self) -> None:
-        self.seen: list[SessionEvent] = []
-
-    async def after_turn(self, turn: TurnContext, event: SessionEvent) -> None:
-        self.seen.append(event)
-
-
-async def test_a_failing_summarizer_fails_the_turn_and_the_session_recovers_on_the_next_run() -> None:
-    terminals = Terminals()
-    provider = TinyProvider(
-        [
-            Sample(text="x" * 500_000),
-            Sample(text=""),
-            Sample(text=BRIEF),
-            Sample(text="done"),
-        ]
-    )
-    store = MemoryStore()
-    harness = Harness(
-        provider,
-        store,
-        [Analyst],
-        default_model=MODEL,
-        hooks=[terminals],
-        compactor=PruneThenSummarize(CompactionConfig(tail_turns=1)),
-    )
-    sid = (await harness.create_session(Analyst)).id
-    await collect(harness.run(sid, "one"))
-
-    failed = await collect(harness.run(sid, "two"))
-
-    assert picks(failed, TurnFailed)[0].error.startswith("compaction summary came back empty")
-    assert isinstance(terminals.seen[-1], TurnFailed)
-    assert (await store.header(sid)).status == "failed"
-
-    recovered = await collect(harness.run(sid, "three"))
-
-    assert picks(recovered, CompactionApplied)[0].summary == BRIEF
-    assert picks(recovered, TurnCompleted)[0].stop_reason == "completed"
-
-
-async def test_a_compacted_turn_resumes_from_a_fresh_harness_over_the_summary() -> None:
-    provider = TinyProvider(
-        [
-            Sample(text="x" * 500_000, usage=Usage(input_tokens=126_000)),
-            Sample(text=BRIEF),
-            Sample(tool_calls=[call("note", '{"text": "p99"}', cid="n1")]),
-        ]
-    )
-    store = MemoryStore()
-    first = Harness(
-        provider,
-        store,
-        [Noter],
-        default_model=MODEL,
-        compactor=PruneThenSummarize(CompactionConfig(tail_turns=1)),
-    )
-    sid = (await first.create_session(Noter)).id
-    await collect(first.run(sid, "one"))
-    opening = await collect(first.run(sid, "two"))
-
-    applied = picks(opening, CompactionApplied)[0]
-    raised = picks(opening, AskRaised)[0]
-    assert applied.summary == BRIEF
-    assert applied.floor_turn_id == picks(opening, TurnStarted)[0].turn_id
-    assert provider.requests[1].messages[-1].content == SUMMARIZE_INSTRUCTION
-
-    del first
-    second = Harness(
-        TinyProvider([Sample(text="done")]),
-        store,
-        [Noter],
-        default_model=MODEL,
-        compactor=PruneThenSummarize(CompactionConfig(tail_turns=1)),
-    )
-
-    resumed = await collect(second.resume(sid, raised.ask_id, ApprovalResponse(allow=True)))
-
-    assert picks(resumed, TurnCompleted)[0].stop_reason == "completed"
-    request = second.provider.requests[0]
-    assert isinstance(request.messages[0], UserMessage)
-    assert request.messages[0].content == BRIEF
-    assert not any("x" * 500_000 == getattr(message, "text", None) for message in request.messages)
-    calls, results = pairs(request.messages)
-    assert sorted(calls) == sorted(results) == ["n1"]
-
-    replayed = [emitted.event async for emitted in second.replay(sid)]
-    assert len([event for event in replayed if isinstance(event, CompactionApplied)]) == 1
-    assert any(isinstance(event, TextPart) and event.text == "x" * 500_000 for event in replayed)
-    assert len([event for event in replayed if isinstance(event, TurnStarted)]) == 2

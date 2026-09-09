@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import ValidationError
 
-from tantra.errors import CorruptLog, InvalidCommandReuse, SeqConflict, SessionExists, SessionNotFound, TantraError
-from tantra.events import InputQueued, Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
+from tantra.errors import CorruptLog, InvalidCommandReuse, SessionExists, SessionNotFound, TantraError
+from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
 from tantra.stores.base import UNSET, EnqueueResult, apply_patch
 
@@ -33,8 +33,7 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             metadata jsonb NOT NULL DEFAULT '{{}}'::jsonb,
             parent_id text,
             created_at timestamptz NOT NULL,
-            last_seq bigint NOT NULL DEFAULT 0,
-            lease jsonb
+            last_seq bigint NOT NULL DEFAULT 0
         )
         """,
         "CREATE INDEX IF NOT EXISTS sessions_metadata_idx ON {schema}.sessions USING gin (metadata)",
@@ -96,13 +95,12 @@ class PostgresStore:
 
     async def create(self, header: SessionHeader) -> None:
         stored = header.model_copy(deep=True)
-        stored.lease = None
         async with self._lock:
             conn = await self._connection()
             cursor = await conn.execute(
                 self._sql(
-                    "INSERT INTO {schema}.sessions (id, header, metadata, parent_id, created_at, last_seq, lease)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, NULL) ON CONFLICT (id) DO NOTHING"
+                    "INSERT INTO {schema}.sessions (id, header, metadata, parent_id, created_at, last_seq)"
+                    " VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING"
                 ),
                 (
                     stored.id,
@@ -120,14 +118,13 @@ class PostgresStore:
         async with self._lock:
             conn = await self._connection()
             cursor = await conn.execute(
-                self._sql("SELECT header, last_seq, lease FROM {schema}.sessions WHERE id = %s"), (sid,)
+                self._sql("SELECT header, last_seq FROM {schema}.sessions WHERE id = %s"), (sid,)
             )
             row = await cursor.fetchone()
         return _hydrate(row) if row is not None else None
 
     async def put_header(self, h: SessionHeader) -> None:
         stored = h.model_copy(deep=True)
-        stored.lease = None
         async with self._lock:
             conn = await self._connection()
             async with conn.transaction():
@@ -151,6 +148,7 @@ class PostgresStore:
         sid: str,
         *,
         title: str | None = UNSET,
+        model: str | None = UNSET,
         status: SessionStatus = UNSET,
         pending_ask: str | None = UNSET,
         usage: Usage = UNSET,
@@ -161,7 +159,7 @@ class PostgresStore:
             conn = await self._connection()
             async with conn.transaction():
                 cursor = await conn.execute(
-                    self._sql("SELECT header, last_seq, lease FROM {schema}.sessions WHERE id = %s FOR UPDATE"), (sid,)
+                    self._sql("SELECT header, last_seq FROM {schema}.sessions WHERE id = %s FOR UPDATE"), (sid,)
                 )
                 row = await cursor.fetchone()
                 if row is None:
@@ -171,6 +169,7 @@ class PostgresStore:
                 stored = apply_patch(
                     current,
                     title=title,
+                    model=model,
                     status=status,
                     pending_ask=pending_ask,
                     usage=usage,
@@ -181,10 +180,9 @@ class PostgresStore:
                     self._sql("UPDATE {schema}.sessions SET header = %s, metadata = %s WHERE id = %s"),
                     (_json(stored), Jsonb(stored.metadata), sid),
                 )
-                stored.lease = Lease.model_validate(row[2]) if row[2] is not None else None
                 return stored
 
-    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
+    async def append(self, sid: str, events: Sequence[SessionEvent]) -> int:
         async with self._lock:
             conn = await self._connection()
             async with conn.transaction():
@@ -195,8 +193,6 @@ class PostgresStore:
                 if row is None:
                     raise SessionNotFound(sid)
                 last_seq = row[1]
-                if expect_seq is not None and expect_seq != last_seq:
-                    raise SeqConflict(f"{sid}: expected seq {last_seq}, got {expect_seq}")
                 header = SessionHeader.model_validate(row[0])
                 seq = last_seq
                 rows = []
@@ -301,7 +297,7 @@ class PostgresStore:
             conditions.append(sql.SQL("metadata @> %(metadata)s"))
             params["metadata"] = Jsonb(metadata)
         query = sql.SQL(
-            "SELECT header, last_seq, lease FROM {schema}.sessions WHERE {conditions}"
+            "SELECT header, last_seq FROM {schema}.sessions WHERE {conditions}"
             ' ORDER BY created_at DESC, id COLLATE "C" DESC LIMIT %(limit)s'
         ).format(schema=self._ident, conditions=sql.SQL(" AND ").join(conditions))
         async with self._lock:
@@ -309,32 +305,6 @@ class PostgresStore:
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
         return [_hydrate(row) for row in rows]
-
-    async def acquire_lease(self, sid: str, holder: str, ttl: float) -> bool:
-        now = datetime.now(UTC)
-        lease = Lease(holder=holder, expires_at=now + timedelta(seconds=ttl))
-        async with self._lock:
-            conn = await self._connection()
-            cursor = await conn.execute(self._sql("SELECT 1 FROM {schema}.sessions WHERE id = %s"), (sid,))
-            if await cursor.fetchone() is None:
-                raise SessionNotFound(sid)
-            cursor = await conn.execute(
-                self._sql(
-                    "UPDATE {schema}.sessions SET lease = %(lease)s WHERE id = %(sid)s AND ("
-                    " lease IS NULL OR lease->>'holder' = %(holder)s"
-                    " OR (lease->>'expires_at')::timestamptz <= %(now)s) RETURNING id"
-                ),
-                {"lease": _json(lease), "sid": sid, "holder": holder, "now": now},
-            )
-            return await cursor.fetchone() is not None
-
-    async def release_lease(self, sid: str, holder: str) -> None:
-        async with self._lock:
-            conn = await self._connection()
-            await conn.execute(
-                self._sql("UPDATE {schema}.sessions SET lease = NULL WHERE id = %s AND lease->>'holder' = %s"),
-                (sid, holder),
-            )
 
     async def memory_put(self, row: MemoryRecord) -> None:
         async with self._lock:
@@ -454,7 +424,6 @@ def _literal(vector: Sequence[float]) -> str:
 def _hydrate(row: tuple[Any, ...]) -> SessionHeader:
     header = SessionHeader.model_validate(row[0])
     header.last_seq = row[1]
-    header.lease = Lease.model_validate(row[2]) if row[2] is not None else None
     return header
 
 

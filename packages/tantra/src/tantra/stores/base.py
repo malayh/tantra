@@ -57,20 +57,17 @@ class Store(Protocol):
         """Register a new session. Raises `SessionExists` when the id is already taken."""
 
     async def header(self, sid: str) -> SessionHeader | None:
-        """Return the session header, or None when the session is unknown.
-
-        `lease` is reported as stored, expired or not — compare `lease.expires_at` against now
-        to spot a turn abandoned by a dead worker.
-        """
+        """Return the session header, or None when the session is unknown."""
 
     async def put_header(self, h: SessionHeader) -> None:
-        """Overwrite the session header. `last_seq` and `lease` are store-owned and preserved."""
+        """Overwrite the session header. `last_seq` is store-owned and preserved."""
 
     async def patch_header(
         self,
         sid: str,
         *,
         title: str | None = UNSET,
+        model: str | None = UNSET,
         status: SessionStatus = UNSET,
         pending_ask: str | None = UNSET,
         usage: Usage = UNSET,
@@ -81,17 +78,12 @@ class Store(Protocol):
 
         Only the fields passed change, so a concurrent writer touching other fields is not lost.
         `metadata` merges shallowly — the given keys overwrite, the rest survive, nothing is
-        deleted. `updated_at` is stamped on every patch; `last_seq` and `lease` are store-owned and
-        left alone. Raises `SessionNotFound` when the session is unknown.
+        deleted. `updated_at` is stamped on every patch; `last_seq` is store-owned and left alone.
+        Raises `SessionNotFound` when the session is unknown.
         """
 
-    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
-        """Append events and return the new last seq.
-
-        Optimistic concurrency: raises `SeqConflict` unless `expect_seq` equals the session's
-        current last seq. `expect_seq=None` skips the check and appends onto whatever the current
-        last seq is. The first event of a session gets seq 1.
-        """
+    async def append(self, sid: str, events: Sequence[SessionEvent]) -> int:
+        """Append events and return the new last seq."""
 
     async def enqueue(self, sid: str, event: InputQueued) -> EnqueueResult: ...
 
@@ -113,17 +105,6 @@ class Store(Protocol):
         before: str | None = None,
     ) -> list[SessionHeader]:
         """Return headers newest first. `metadata` matches as a subset; `before` is a session id cursor."""
-
-    async def acquire_lease(self, sid: str, holder: str, ttl: float) -> bool:
-        """Take or refresh the single-writer lease for `ttl` seconds.
-
-        Returns False when a live lease is held by someone else. An expired lease is acquirable by
-        anyone and is never cleared on expiry — it stays readable on the header as evidence of who
-        held the session last and when it lapsed.
-        """
-
-    async def release_lease(self, sid: str, holder: str) -> None:
-        """Drop the lease when `holder` owns it, otherwise do nothing."""
 
     async def memory_put(self, row: MemoryRecord) -> None:
         """Store a memory row, overwriting any row already held under its id."""

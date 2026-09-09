@@ -11,6 +11,7 @@ from tantra import (
     Agent,
     ApprovalResponse,
     AskExpired,
+    BuiltinMemory,
     ChoiceResponse,
     CommandReceipt,
     FreeText,
@@ -21,6 +22,7 @@ from tantra import (
     TurnResult,
     WriterReplaced,
     WriterRequired,
+    memory_tools,
     tool,
 )
 from tantra.events import (
@@ -47,6 +49,7 @@ from tantra.providers.base import (
     UserMessage,
 )
 from tantra.providers.fake import FAKE_LIMITS, FakeProvider, Sample
+from tantra.skills import Skill, SkillInfo
 from tantra.stores.memory import MemoryStore
 from tantra.tools import Context
 
@@ -174,10 +177,8 @@ class GatedStore(MemoryStore):
         self,
         sid: str,
         events: Sequence[SessionEvent],
-        *,
-        expect_seq: int | None,
     ) -> int:
-        result = await super().append(sid, events, expect_seq=expect_seq)
+        result = await super().append(sid, events)
         if self.append_kind is not None and any(isinstance(event, self.append_kind) for event in events):
             self.append_committed.set()
             await self.append_release.wait()
@@ -503,7 +504,7 @@ async def test_fresh_runtime_interrupts_old_started_turn_and_drains_fifo() -> No
     waiting = uuid4()
     await store.enqueue(sid.hex, InputQueued(command_id=started.hex, input="lost"))
     await store.enqueue(sid.hex, InputQueued(command_id=waiting.hex, input="waiting"))
-    await store.append(sid.hex, [TurnStarted(turn_id=started.hex, input="lost")], expect_seq=None)
+    await store.append(sid.hex, [TurnStarted(turn_id=started.hex, input="lost")])
 
     provider = EchoProvider()
     recovered = Runtime(provider, store, [Bot], default_model="different")
@@ -540,7 +541,6 @@ async def test_fresh_runtime_deduplicates_answer_and_cancel_commands() -> None:
             ),
             CancellationRequested(command_id=cancel_id.hex),
         ],
-        expect_seq=None,
     )
     fresh = Runtime(EchoProvider(), store, [Bot], default_model="m")
 
@@ -904,7 +904,7 @@ async def test_delayed_recovery_interruption_racing_cancel_has_one_terminal() ->
     sid = await initial.create(Bot)
     abandoned = uuid4()
     await store.enqueue(sid.hex, InputQueued(command_id=abandoned.hex, input="lost"))
-    await store.append(sid.hex, [TurnStarted(turn_id=abandoned.hex, input="lost")], expect_seq=None)
+    await store.append(sid.hex, [TurnStarted(turn_id=abandoned.hex, input="lost")])
     runtime = DelayedRecoveryRuntime(EchoProvider(), store, [Bot], default_model="m")
 
     async with runtime.connect(sid, writable=True) as connection:
@@ -934,7 +934,7 @@ async def test_delayed_recovery_interruption_racing_close_has_one_terminal() -> 
     abandoned = uuid4()
     fresh = uuid4()
     await store.enqueue(sid.hex, InputQueued(command_id=abandoned.hex, input="lost"))
-    await store.append(sid.hex, [TurnStarted(turn_id=abandoned.hex, input="lost")], expect_seq=None)
+    await store.append(sid.hex, [TurnStarted(turn_id=abandoned.hex, input="lost")])
     runtime = DelayedRecoveryRuntime(EchoProvider(), store, [Bot], default_model="m")
     connection = runtime.connect(sid, writable=True)
     await connection.__aenter__()
@@ -956,3 +956,72 @@ async def test_delayed_recovery_interruption_racing_close_has_one_terminal() -> 
     assert isinstance(terminals[0], TurnInterrupted)
     assert not any(isinstance(event, TurnStarted) and event.turn_id == fresh.hex for event in logged)
     await connection.__aexit__(None, None, None)
+
+
+async def test_runtime_skills_are_disclosed_and_load_through_the_internal_tool() -> None:
+    class Catalog:
+        def __init__(self) -> None:
+            self.loaded: list[str] = []
+
+        async def index(self) -> list[SkillInfo]:
+            return [SkillInfo(name="release", description="Ship safely.")]
+
+        async def load(self, name: str) -> Skill:
+            self.loaded.append(name)
+            return Skill(name=name, description="Ship safely.", body="Read the checklist.", files=("guide.md",))
+
+    class Skilled(Agent):
+        skills = ["release"]
+
+    catalog = Catalog()
+    provider = FakeProvider([Sample(tool_calls=[call("skill", '{"name":"release"}')]), Sample(text="done")])
+    store = MemoryStore()
+    runtime = Runtime(provider, store, [Skilled], default_model="m", skills=catalog)
+    sid = await runtime.create(Skilled)
+
+    async with runtime.connect(sid, writable=True) as connection:
+        result = await connection.prompt("ship", command_id=uuid4())
+
+    completed = [event for event in await history(store, sid) if isinstance(event, ToolCallCompleted)]
+    assert result.text == "done"
+    assert catalog.loaded == ["release"]
+    assert "release: Ship safely." in provider.requests[0].system[-1].text
+    assert completed[0].result == "Read the checklist.\n\n## Files\nguide.md"
+    await runtime.aclose()
+
+
+async def test_runtime_memory_tools_write_and_recall_without_a_coordinator() -> None:
+    write, recall = memory_tools()
+
+    class Rememberer(Agent):
+        tools = [write, recall]
+
+    provider = FakeProvider(
+        [
+            Sample(
+                tool_calls=[
+                    call(
+                        "memory_write",
+                        '{"kind":"preference","title":"Failure modes first","body":"Review failures before style."}',
+                        "w",
+                    )
+                ]
+            ),
+            Sample(tool_calls=[call("memory_recall", '{"query":"failure modes review"}', "r")]),
+            Sample(text="remembered"),
+        ]
+    )
+    store = MemoryStore()
+    runtime = Runtime(provider, store, [Rememberer], default_model="m", memory=BuiltinMemory(store))
+    sid = await runtime.create(Rememberer)
+
+    async with runtime.connect(sid, writable=True) as connection:
+        result = await connection.prompt("remember", command_id=uuid4())
+
+    completed = {
+        event.call_id: event.result for event in await history(store, sid) if isinstance(event, ToolCallCompleted)
+    }
+    assert result.text == "remembered"
+    assert isinstance(completed["w"], str)
+    assert completed["r"][0]["title"] == "Failure modes first"
+    await runtime.aclose()

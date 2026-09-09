@@ -19,10 +19,9 @@ class Tracer(Protocol):
     """
 
     def start_turn(self, turn: TurnContext, *, resumed: bool, ask_id: str | None, parent: Any) -> Any:
-        """Open the span covering one `run()` or `resume()` segment of `turn`.
+        """Open the span covering one actor turn.
 
         `parent` is the handle of the tool span that spawned this turn, or `None` for a root turn.
-        `resumed` marks a segment picked up by `resume()`, `ask_id` the answered ask that drove it.
         """
 
     def end_turn(

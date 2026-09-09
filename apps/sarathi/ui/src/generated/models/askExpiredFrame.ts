@@ -5,11 +5,11 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface AskResponseFrame {
-  type?: 'ask_response';
+export interface AskExpiredFrame {
+  type?: 'ask_expired';
   /** @pattern ^[0-9a-f]{32}$ */
-  command_id: string;
+  agent_id: string;
   /** @pattern ^[0-9a-f]{32}$ */
   ask_id: string;
-  response: string;
+  message: string;
 }

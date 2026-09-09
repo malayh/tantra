@@ -4,8 +4,8 @@ import pytest
 
 from tantra.agent import Agent, agent_name, build_name_table
 from tantra.errors import TantraError
-from tantra.harness import Harness
 from tantra.providers.fake import FakeProvider
+from tantra.runtime import Runtime
 from tantra.stores.memory import MemoryStore
 from tantra.tools import tool
 
@@ -53,7 +53,7 @@ def test_a_repeated_class_is_not_a_collision() -> None:
     }
 
 
-def test_duplicate_names_raise_at_harness_construction() -> None:
+def test_duplicate_names_raise_at_runtime_construction() -> None:
     class One(Agent):
         name = "twin"
 
@@ -61,7 +61,7 @@ def test_duplicate_names_raise_at_harness_construction() -> None:
         name = "twin"
 
     with pytest.raises(TantraError, match="duplicate agent name"):
-        Harness(FakeProvider([]), MemoryStore(), [One, Two], default_model="fake/model")
+        Runtime(FakeProvider([]), MemoryStore(), [One, Two], default_model="fake/model")
 
 
 def test_a_duplicate_reached_through_subagents_also_raises() -> None:
@@ -75,10 +75,10 @@ def test_a_duplicate_reached_through_subagents_also_raises() -> None:
         subagents = [Leaf]
 
     with pytest.raises(TantraError, match="duplicate agent name"):
-        Harness(FakeProvider([]), MemoryStore(), [Parent, Other], default_model="fake/model")
+        Runtime(FakeProvider([]), MemoryStore(), [Parent, Other], default_model="fake/model")
 
 
-def test_undecorated_tools_raise_at_harness_construction() -> None:
+def test_undecorated_tools_raise_at_runtime_construction() -> None:
     def not_a_tool(query: str) -> str:
         return query
 
@@ -86,10 +86,10 @@ def test_undecorated_tools_raise_at_harness_construction() -> None:
         tools = [not_a_tool]
 
     with pytest.raises(TantraError, match="not decorated with @tool"):
-        Harness(FakeProvider([]), MemoryStore(), [Broken], default_model="fake/model")
+        Runtime(FakeProvider([]), MemoryStore(), [Broken], default_model="fake/model")
 
 
-def test_duplicate_tool_names_raise_at_harness_construction() -> None:
+def test_duplicate_tool_names_raise_at_runtime_construction() -> None:
     @tool
     def search(query: str) -> str:
         """Search."""
@@ -104,18 +104,18 @@ def test_duplicate_tool_names_raise_at_harness_construction() -> None:
         tools = [search, search_again]
 
     with pytest.raises(TantraError, match="duplicate tool name"):
-        Harness(FakeProvider([]), MemoryStore(), [Broken], default_model="fake/model")
+        Runtime(FakeProvider([]), MemoryStore(), [Broken], default_model="fake/model")
 
 
-def test_max_steps_below_one_raises_at_harness_construction() -> None:
+def test_max_steps_below_one_raises_at_runtime_construction() -> None:
     class Zero(Agent):
         max_steps = 0
 
     with pytest.raises(TantraError, match="max_steps must be at least 1"):
-        Harness(FakeProvider([]), MemoryStore(), [Zero], default_model="fake/model")
+        Runtime(FakeProvider([]), MemoryStore(), [Zero], default_model="fake/model")
 
 
-def test_an_unannotated_ctx_parameter_raises_at_harness_construction() -> None:
+def test_an_unannotated_ctx_parameter_raises_at_runtime_construction() -> None:
     @tool
     def leaky(query: str, ctx) -> str:
         """Leaks ctx into the model-facing schema."""
@@ -125,7 +125,7 @@ def test_an_unannotated_ctx_parameter_raises_at_harness_construction() -> None:
         tools = [leaky]
 
     with pytest.raises(TantraError, match="unannotated 'ctx'"):
-        Harness(FakeProvider([]), MemoryStore(), [Broken], default_model="fake/model")
+        Runtime(FakeProvider([]), MemoryStore(), [Broken], default_model="fake/model")
 
 
 def test_a_required_parameter_with_no_inferable_type_raises() -> None:
@@ -138,7 +138,7 @@ def test_a_required_parameter_with_no_inferable_type_raises() -> None:
         tools = [untyped]
 
     with pytest.raises(TantraError, match="no inferable JSON type"):
-        Harness(FakeProvider([]), MemoryStore(), [Broken], default_model="fake/model")
+        Runtime(FakeProvider([]), MemoryStore(), [Broken], default_model="fake/model")
 
 
 def test_every_tool_schema_is_an_object_schema() -> None:
@@ -150,5 +150,5 @@ def test_every_tool_schema_is_an_object_schema() -> None:
     class Ok(Agent):
         tools = [fine]
 
-    harness = Harness(FakeProvider([]), MemoryStore(), [Ok], default_model="fake/model")
-    assert harness.tools["ok"]["fine"].schema.parameters["type"] == "object"
+    runtime = Runtime(FakeProvider([]), MemoryStore(), [Ok], default_model="fake/model")
+    assert runtime.tools["ok"]["fine"].schema.parameters["type"] == "object"

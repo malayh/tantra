@@ -61,8 +61,8 @@ class Compactor(Protocol):
         """Return events that shrink the assembled context, or `[]` to leave the turn alone.
 
         `ctx.history` aliases the live log, `ctx.limits` describes the model in use. Returned events
-        are appended to the log and emitted like any other, so a compaction survives a resume in
-        another process. Nothing is ever rewritten — assembly derives the compacted view from them.
+        are appended to the log and emitted like any other, so a compaction survives process loss. Nothing is ever
+        rewritten — assembly derives the compacted view from them.
         """
 
 

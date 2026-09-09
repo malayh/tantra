@@ -1,9 +1,6 @@
 class TantraError(Exception): ...
 
 
-class SeqConflict(TantraError): ...
-
-
 class SessionNotFound(TantraError): ...
 
 
@@ -26,15 +23,6 @@ class AskExpired(TantraError): ...
 
 
 class MaxDepthExceeded(TantraError): ...
-
-
-class SessionBusy(TantraError):
-    def __init__(self, sid: str) -> None:
-        super().__init__(f"session {sid} is busy: lease held by another writer")
-        self.sid = sid
-
-
-class TurnIncomplete(TantraError): ...
 
 
 class ProviderError(TantraError):

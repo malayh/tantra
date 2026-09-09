@@ -5,8 +5,11 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface CancelFrame {
-  type?: 'cancel';
+export interface SubscribeFrame {
+  type?: 'subscribe';
   /** @pattern ^[0-9a-f]{32}$ */
-  command_id: string;
+  agent_id: string;
+  /** @minimum 0 */
+  after?: number;
+  writable?: boolean;
 }

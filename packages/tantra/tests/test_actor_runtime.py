@@ -592,12 +592,10 @@ class FailingCancellationStore(MemoryStore):
         self,
         sid: str,
         events: Sequence[SessionEvent],
-        *,
-        expect_seq: int | None,
     ) -> int:
         if self.fail_cancellation and any(isinstance(event, CancellationRequested) for event in events):
             raise RuntimeError("root cancellation append failed")
-        return await super().append(sid, events, expect_seq=expect_seq)
+        return await super().append(sid, events)
 
 
 async def test_cancel_root_append_failure_has_no_actor_side_effects() -> None:
@@ -653,8 +651,6 @@ class PartialCancellationStore(MemoryStore):
         self,
         sid: str,
         events: Sequence[SessionEvent],
-        *,
-        expect_seq: int | None,
     ) -> int:
         if (
             sid == self.fail_sid
@@ -663,7 +659,7 @@ class PartialCancellationStore(MemoryStore):
         ):
             self.failed = True
             raise RuntimeError("actor cancellation append failed")
-        return await super().append(sid, events, expect_seq=expect_seq)
+        return await super().append(sid, events)
 
 
 async def test_cancel_retry_resumes_after_partial_actor_terminalization() -> None:
@@ -804,10 +800,8 @@ class CommittedCancellationStore(MemoryStore):
         self,
         sid: str,
         events: Sequence[SessionEvent],
-        *,
-        expect_seq: int | None,
     ) -> int:
-        result = await super().append(sid, events, expect_seq=expect_seq)
+        result = await super().append(sid, events)
         if (
             sid == self.fail_sid
             and not self.failed
@@ -908,10 +902,8 @@ class GatedFinishedStore(MemoryStore):
         self,
         sid: str,
         events: Sequence[SessionEvent],
-        *,
-        expect_seq: int | None,
     ) -> int:
-        result = await super().append(sid, events, expect_seq=expect_seq)
+        result = await super().append(sid, events)
         if any(isinstance(event, AgentFinished) for event in events):
             self.finished_committed.set()
             await self.release_finished.wait()
@@ -985,8 +977,6 @@ class FailingFinishCleanupStore(MemoryStore):
         self,
         sid: str,
         events: Sequence[SessionEvent],
-        *,
-        expect_seq: int | None,
     ) -> int:
         if (
             sid == self.fail_sid
@@ -995,7 +985,7 @@ class FailingFinishCleanupStore(MemoryStore):
         ):
             self.failed = True
             raise RuntimeError("finish cleanup append failed")
-        return await super().append(sid, events, expect_seq=expect_seq)
+        return await super().append(sid, events)
 
 
 async def test_finish_retry_reactivates_durable_parent_delivery() -> None:
@@ -1072,7 +1062,7 @@ async def test_finished_header_without_event_is_not_authoritative() -> None:
     await store.patch_header(child_id, finished=True)
     orphan = uuid4()
     await store.enqueue(child_id, InputQueued(command_id=orphan.hex, input="orphan"))
-    await store.append(child_id, [TurnStarted(turn_id=orphan.hex, input="orphan")], expect_seq=None)
+    await store.append(child_id, [TurnStarted(turn_id=orphan.hex, input="orphan")])
     runtime._activations[child_id] = runtime._activations.get(child_id, 0) + 1
     runtime._activate(child_id, root.id)
     await wait_idle(runtime, child_id)

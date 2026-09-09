@@ -1,6 +1,6 @@
 # Sarathi
 
-A deep-search chat system in the style of Perplexity — ask anything, watch it think, search the web, read your PDFs, and remember you. Built as the demo app for [tantra](../../README.md) (`tantra-harness`): every hard part — the turn loop, streaming, subagents, approvals, cancellation, durability — is the library, not the app.
+A deep-search chat system in the style of Perplexity — ask anything, watch it think, search the web, read your PDFs, and remember you. Built as the demo app for [tantra](../../README.md) (`tantra-harness`): the actor runtime owns streaming, subagents, approvals, cancellation, and durability.
 
 ## Demo
 
@@ -10,12 +10,12 @@ A deep-search chat system in the style of Perplexity — ask anything, watch it 
 
 - **Streaming turns with visible thinking** — reasoning deltas render live, collapse when done.
 - **Deep search** — a `researcher` subagent runs `web_search` / `web_fetch` loops; nested activity streams inside the chat; answers cite sources.
-- **Stop that works** — one click cancels the whole session tree (`harness.cancel(sid, recursive=True)`), and the thread stays usable.
-- **Human-in-the-loop** — memory writes suspend the turn behind an approval card; the ask survives a backend restart and resumes on a fresh socket.
-- **Durability** — reload mid-turn and the transcript replays from the event log while the turn keeps running; reconnect resumes it.
+- **Stop that works** — one click sends a durable cancellation command for the whole actor tree, and the thread stays usable.
+- **Human-in-the-loop** — memory writes suspend the live actor behind an approval card; after a process restart the replayed ask is shown as expired.
+- **Durability** — each actor has an independent journal, including streaming deltas; reconnect replays after that actor's browser cursor while execution stays in the process-scoped Runtime.
 - **Per-user memory** — `memory_tools(scope=...)` stamps every row with the tenant; recall and the memory panel never cross users.
 - **Document grounding** — upload a PDF, the agent reads it with `read_doc` and answers from it.
-- **Model switching** — per-session model picker, switchable mid-turn.
+- **Model switching** — per-session model updates are atomic and apply to the next turn.
 
 ## Stack
 
@@ -48,7 +48,9 @@ docker compose up --build -d
 
 Open http://localhost:3000, sign up, chat.
 
-Note: `docker compose restart` does not re-read `.env` — after editing it, recreate with `docker compose up -d backend`.
+Run exactly one backend process. Runtime writer ownership and actor wakeups are process-local; a shared database does not coordinate multiple workers. Tantra 1.0 requires fresh storage, so remove old database volumes before upgrading.
+
+A backend restart interrupts crash-time work on the next accepted human message. Replayed asks are not answerable because asks are live-only. `docker compose restart` does not re-read `.env` — after editing it, recreate with `docker compose up -d backend`.
 
 ## Development
 

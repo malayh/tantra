@@ -6,20 +6,22 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRoute
 
-from sarathi.agent import make_store
+from sarathi.agent import close_resources, make_resources
 from sarathi.api import auth, memory, meta, sessions, uploads, ws
 from sarathi.config import get_settings
 from sarathi.telemetry import setup_instrumentation, shutdown_telemetry
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     Path(get_settings().UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
-    store = make_store()
-    await store.setup()
-    await store.close()
-    yield
-    shutdown_telemetry()
+    resources = await make_resources()
+    application.state.resources = resources
+    try:
+        yield
+    finally:
+        await close_resources(resources)
+        shutdown_telemetry()
 
 
 def unique_id(route: APIRoute) -> str:

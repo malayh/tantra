@@ -1,27 +1,29 @@
 import { createStore } from "zustand/vanilla";
 
 import type {
+  AskExpiredFrame,
   AskRaised,
   AskResponseFrame,
   Attachment,
-  BusyFrame,
   CancelFrame,
-  Emitted,
-  ReplayDoneFrame,
+  EventFrame,
   ServerErrorFrame,
+  SubscribeFrame,
+  SubscriptionReadyFrame,
   TitleUpdatedFrame,
+  UnsubscribeFrame,
   UserMessageFrame,
 } from "@/generated/models";
 
-export type ServerFrame = Emitted | ReplayDoneFrame | BusyFrame | TitleUpdatedFrame | ServerErrorFrame;
+export type ServerFrame = EventFrame | SubscriptionReadyFrame | AskExpiredFrame | TitleUpdatedFrame | ServerErrorFrame;
 
-export type ClientFrame = UserMessageFrame | AskResponseFrame | CancelFrame;
+export type ClientFrame = SubscribeFrame | UnsubscribeFrame | UserMessageFrame | AskResponseFrame | CancelFrame;
 
-export type SessionEvent = Emitted["event"];
+export type SessionEvent = EventFrame["event"];
 
 export type TextKind = "thinking" | "text";
 
-export type TurnStatus = "running" | "done" | "failed" | "cancelled";
+export type TurnStatus = "queued" | "running" | "done" | "failed" | "cancelled" | "interrupted";
 
 type ItemBase = {
   sampleId: string;
@@ -51,6 +53,7 @@ export type SubagentItem = ItemBase & {
   childSampleId: string | null;
   result?: unknown;
   isError: boolean;
+  finished: boolean;
 };
 
 export type AskItem = ItemBase & {
@@ -60,7 +63,7 @@ export type AskItem = ItemBase & {
   title: string;
   body: string;
   requestKind: string;
-  status: "pending" | "answered";
+  status: "pending" | "answered" | "expired";
   allow?: boolean;
 };
 
@@ -72,10 +75,11 @@ export type Turn = {
   attachments: Attachment[];
   items: TranscriptItem[];
   status: TurnStatus;
+  synthetic: boolean;
   error?: string;
 };
 
-export type Banner = { kind: "busy" | "error"; message: string };
+export type Banner = { kind: "error" | "writer"; message: string };
 
 export type PendingMessage = { text: string; attachments: Attachment[] };
 
@@ -84,8 +88,13 @@ export type ChatState = {
   ready: boolean;
   banner: Banner | null;
   sampleId: string | null;
-  dispatch: (frame: Emitted) => void;
-  reset: () => void;
+  cursors: Record<string, number>;
+  active: Record<string, boolean>;
+  work: Record<string, string[]>;
+  finishedActors: Record<string, boolean>;
+  dispatch: (frame: EventFrame) => void;
+  subscriptionReady: (frame: SubscriptionReadyFrame) => void;
+  expireAsk: (frame: AskExpiredFrame) => void;
   setReady: (ready: boolean) => void;
   setBanner: (banner: Banner | null) => void;
 };
@@ -94,6 +103,8 @@ export type ChatStore = ReturnType<typeof createChatStore>;
 
 const ATTACHMENT_LINE = /^\[attachment: (.+)\]$/;
 const PATH_MARKER = " path=";
+const SYNTHETIC_INPUT = /^\[agent ([0-9a-f]{32})(?: finished)?\]/;
+const FINISHED_INPUT = /^\[agent ([0-9a-f]{32}) finished\]/;
 
 const parseInput = (input: string): { text: string; attachments: Attachment[] } => {
   const lines = input.split("\n");
@@ -111,13 +122,59 @@ const parseInput = (input: string): { text: string; attachments: Attachment[] } 
   return { text: lines.join("\n"), attachments };
 };
 
-const mapLast = (turns: Turn[], update: (turn: Turn) => Turn): Turn[] =>
-  turns.length === 0 ? turns : [...turns.slice(0, -1), update(turns[turns.length - 1])];
-
 const mapTurn = (turns: Turn[], turnId: string, update: (turn: Turn) => Turn): Turn[] =>
-  turns.some((turn) => turn.id === turnId)
-    ? turns.map((turn) => (turn.id === turnId ? update(turn) : turn))
-    : mapLast(turns, update);
+  turns.map((turn) => (turn.id === turnId ? update(turn) : turn));
+
+const childActors = (items: TranscriptItem[], actors: Set<string>) => {
+  for (const item of items) {
+    if (item.kind !== "subagent") continue;
+    actors.add(item.childSessionId);
+    childActors(item.items, actors);
+  }
+};
+
+export const subscriptionFrames = (state: ChatState, rootId: string): SubscribeFrame[] => {
+  const actors = new Set([rootId]);
+  for (const turn of state.turns) childActors(turn.items, actors);
+  return [...actors].map((agentId) => ({
+    type: "subscribe",
+    agent_id: agentId,
+    after: state.cursors[agentId] ?? 0,
+    writable: agentId === rootId,
+  }));
+};
+
+const withWork = (
+  state: ChatState,
+  agentId: string,
+  event: SessionEvent,
+): { active: Record<string, boolean>; work: Record<string, string[]> } => {
+  const current = state.work[agentId] ?? [];
+  let next = current;
+  if (state.finishedActors[agentId] && (event.type === "input_queued" || event.type === "turn_started")) {
+    return { active: state.active, work: state.work };
+  }
+  if (event.type === "input_queued") {
+    next = current.includes(event.command_id) ? current : [...current, event.command_id];
+  } else if (event.type === "turn_started") {
+    next = current.includes(event.turn_id) ? current : [...current, event.turn_id];
+  } else if (
+    event.type === "turn_completed" ||
+    event.type === "turn_failed" ||
+    event.type === "turn_cancelled" ||
+    event.type === "turn_interrupted"
+  ) {
+    next = current.filter((turnId) => turnId !== event.turn_id);
+  } else if (event.type === "agent_finished") {
+    next = [];
+  } else {
+    return { active: state.active, work: state.work };
+  }
+  return {
+    active: { ...state.active, [agentId]: next.length > 0 },
+    work: { ...state.work, [agentId]: next },
+  };
+};
 
 const finalizeItems = (items: TranscriptItem[]): TranscriptItem[] =>
   items.map((item) =>
@@ -177,16 +234,20 @@ const findAsk = (items: TranscriptItem[], match: (item: AskItem) => boolean): As
   return null;
 };
 
-const answerAsk = (items: TranscriptItem[], askId: string, allow: boolean | undefined): TranscriptItem[] => {
+const updateAsks = (
+  items: TranscriptItem[],
+  askId: string | null,
+  status: AskItem["status"],
+  allow?: boolean,
+): TranscriptItem[] => {
   let changed = false;
-
   const next = items.map((item): TranscriptItem => {
-    if (item.kind === "ask" && item.askId === askId && item.status === "pending") {
+    if (item.kind === "ask" && item.status === "pending" && (askId === null || item.askId === askId)) {
       changed = true;
-      return { ...item, status: "answered", allow };
+      return { ...item, status, allow };
     }
     if (item.kind === "subagent") {
-      const nested = answerAsk(item.items, askId, allow);
+      const nested = updateAsks(item.items, askId, status, allow);
       if (nested !== item.items) {
         changed = true;
         return { ...item, items: nested };
@@ -194,16 +255,15 @@ const answerAsk = (items: TranscriptItem[], askId: string, allow: boolean | unde
     }
     return item;
   });
-
   return changed ? next : items;
 };
 
 export const pendingAsk = (turns: Turn[]): { askId: string } | null => {
-  const last = turns[turns.length - 1];
-  if (last === undefined) return null;
-
-  const found = findAsk(last.items, (item) => item.status === "pending");
-  return found === null ? null : { askId: found.askId };
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const found = findAsk(turns[index].items, (item) => item.status === "pending");
+    if (found !== null) return { askId: found.askId };
+  }
+  return null;
 };
 
 type ItemScope = { items: TranscriptItem[]; sampleId: string | null };
@@ -235,6 +295,7 @@ const reduceItems = (scope: ItemScope, event: SessionEvent): ItemScope => {
         ),
       };
     case "tool_call_requested":
+      if (scope.items.some((item) => item.kind === "tool" && item.callId === event.call_id)) return scope;
       return {
         ...scope,
         items: [
@@ -280,20 +341,21 @@ const reduceItems = (scope: ItemScope, event: SessionEvent): ItemScope => {
     }
     case "ask_answered": {
       const allow = event.response.kind === "approval" ? event.response.allow : undefined;
-      return { ...scope, items: answerAsk(scope.items, event.ask_id, allow) };
+      return { ...scope, items: updateAsks(scope.items, event.ask_id, "answered", allow) };
     }
-    case "child_session_spawned": {
+    case "child_created": {
       const index = scope.items.findIndex((item) => item.kind === "tool" && item.callId === event.call_id);
       const requested = index === -1 ? null : (scope.items[index] as ToolItem);
       const spawned: SubagentItem = {
         kind: "subagent",
         callId: event.call_id,
-        childSessionId: event.child_session_id,
+        childSessionId: event.child_id,
         agent: event.agent,
         args: requested?.args ?? {},
         items: [],
         childSampleId: null,
         isError: false,
+        finished: false,
         sampleId: requested?.sampleId ?? openSample,
         content: "",
         final: false,
@@ -311,70 +373,220 @@ const reduceItems = (scope: ItemScope, event: SessionEvent): ItemScope => {
   }
 };
 
-const routeChild = (items: TranscriptItem[], childSessionId: string, event: SessionEvent): TranscriptItem[] => {
+const routeChild = (items: TranscriptItem[], childId: string, event: SessionEvent): TranscriptItem[] => {
   let changed = false;
-
-  const next = items.map((item) => {
+  const next = items.map((item): TranscriptItem => {
     if (item.kind !== "subagent") return item;
-
-    if (item.childSessionId === childSessionId) {
+    if (item.childSessionId === childId) {
+      if (event.type === "agent_finished") {
+        changed = true;
+        return {
+          ...item,
+          result: event.result,
+          isError: false,
+          final: true,
+          finished: true,
+          items: finalizeItems(item.items),
+        };
+      }
+      if (!item.finished && (event.type === "input_queued" || event.type === "turn_started")) {
+        changed = true;
+        return {
+          ...item,
+          result: undefined,
+          isError: false,
+          final: false,
+          childSampleId: null,
+        };
+      }
+      if (event.type === "turn_failed" || event.type === "turn_interrupted" || event.type === "turn_cancelled") {
+        if (item.final) return item;
+        changed = true;
+        return {
+          ...item,
+          result: event.type === "turn_failed" ? event.error : event.reason,
+          isError: event.type !== "turn_cancelled",
+          final: true,
+          items: finalizeItems(updateAsks(item.items, null, "expired")),
+        };
+      }
       const scope = reduceItems({ items: item.items, sampleId: item.childSampleId }, event);
       if (scope.items === item.items && scope.sampleId === item.childSampleId) return item;
       changed = true;
       return { ...item, items: scope.items, childSampleId: scope.sampleId };
     }
-
-    const nested = routeChild(item.items, childSessionId, event);
+    const nested = routeChild(item.items, childId, event);
     if (nested === item.items) return item;
     changed = true;
     return { ...item, items: nested };
   });
-
   return changed ? next : items;
 };
 
-const reduce = (state: ChatState, frame: Emitted, sessionId: string): Partial<ChatState> => {
-  const event = frame.event;
-  const last = state.turns[state.turns.length - 1];
+const interruptActor = (state: ChatState, agentId: string, rootId: string): Turn[] => {
+  if (agentId === rootId) {
+    return state.turns.map((turn) =>
+      turn.status === "queued" || turn.status === "running"
+        ? { ...turn, status: "interrupted", items: finalizeItems(updateAsks(turn.items, null, "expired")) }
+        : { ...turn, items: updateAsks(turn.items, null, "expired") },
+    );
+  }
+  return state.turns.map((turn) => ({
+    ...turn,
+    items: routeChild(turn.items, agentId, { type: "turn_interrupted", turn_id: "", reason: "interrupted" }),
+  }));
+};
 
-  if (frame.session_id !== sessionId) {
-    if (last === undefined) return {};
-    const items = routeChild(last.items, frame.session_id, event);
-    return items === last.items ? {} : { turns: mapLast(state.turns, (turn) => ({ ...turn, items })) };
+export const reduceEventFrame = (state: ChatState, frame: EventFrame, rootId: string): Partial<ChatState> => {
+  if (frame.seq <= (state.cursors[frame.agent_id] ?? 0)) return {};
+  const event = frame.event;
+  const lifecycle = withWork(state, frame.agent_id, event);
+  const finishedAgent = event.type === "input_queued" ? FINISHED_INPUT.exec(event.input)?.[1] : undefined;
+  const active = finishedAgent === undefined ? lifecycle.active : { ...lifecycle.active, [finishedAgent]: false };
+  const work = finishedAgent === undefined ? lifecycle.work : { ...lifecycle.work, [finishedAgent]: [] };
+  const finishedActors =
+    event.type === "agent_finished"
+      ? { ...state.finishedActors, [frame.agent_id]: true }
+      : finishedAgent === undefined
+        ? state.finishedActors
+        : { ...state.finishedActors, [finishedAgent]: true };
+  const base = {
+    cursors: { ...state.cursors, [frame.agent_id]: frame.seq },
+    active,
+    work,
+    finishedActors,
+  };
+  if (frame.agent_id !== rootId) {
+    const ignoredRestart =
+      state.finishedActors[frame.agent_id] && (event.type === "input_queued" || event.type === "turn_started");
+    return {
+      ...base,
+      turns: ignoredRestart
+        ? state.turns
+        : state.turns.map((turn) => ({ ...turn, items: routeChild(turn.items, frame.agent_id, event) })),
+    };
   }
 
   switch (event.type) {
-    case "turn_started": {
-      if (last?.id === event.turn_id) return {};
+    case "input_queued": {
+      if (state.turns.some((turn) => turn.id === event.command_id)) return base;
       const { text, attachments } = parseInput(event.input);
-      const turn: Turn = { id: event.turn_id, input: text, attachments, items: [], status: "running" };
-      return { turns: [...state.turns, turn], sampleId: null };
+      return {
+        ...base,
+        turns: [
+          ...state.turns,
+          {
+            id: event.command_id,
+            input: text,
+            attachments,
+            items: [],
+            status: "queued",
+            synthetic: SYNTHETIC_INPUT.test(text),
+          },
+        ],
+        active: { ...active, [rootId]: true },
+        sampleId: state.turns.some((turn) => turn.status === "running") ? state.sampleId : null,
+      };
     }
-    case "turn_completed":
+    case "turn_started": {
+      const found = state.turns.some((turn) => turn.id === event.turn_id);
+      const parsed = parseInput(event.input);
       return {
-        turns: mapTurn(state.turns, event.turn_id, (turn) => ({
-          ...turn,
-          status: event.stop_reason === "cancelled" ? "cancelled" : "done",
-          items: finalizeItems(turn.items),
-        })),
+        ...base,
+        turns: found
+          ? mapTurn(state.turns, event.turn_id, (turn) => ({ ...turn, status: "running" }))
+          : [
+              ...state.turns,
+              {
+                id: event.turn_id,
+                input: parsed.text,
+                attachments: parsed.attachments,
+                items: [],
+                status: "running",
+                synthetic: SYNTHETIC_INPUT.test(parsed.text),
+              },
+            ],
+        active: { ...active, [rootId]: true },
         sampleId: null,
       };
-    case "turn_failed":
+    }
+    case "turn_completed": {
+      const turns = mapTurn(state.turns, event.turn_id, (turn) => ({
+        ...turn,
+        status: event.stop_reason === "cancelled" ? "cancelled" : "done",
+        items: finalizeItems(turn.items),
+      }));
       return {
-        turns: mapTurn(state.turns, event.turn_id, (turn) => ({
-          ...turn,
-          status: "failed",
-          error: event.error,
-          items: finalizeItems(turn.items),
-        })),
+        ...base,
+        turns,
+        active: {
+          ...active,
+          [rootId]: (work[rootId]?.length ?? 0) > 0,
+        },
         sampleId: null,
       };
+    }
+    case "turn_failed": {
+      const turns = mapTurn(state.turns, event.turn_id, (turn) => ({
+        ...turn,
+        status: "failed",
+        error: event.error,
+        items: finalizeItems(updateAsks(turn.items, null, "expired")),
+      }));
+      return {
+        ...base,
+        turns,
+        active: {
+          ...active,
+          [rootId]: (work[rootId]?.length ?? 0) > 0,
+        },
+        sampleId: null,
+      };
+    }
+    case "turn_cancelled": {
+      const turns = mapTurn(state.turns, event.turn_id, (turn) => ({
+        ...turn,
+        status: "cancelled",
+        error: event.reason,
+        items: finalizeItems(updateAsks(turn.items, null, "expired")),
+      }));
+      return {
+        ...base,
+        turns,
+        active: {
+          ...active,
+          [rootId]: (work[rootId]?.length ?? 0) > 0,
+        },
+        sampleId: null,
+      };
+    }
+    case "turn_interrupted": {
+      const turns = mapTurn(state.turns, event.turn_id, (turn) => ({
+        ...turn,
+        status: "interrupted",
+        error: event.reason,
+        items: finalizeItems(updateAsks(turn.items, null, "expired")),
+      }));
+      return {
+        ...base,
+        turns,
+        active: {
+          ...active,
+          [rootId]: (work[rootId]?.length ?? 0) > 0,
+        },
+        sampleId: null,
+      };
+    }
     default: {
-      if (last === undefined) return {};
-      const scope = reduceItems({ items: last.items, sampleId: state.sampleId }, event);
-      if (scope.items === last.items && scope.sampleId === state.sampleId) return {};
+      const running = state.turns.findLastIndex((turn) => turn.status === "running");
+      const index = running === -1 ? state.turns.findLastIndex((turn) => turn.status === "queued") : running;
+      if (index === -1) return base;
+      const turn = state.turns[index];
+      const scope = reduceItems({ items: turn.items, sampleId: state.sampleId }, event);
+      if (scope.items === turn.items && scope.sampleId === state.sampleId) return base;
       return {
-        turns: mapLast(state.turns, (turn) => ({ ...turn, items: scope.items })),
+        ...base,
+        turns: state.turns.map((item, position) => (position === index ? { ...item, items: scope.items } : item)),
         sampleId: scope.sampleId,
       };
     }
@@ -387,8 +599,26 @@ export const createChatStore = (sessionId: string) =>
     ready: false,
     banner: null,
     sampleId: null,
-    dispatch: (frame) => set((state) => reduce(state, frame, sessionId)),
-    reset: () => set({ turns: [], banner: null, sampleId: null }),
+    cursors: {},
+    active: {},
+    work: {},
+    finishedActors: {},
+    dispatch: (frame) => set((state) => reduceEventFrame(state, frame, sessionId)),
+    subscriptionReady: (frame) =>
+      set((state) => ({
+        ready: frame.agent_id === sessionId ? true : state.ready,
+        active: {
+          ...state.active,
+          [frame.agent_id]: frame.active && !state.finishedActors[frame.agent_id],
+        },
+        work: frame.active ? state.work : { ...state.work, [frame.agent_id]: [] },
+        turns: frame.active ? state.turns : interruptActor(state, frame.agent_id, sessionId),
+      })),
+    expireAsk: (frame) =>
+      set((state) => ({
+        turns: state.turns.map((turn) => ({ ...turn, items: updateAsks(turn.items, frame.ask_id, "expired") })),
+        banner: { kind: "error", message: frame.message },
+      })),
     setReady: (ready) => set({ ready }),
     setBanner: (banner) => set({ banner }),
   }));

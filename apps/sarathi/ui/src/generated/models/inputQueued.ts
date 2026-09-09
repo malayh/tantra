@@ -5,9 +5,10 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface CancelRequested {
+export interface InputQueued {
   version?: number;
-  type?: 'cancel_requested';
-  turn_id: string;
+  type?: 'input_queued';
+  command_id: string;
+  input: string;
   [key: string]: unknown;
  }

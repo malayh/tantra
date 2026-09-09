@@ -8,6 +8,8 @@ import type { Attachment } from './attachment';
 
 export interface UserMessageFrame {
   type?: 'user_message';
+  /** @pattern ^[0-9a-f]{32}$ */
+  command_id: string;
   text: string;
   attachments?: Attachment[];
 }

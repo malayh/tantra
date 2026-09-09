@@ -22,4 +22,4 @@ If the Runtime closes or the process dies, the future is gone. The unfinished tu
 
 Connecting or subscribing never activates an actor. After a crash, a later root send activates the root, records an unmatched started turn as interrupted, and drains inputs that were accepted but never started. Model and tool work from the interrupted turn is never repeated automatically.
 
-A shared store does not coordinate live execution across processes. Route one root tree to one Runtime process. Writer generations and subscriber wakeups are process-local; Tantra has no lease, heartbeat, distributed lock, or cross-process event bus.
+A shared store does not coordinate live execution across processes. Route one root tree to one Runtime process. Writer generations and subscriber wakeups are process-local; Tantra has no heartbeat, distributed lock, or cross-process event bus.

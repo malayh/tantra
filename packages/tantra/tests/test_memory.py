@@ -8,14 +8,11 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from tantra.adapters.collect import collect
 from tantra.agent import Agent
 from tantra.errors import CorruptLog, TantraError
-from tantra.events import ToolCallCompleted, TurnCompleted
-from tantra.harness import Harness
+from tantra.events import ToolCallCompleted
 from tantra.memory import BuiltinMemory, MemoryRecord, MemoryWrite, memory_recall, memory_tools, memory_write
 from tantra.providers.base import ToolCall
-from tantra.providers.fake import FakeProvider, Sample
 from tantra.stores.fs import FileSystemStore
 from tantra.stores.memory import MemoryStore
 
@@ -99,14 +96,6 @@ def results(events: list[Any]) -> dict[str, ToolCallCompleted]:
 
 def picks(events: list[Any], kind: Any) -> list[Any]:
     return [item.event for item in events if isinstance(item.event, kind)]
-
-
-async def build(samples: list[Sample], *, with_memory: bool = True) -> tuple[Harness, BuiltinMemory | None, str]:
-    store = MemoryStore()
-    memory = BuiltinMemory(store) if with_memory else None
-    harness = Harness(FakeProvider(samples), store, [Librarian], default_model="fake/model", memory=memory)
-    header = await harness.create_session(Librarian)
-    return harness, memory, header.id
 
 
 async def test_three_memories_recall_with_the_match_first_and_every_hit_marked_keyword(store: Any) -> None:
@@ -445,108 +434,3 @@ async def test_memory_rows_are_invisible_to_session_listing(tmp_path: Path) -> N
     await BuiltinMemory(store).write(MIMIR)
 
     assert await store.list() == []
-
-
-async def test_the_tools_write_and_recall_through_a_turn_without_leaking_vectors_or_metadata() -> None:
-    written = json.dumps(
-        {
-            "kind": "fact",
-            "title": MIMIR.title,
-            "body": MIMIR.body,
-            "tags": ["dashboard"],
-            "entities": ["mimir"],
-        }
-    )
-    harness, memory, sid = await build(
-        [
-            Sample(tool_calls=[call("memory_write", written, cid="w1")]),
-            Sample(tool_calls=[call("memory_recall", json.dumps({"query": QUERY}), cid="r1")]),
-            Sample(text="noted"),
-        ]
-    )
-
-    events = await collect(harness.run(sid, "remember where p99 comes from"))
-
-    completed = results(events)
-    assert not completed["w1"].is_error
-    mid = completed["w1"].result
-    assert (await memory.get(mid)).title == MIMIR.title
-
-    recalled = completed["r1"].result
-    assert not completed["r1"].is_error
-    assert [row["title"] for row in recalled] == [MIMIR.title]
-    assert recalled[0]["id"] == mid
-    assert recalled[0]["mode"] == "keyword"
-    assert set(recalled[0]) == {"id", "kind", "title", "body", "tags", "entities", "score", "mode"}
-    assert picks(events, TurnCompleted)[0].stop_reason == "completed"
-
-
-async def test_memory_tools_factory_stamps_scope_metadata_and_recall_stays_in_scope() -> None:
-    store = MemoryStore()
-    memory = BuiltinMemory(store)
-    samples = [
-        Sample(tool_calls=[call("memory_write", WRITE_ARGS, cid="w1")]),
-        Sample(text="saved"),
-        Sample(tool_calls=[call("memory_recall", json.dumps({"query": QUERY}), cid="r1")]),
-        Sample(text="nothing here"),
-        Sample(tool_calls=[call("memory_recall", json.dumps({"query": QUERY}), cid="r2")]),
-        Sample(text="found it"),
-    ]
-    harness = Harness(
-        FakeProvider(samples),
-        store,
-        [Scribe],
-        default_model="fake/model",
-        memory=memory,
-        deps_factory=lambda header: {"user": header.metadata["user"]},
-    )
-    alice = await harness.create_session(Scribe, {"user": "alice"})
-    bob = await harness.create_session(Scribe, {"user": "bob"})
-
-    written = results(await collect(harness.run(alice.id, "remember where p99 comes from")))["w1"]
-    theirs = results(await collect(harness.run(bob.id, "what do you know about p99")))["r1"]
-    ours = results(await collect(harness.run(alice.id, "what do you know about p99")))["r2"]
-
-    assert not written.is_error
-    assert (await memory.get(written.result)).metadata == {"user": "alice"}
-    assert theirs.result == []
-    assert [row["id"] for row in ours.result] == [written.result]
-
-    writer, reader = Scribe.tools
-    assert "metadata" not in writer.schema.parameters["properties"]
-    assert "metadata" not in reader.schema.parameters["properties"]
-
-
-async def test_unscoped_memory_tools_behave_as_before() -> None:
-    harness, memory, sid = await build(
-        [
-            Sample(tool_calls=[call("memory_write", WRITE_ARGS, cid="w1")]),
-            Sample(tool_calls=[call("memory_recall", json.dumps({"query": QUERY}), cid="r1")]),
-            Sample(text="noted"),
-        ]
-    )
-    fresh_write, fresh_recall = memory_tools()
-
-    completed = results(await collect(harness.run(sid, "remember where p99 comes from")))
-
-    mid = completed["w1"].result
-    assert (await memory.get(mid)).metadata == {}
-    assert [row["id"] for row in completed["r1"].result] == [mid]
-    assert (fresh_write.schema, fresh_recall.schema) == (memory_write.schema, memory_recall.schema)
-
-
-async def test_a_harness_without_memory_turns_a_write_into_an_error_result_not_a_failed_turn() -> None:
-    harness, _, sid = await build(
-        [
-            Sample(tool_calls=[call("memory_write", json.dumps({"kind": "fact", "title": "t", "body": "b"}), "w1")]),
-            Sample(text="recovered"),
-        ],
-        with_memory=False,
-    )
-
-    events = await collect(harness.run(sid, "remember this"))
-
-    completed = results(events)["w1"]
-    assert completed.is_error
-    assert "no memory configured" in completed.result
-    assert picks(events, TurnCompleted)[0].stop_reason == "completed"

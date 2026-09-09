@@ -9,7 +9,7 @@ Manual-but-agent-driven end-to-end pass over the compose stack. Executed by Clau
   - `SARATHI_MODELS` — csv, **at least two** real cheap models (first = default). Scenario 9 needs two.
   - `BRAVE_API_KEY` — required; without it `web_search` is silently dropped and scenarios 3/5/8 cannot pass.
   - `SECRET_KEY`, `NEXTAUTH_SECRET` — any non-empty strings.
-- `docker compose up -d --build` from `apps/sarathi/`. After editing `.env`, recreate with `docker compose up -d backend` — `docker compose restart` keeps the old env.
+- `docker compose up -d --build` from `apps/sarathi/`, with exactly one backend process and fresh database storage. After editing `.env`, recreate with `docker compose up -d backend` — `docker compose restart` keeps the old env.
 - `docker compose ps` → `db` healthy, `backend` healthy, `ui` healthy, `migrate` exited 0.
 - UI: <http://localhost:3000> · API: <http://localhost:8000> (`GET /api/health` → ok).
 - Thoughts (scenario 2) only appear if the endpoint emits reasoning deltas. Not a bug in the app — SKIP with the model named.
@@ -149,17 +149,17 @@ Per-page distinctive facts:
 2. Wait for the approval card. **Do not answer it.**
 3. From `apps/sarathi/`: `docker compose restart backend`. Wait for `docker compose ps` to show `backend` healthy again.
 4. Reload the browser page (F5).
-5. On the reloaded page, click `Approve`.
-6. When the turn completes, open the memory panel (brain icon in the sidebar footer).
+5. Confirm the old approval is expired, then send the original request again.
+6. Approve the new live card. When the turn completes, open the memory panel (brain icon in the sidebar footer).
 7. `New chat` (same user A). Send: `What do I prefer in code reviews? Check what you remember.`
 8. Log out. Sign up user **B** (`b-<runid>@example.com`). Open B's memory panel, then send B: `What do I prefer in code reviews?`
 
 **Expect**
 
 - Step 2: a card titled `Run memory_write?` with the tool arguments in a body block and `Approve` / `Deny` buttons; the composer is locked; the `Stop` button is **not** offered while an ask is pending.
-- Step 3–4: after the restart + reload the page reconnects (connection dot green), the transcript replays the whole turn so far, and **the approval card re-renders as pending** — exactly one card, not two. This is the durable-ask proof; FAIL if the card is gone, duplicated, or already shows Approved/Denied.
-- Step 5: the card flips to `Approved`, a `memory_write` chip completes, and the turn finishes with a confirming answer.
-- Step 6: the panel lists a row whose title/body carries the failure-modes preference (kind label above it). Not "No memories yet".
+- Step 3–4: after the restart + reload the page reconnects (connection dot green), the transcript replays the whole turn so far, marks the unmatched work interrupted, and shows the approval as expired. It must not offer a live Approve action.
+- Step 5: accepting the new human message durably records the prior interruption and starts new work; exactly one new pending approval card appears.
+- Step 6: the card flips to `Approved`, a `memory_write` chip completes, and the panel lists a row carrying the failure-modes preference.
 - Step 7: in a **fresh session**, the answer states the preference; usually a `memory_recall` chip is visible (chip optional, correct recall is not).
 - Step 8: B's memory panel says `No memories yet`, and B's answer does **not** know A's preference (a `memory_recall` chip returning nothing is fine). FAIL on any leak across accounts.
 - Log back in as A afterwards — the remaining scenarios run as A.
@@ -231,12 +231,12 @@ Per-page distinctive facts:
 **Expect**
 
 - After reload the connection dot goes green and the transcript **replays the persisted turn**: the user message plus every **completed** item — the finished `web_search` chip and any finalised text/thinking blocks — in order, no duplicates.
-- **Deltas are not persisted.** The sample that was interrupted mid-stream left only its start in the log, so the partial text on screen before the reload does **not** come back, and resume issues a **brand-new sample** — the answer regenerates from scratch. That is correct behaviour, not a defect.
-- **Pass criterion:** the turn resumes on the new socket and runs to completion with a coherent, complete final answer, and the composer unlocks at the end. Do **not** assert the post-reload text matches what was on screen before it.
+- Streaming deltas are persisted. The partial text before reload replays from the root actor journal, then the same process-local task continues without starting a replacement sample.
+- **Pass criterion:** the reconnect subscribes from the browser's fresh cursor, replays each actor without duplicates, continues to a coherent final answer, and unlocks the composer.
 - The theme chosen in step 1 survives the reload (no flash back to the default dark).
 - Re-reload after completion: the finished transcript replays identically and no turn restarts.
 
-**Note — busy toast on reload:** the new connection can race the old one's 60s lease and surface `Another turn is running — retry in Ns`. If that happens, wait out the stated retry and reload once more. This does **not** consume the flaky re-run.
+**Writer takeover:** opening the same session in a second tab transfers writable authority. The first tab must stop reconnecting and show a reload-to-reclaim banner; reloading it may reclaim authority from the second tab.
 
 ---
 
@@ -298,7 +298,7 @@ Copy into `e2e/reports/<YYYY-MM-DD>.md` and fill.
 - **Notes:**
 
 ### 6 — Memory HITL + durability + scoping · PASS/FAIL/SKIP
-- **Evidence:** card pending → `docker compose restart backend` → reload → card re-rendered (1 card) → Approve → panel row → fresh-session recall → user B isolated
+- **Evidence:** card pending → `docker compose restart backend` → reload → interrupted/expired → resend → Approve → panel row → fresh-session recall → user B isolated
 - **Notes:**
 
 ### 7 — Deny path · PASS/FAIL/SKIP
@@ -314,8 +314,8 @@ Copy into `e2e/reports/<YYYY-MM-DD>.md` and fill.
 - **Notes:**
 
 ### 10 — Reconnect + theme · PASS/FAIL/SKIP
-- **Evidence:** completed items replayed, turn re-sampled and completed coherently, composer unlocked, theme survived
-- **Busy toast on reload:** yes/no (waited out + reloaded once — not a flaky re-run)
+- **Evidence:** persisted deltas replayed, same live turn completed coherently, composer unlocked, theme survived
+- **Writer takeover banner:** PASS/FAIL
 - **Notes:**
 
 ## Deviations from spec

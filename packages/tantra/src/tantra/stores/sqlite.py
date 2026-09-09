@@ -3,14 +3,14 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
-from tantra.errors import CorruptLog, InvalidCommandReuse, SeqConflict, SessionExists, SessionNotFound
-from tantra.events import InputQueued, Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
+from tantra.errors import CorruptLog, InvalidCommandReuse, SessionExists, SessionNotFound
+from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
 from tantra.stores.base import UNSET, EnqueueResult, apply_patch, select_headers, select_memories
 
@@ -23,8 +23,7 @@ SCHEMA = (
         header TEXT NOT NULL,
         created_at TEXT NOT NULL,
         parent_id TEXT,
-        last_seq INTEGER NOT NULL DEFAULT 0,
-        lease TEXT
+        last_seq INTEGER NOT NULL DEFAULT 0
     )
     """,
     """
@@ -58,31 +57,28 @@ class SQLiteStore:
 
     async def create(self, header: SessionHeader) -> None:
         stored = header.model_copy(deep=True)
-        stored.lease = None
         with self._write() as conn:
             existing = conn.execute("SELECT 1 FROM sessions WHERE id = ?", (header.id,)).fetchone()
             if existing is not None:
                 raise SessionExists(header.id)
             conn.execute(
-                "INSERT INTO sessions (id, header, created_at, parent_id, last_seq, lease) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO sessions (id, header, created_at, parent_id, last_seq) VALUES (?, ?, ?, ?, ?)",
                 (
                     stored.id,
                     stored.model_dump_json(),
                     stored.created_at.isoformat(),
                     stored.parent_id,
                     stored.last_seq,
-                    None,
                 ),
             )
 
     async def header(self, sid: str) -> SessionHeader | None:
         with self._connect() as conn:
-            row = conn.execute("SELECT header, last_seq, lease FROM sessions WHERE id = ?", (sid,)).fetchone()
+            row = conn.execute("SELECT header, last_seq FROM sessions WHERE id = ?", (sid,)).fetchone()
         return _hydrate(row) if row is not None else None
 
     async def put_header(self, h: SessionHeader) -> None:
         stored = h.model_copy(deep=True)
-        stored.lease = None
         with self._write() as conn:
             row = conn.execute("SELECT last_seq FROM sessions WHERE id = ?", (h.id,)).fetchone()
             if row is None:
@@ -98,6 +94,7 @@ class SQLiteStore:
         sid: str,
         *,
         title: str | None = UNSET,
+        model: str | None = UNSET,
         status: SessionStatus = UNSET,
         pending_ask: str | None = UNSET,
         usage: Usage = UNSET,
@@ -105,7 +102,7 @@ class SQLiteStore:
         finished: bool = UNSET,
     ) -> SessionHeader:
         with self._write() as conn:
-            row = conn.execute("SELECT header, last_seq, lease FROM sessions WHERE id = ?", (sid,)).fetchone()
+            row = conn.execute("SELECT header, last_seq FROM sessions WHERE id = ?", (sid,)).fetchone()
             if row is None:
                 raise SessionNotFound(sid)
             current = SessionHeader.model_validate_json(row[0])
@@ -113,6 +110,7 @@ class SQLiteStore:
             stored = apply_patch(
                 current,
                 title=title,
+                model=model,
                 status=status,
                 pending_ask=pending_ask,
                 usage=usage,
@@ -120,17 +118,14 @@ class SQLiteStore:
                 finished=finished,
             )
             conn.execute("UPDATE sessions SET header = ? WHERE id = ?", (stored.model_dump_json(), sid))
-            stored.lease = _lease(row[2])
             return stored
 
-    async def append(self, sid: str, events: Sequence[SessionEvent], *, expect_seq: int | None) -> int:
+    async def append(self, sid: str, events: Sequence[SessionEvent]) -> int:
         with self._write() as conn:
             row = conn.execute("SELECT header, last_seq FROM sessions WHERE id = ?", (sid,)).fetchone()
             if row is None:
                 raise SessionNotFound(sid)
             last_seq = row[1]
-            if expect_seq is not None and expect_seq != last_seq:
-                raise SeqConflict(f"{sid}: expected seq {last_seq}, got {expect_seq}")
             header = SessionHeader.model_validate_json(row[0])
             seq = last_seq
             rows = []
@@ -204,31 +199,9 @@ class SQLiteStore:
         before: str | None = None,
     ) -> list[SessionHeader]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT header, last_seq, lease FROM sessions").fetchall()
+            rows = conn.execute("SELECT header, last_seq FROM sessions").fetchall()
         headers = [_hydrate(row) for row in rows]
         return select_headers(headers, metadata=metadata, parent_id=parent_id, limit=limit, before=before)
-
-    async def acquire_lease(self, sid: str, holder: str, ttl: float) -> bool:
-        with self._write() as conn:
-            row = conn.execute("SELECT lease FROM sessions WHERE id = ?", (sid,)).fetchone()
-            if row is None:
-                raise SessionNotFound(sid)
-            now = datetime.now(UTC)
-            lease = _lease(row[0])
-            if lease is not None and lease.holder != holder and lease.expires_at > now:
-                return False
-            fresh = Lease(holder=holder, expires_at=now + timedelta(seconds=ttl))
-            conn.execute("UPDATE sessions SET lease = ? WHERE id = ?", (fresh.model_dump_json(), sid))
-            return True
-
-    async def release_lease(self, sid: str, holder: str) -> None:
-        with self._write() as conn:
-            row = conn.execute("SELECT lease FROM sessions WHERE id = ?", (sid,)).fetchone()
-            if row is None:
-                return
-            lease = _lease(row[0])
-            if lease is not None and lease.holder == holder:
-                conn.execute("UPDATE sessions SET lease = NULL WHERE id = ?", (sid,))
 
     async def memory_put(self, row: MemoryRecord) -> None:
         with self._write() as conn:
@@ -280,12 +253,7 @@ class SQLiteStore:
 def _hydrate(row: tuple[Any, ...]) -> SessionHeader:
     header = SessionHeader.model_validate_json(row[0])
     header.last_seq = row[1]
-    header.lease = _lease(row[2])
     return header
-
-
-def _lease(raw: str | None) -> Lease | None:
-    return Lease.model_validate_json(raw) if raw else None
 
 
 def _parse(sid: str, raw: str) -> Stamped:

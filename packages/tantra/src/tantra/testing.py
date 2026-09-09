@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 import threading
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from tantra.errors import InvalidCommandReuse, SeqConflict, SessionExists, SessionNotFound
+from tantra.errors import InvalidCommandReuse, SessionExists, SessionNotFound
 from tantra.events import (
     AgentFinished,
     CancellationRequested,
@@ -35,10 +34,6 @@ from tantra.stores.base import Store, reduce_journal
 StoreFactory = Callable[[], Store]
 
 CONTENDERS = 8
-CONTENTION_ROUNDS = 40
-SWITCH_INTERVAL = 1e-6
-LEASE_TTL = 0.3
-EXPIRY_DEADLINE = 10.0
 
 
 async def store_conformance(store_factory: StoreFactory) -> None:
@@ -47,9 +42,6 @@ async def store_conformance(store_factory: StoreFactory) -> None:
     `store_factory` must return a Store over the same underlying storage on every call — separate
     instances stand in for separate processes. It is called from worker threads, so it must build
     a store without touching a running event loop.
-
-    The lease-contention check races real threads and shortens the interpreter's thread switch
-    interval while it runs, so that a backend whose critical section is unguarded actually loses.
 
     `setup()` is called twice on purpose: it must be idempotent.
 
@@ -65,16 +57,11 @@ async def store_conformance(store_factory: StoreFactory) -> None:
     await _check_enqueue(store_factory)
     await _check_mixed_journal_contention(store_factory)
     await _check_journal_reduction(store_factory)
-    await _check_stale_expect_seq(store_factory)
-    await _check_blind_append(store_factory)
     await _check_put_header(store_factory)
     await _check_patch_header(store_factory)
     await _check_actor_persistence(store_factory)
     await _check_unknown_session(store_factory)
     await _check_list(store_factory)
-    await _check_lease(store_factory)
-    await _check_lease_expiry(store_factory)
-    await _check_lease_contention(store_factory)
     await _check_memory_rows(store_factory)
 
 
@@ -132,14 +119,13 @@ async def _check_create_and_header(factory: StoreFactory) -> None:
     assert loaded.depth == 0
     assert loaded.parent_id is None
     assert loaded.last_seq == 0
-    assert loaded.lease is None
 
 
 async def _check_create_rejects_a_duplicate(factory: StoreFactory) -> None:
     store = factory()
     header = _header()
     await store.create(header)
-    await store.append(header.id, [TextPart(sample_id="s1", text="one")], expect_seq=0)
+    await store.append(header.id, [TextPart(sample_id="s1", text="one")])
 
     await _expect(
         SessionExists,
@@ -159,8 +145,8 @@ async def _check_append_and_read(factory: StoreFactory) -> None:
     await store.create(header)
 
     events = _events()
-    assert await store.append(header.id, events[:3], expect_seq=0) == 3
-    assert await store.append(header.id, events[3:], expect_seq=3) == 6
+    assert await store.append(header.id, events[:3]) == 3
+    assert await store.append(header.id, events[3:]) == 6
 
     stamped = await _drain(factory(), header.id)
     assert [s.seq for s in stamped] == [1, 2, 3, 4, 5, 6]
@@ -179,7 +165,7 @@ async def _check_append_and_read(factory: StoreFactory) -> None:
     empty = _header()
     await store.create(empty)
     assert await _drain(store, empty.id) == []
-    assert await store.append(empty.id, [], expect_seq=0) == 0
+    assert await store.append(empty.id, []) == 0
 
 
 async def _check_read_page_and_deltas(factory: StoreFactory) -> None:
@@ -191,7 +177,7 @@ async def _check_read_page_and_deltas(factory: StoreFactory) -> None:
         ReasoningDelta(text="line one\nline two", signature="opaque"),
         ToolCallDelta(index=2, id="c-2", name="lookup", args_fragment='{"q":"\u03bb"}'),
     ]
-    await store.append(header.id, events, expect_seq=0)
+    await store.append(header.id, events)
 
     first = await factory().read_page(header.id, limit=2)
     second = await factory().read_page(header.id, after=first[-1].seq, limit=2)
@@ -272,7 +258,6 @@ async def _check_journal_reduction(factory: StoreFactory) -> None:
             TurnCompleted(turn_id=first.command_id, stop_reason="completed"),
             TurnStarted(turn_id=second.command_id, input=second.input),
         ],
-        expect_seq=None,
     )
 
     state = reduce_journal(await factory().read_page(header.id))
@@ -281,52 +266,11 @@ async def _check_journal_reduction(factory: StoreFactory) -> None:
     assert state.incomplete == TurnStarted(turn_id=second.command_id, input=second.input)
 
 
-async def _check_stale_expect_seq(factory: StoreFactory) -> None:
-    store = factory()
-    header = _header()
-    await store.create(header)
-    await store.append(header.id, [TextPart(sample_id="s1", text="one")], expect_seq=0)
-
-    for stale in (0, 5):
-        await _expect(
-            SeqConflict,
-            store.append(header.id, [TextPart(sample_id="s1", text="two")], expect_seq=stale),
-            f"append with expect_seq={stale} did not raise SeqConflict",
-        )
-
-    stamped = await _drain(factory(), header.id)
-    assert [s.seq for s in stamped] == [1]
-    loaded = await factory().header(header.id)
-    assert loaded is not None
-    assert loaded.last_seq == 1
-
-
-async def _check_blind_append(factory: StoreFactory) -> None:
-    store = factory()
-    header = _header()
-    await store.create(header)
-    await store.append(header.id, [TextPart(sample_id="s1", text="one")], expect_seq=0)
-
-    await _expect(
-        SeqConflict,
-        store.append(header.id, [TextPart(sample_id="s1", text="two")], expect_seq=0),
-        "append with a stale expect_seq did not raise SeqConflict",
-    )
-    assert await store.append(header.id, [TextPart(sample_id="s1", text="two")], expect_seq=None) == 2
-
-    stamped = await _drain(factory(), header.id)
-    assert [s.seq for s in stamped] == [1, 2]
-    loaded = await factory().header(header.id)
-    assert loaded is not None
-    assert loaded.last_seq == 2
-
-
 async def _check_put_header(factory: StoreFactory) -> None:
     store = factory()
     header = _header()
     await store.create(header)
-    await store.append(header.id, [TextPart(sample_id="s1", text="one")], expect_seq=0)
-    assert await store.acquire_lease(header.id, "worker-a", 30) is True
+    await store.append(header.id, [TextPart(sample_id="s1", text="one")])
 
     stale = await store.header(header.id)
     assert stale is not None
@@ -335,7 +279,6 @@ async def _check_put_header(factory: StoreFactory) -> None:
     stale.usage = Usage(input_tokens=11, output_tokens=3)
     stale.pending_ask = "ask-1"
     stale.last_seq = 0
-    stale.lease = None
     await store.put_header(stale)
 
     loaded = await factory().header(header.id)
@@ -345,24 +288,20 @@ async def _check_put_header(factory: StoreFactory) -> None:
     assert loaded.usage.input_tokens == 11
     assert loaded.pending_ask == "ask-1"
     assert loaded.last_seq == 1
-    assert loaded.lease is not None
-    assert loaded.lease.holder == "worker-a"
-
-    await store.release_lease(header.id, "worker-a")
 
 
 async def _check_patch_header(factory: StoreFactory) -> None:
     store = factory()
     header = _header(title="p99", metadata={"company": 42, "user": 7}, usage=Usage(input_tokens=9))
     await store.create(header)
-    await store.append(header.id, [TextPart(sample_id="s1", text="one")], expect_seq=0)
-    assert await store.acquire_lease(header.id, "worker-a", 30) is True
+    await store.append(header.id, [TextPart(sample_id="s1", text="one")])
 
     before = await store.header(header.id)
     assert before is not None
 
-    patched = await store.patch_header(header.id, title="renamed")
+    patched = await store.patch_header(header.id, title="renamed", model="other-model")
     assert patched.title == "renamed"
+    assert patched.model == "other-model"
     assert patched.status == "idle", "patch_header changed a field it was not given"
     assert patched.pending_ask is None, "patch_header changed a field it was not given"
     assert patched.finished is False, "patch_header changed a field it was not given"
@@ -370,7 +309,6 @@ async def _check_patch_header(factory: StoreFactory) -> None:
     assert patched.usage.input_tokens == 9, "patch_header changed a field it was not given"
     assert patched.updated_at > before.updated_at, "patch_header did not stamp updated_at"
     assert patched.last_seq == 1, "patch_header rewrote last_seq"
-    assert patched.lease is not None and patched.lease.holder == "worker-a", "patch_header dropped the lease"
     stored = await factory().header(header.id)
     assert stored is not None
     assert stored.model_dump() == patched.model_dump(), "patch_header returned something other than what it stored"
@@ -384,7 +322,6 @@ async def _check_patch_header(factory: StoreFactory) -> None:
     assert loaded is not None
     assert loaded.metadata == {"company": 42, "user": 8, "team": "sre"}
     assert loaded.last_seq == 1
-    assert loaded.lease is not None and loaded.lease.holder == "worker-a"
 
     usage = Usage(input_tokens=21, output_tokens=4)
     filled = await store.patch_header(header.id, usage=usage, pending_ask="ask-1", finished=True)
@@ -413,8 +350,6 @@ async def _check_patch_header(factory: StoreFactory) -> None:
     assert loaded.pending_ask is None
     assert loaded.finished is True
 
-    await store.release_lease(header.id, "worker-a")
-
 
 async def _check_unknown_session(factory: StoreFactory) -> None:
     store = factory()
@@ -426,7 +361,7 @@ async def _check_unknown_session(factory: StoreFactory) -> None:
 
     await _expect(
         SessionNotFound,
-        store.append(sid, [TextPart(sample_id="s1", text="x")], expect_seq=0),
+        store.append(sid, [TextPart(sample_id="s1", text="x")]),
         "append to an unknown session did not raise SessionNotFound",
     )
     await _expect(
@@ -438,11 +373,6 @@ async def _check_unknown_session(factory: StoreFactory) -> None:
         SessionNotFound,
         store.patch_header(sid, title="renamed"),
         "patch_header on an unknown session did not raise SessionNotFound",
-    )
-    await _expect(
-        SessionNotFound,
-        store.acquire_lease(sid, "worker-a", 30),
-        "acquire_lease on an unknown session did not raise SessionNotFound",
     )
 
 
@@ -468,50 +398,6 @@ async def _check_list(factory: StoreFactory) -> None:
     await store.create(child)
     assert [h.id for h in await reader.list(parent_id=made[0].id)] == [child.id]
     assert [h.id for h in await reader.list(metadata={"tag": tag}, parent_id=made[0].id)] == [child.id]
-
-
-async def _check_lease(factory: StoreFactory) -> None:
-    worker_a = factory()
-    worker_b = factory()
-    header = _header()
-    await worker_a.create(header)
-
-    assert await worker_a.acquire_lease(header.id, "worker-a", 30) is True
-    assert await worker_b.acquire_lease(header.id, "worker-b", 30) is False
-    assert await worker_a.acquire_lease(header.id, "worker-a", 30) is True
-
-    loaded = await worker_b.header(header.id)
-    assert loaded is not None
-    assert loaded.lease is not None
-    assert loaded.lease.holder == "worker-a"
-
-    await worker_b.release_lease(header.id, "worker-b")
-    assert await worker_b.acquire_lease(header.id, "worker-b", 30) is False
-
-    await worker_a.release_lease(header.id, "worker-a")
-    loaded = await worker_b.header(header.id)
-    assert loaded is not None
-    assert loaded.lease is None
-    assert await worker_b.acquire_lease(header.id, "worker-b", 30) is True
-    await worker_b.release_lease(header.id, "worker-b")
-
-
-async def _check_lease_expiry(factory: StoreFactory) -> None:
-    worker_a = factory()
-    worker_b = factory()
-    header = _header()
-    await worker_a.create(header)
-
-    assert await worker_a.acquire_lease(header.id, "worker-a", LEASE_TTL) is True
-    assert await worker_b.acquire_lease(header.id, "worker-b", 30) is False
-
-    deadline = asyncio.get_running_loop().time() + EXPIRY_DEADLINE
-    while not await worker_b.acquire_lease(header.id, "worker-b", 30):
-        assert asyncio.get_running_loop().time() < deadline, "lease outlived its ttl"
-        await asyncio.sleep(0.02)
-
-    assert await worker_a.acquire_lease(header.id, "worker-a", 30) is False
-    await worker_b.release_lease(header.id, "worker-b")
 
 
 async def _check_memory_rows(factory: StoreFactory) -> None:
@@ -570,44 +456,9 @@ def _mixed_write_in_thread(
         if index % 2 == 0:
             await store.enqueue(sid, InputQueued(command_id=f"mixed-{index}", input=str(index)))
         else:
-            await store.append(sid, [TextDelta(text=str(index))], expect_seq=None)
+            await store.append(sid, [TextDelta(text=str(index))])
 
     asyncio.run(write())
-
-
-def _acquire_in_thread(factory: StoreFactory, sid: str, holder: str, barrier: threading.Barrier) -> bool:
-    async def attempt() -> bool:
-        store = factory()
-        barrier.wait(timeout=30)
-        return await store.acquire_lease(sid, holder, 30)
-
-    return asyncio.run(attempt())
-
-
-async def _check_lease_contention(factory: StoreFactory) -> None:
-    store = factory()
-    switch_interval = sys.getswitchinterval()
-    sys.setswitchinterval(SWITCH_INTERVAL)
-    try:
-        for _ in range(CONTENTION_ROUNDS):
-            header = _header()
-            await store.create(header)
-            barrier = threading.Barrier(CONTENDERS)
-
-            results = await asyncio.gather(
-                *(
-                    asyncio.to_thread(_acquire_in_thread, factory, header.id, f"worker-{index}", barrier)
-                    for index in range(CONTENDERS)
-                )
-            )
-            assert results.count(True) == 1, f"{results.count(True)} holders acquired one lease at once"
-
-            loaded = await factory().header(header.id)
-            assert loaded is not None
-            assert loaded.lease is not None
-            assert loaded.lease.holder == f"worker-{results.index(True)}"
-    finally:
-        sys.setswitchinterval(switch_interval)
 
 
 async def _check_actor_persistence(factory: StoreFactory) -> None:
@@ -619,7 +470,7 @@ async def _check_actor_persistence(factory: StoreFactory) -> None:
         CancellationRequested(command_id="cancel", targets={header.id: ["turn"]}),
         AgentFinished(result={"ok": True}),
     ]
-    await store.append(header.id, events, expect_seq=0)
+    await store.append(header.id, events)
     await store.patch_header(header.id, finished=True)
 
     loaded = await factory().header(header.id)

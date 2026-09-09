@@ -174,7 +174,9 @@ function AskCard({
             </Button>
           </>
         ) : (
-          <p className="text-muted-foreground text-xs">{item.allow === false ? "Denied" : "Approved"}</p>
+          <p className="text-muted-foreground text-xs">
+            {item.status === "expired" ? "Expired" : item.allow === false ? "Denied" : "Approved"}
+          </p>
         )}
       </CardFooter>
     </Card>
@@ -262,7 +264,7 @@ function TurnBlock({
 
   return (
     <div className="flex flex-col gap-3">
-      {(turn.input.length > 0 || turn.attachments.length > 0) && (
+      {!turn.synthetic && (turn.input.length > 0 || turn.attachments.length > 0) && (
         <div className="flex justify-end">
           <div className="bg-secondary text-secondary-foreground flex max-w-[80%] flex-col gap-2 rounded-2xl px-4 py-2 text-sm">
             {turn.attachments.length > 0 && (
@@ -291,6 +293,7 @@ function TurnBlock({
 
       {turn.status === "running" && empty && <p className="text-muted-foreground animate-pulse text-sm">Thinking…</p>}
       {turn.status === "cancelled" && <p className="text-muted-foreground text-xs">Stopped.</p>}
+      {turn.status === "interrupted" && <p className="text-muted-foreground text-xs">Interrupted.</p>}
       {turn.status === "failed" && (
         <div className="border-destructive/50 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm">
           {turn.error ?? "The turn failed."}

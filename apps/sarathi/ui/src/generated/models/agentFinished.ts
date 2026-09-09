@@ -5,11 +5,9 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface ChildSessionSpawned {
+export interface AgentFinished {
   version?: number;
-  type?: 'child_session_spawned';
-  call_id: string;
-  child_session_id: string;
-  agent: string;
+  type?: 'agent_finished';
+  result?: unknown;
   [key: string]: unknown;
  }

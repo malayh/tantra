@@ -6,6 +6,7 @@
  */
 
 export interface TextDelta {
+  version?: number;
   type?: 'text_delta';
   text: string;
   [key: string]: unknown;

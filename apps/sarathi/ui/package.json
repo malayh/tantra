@@ -7,7 +7,8 @@
     "build": "next build --turbopack",
     "start": "next start",
     "lint": "eslint && prettier --check .",
-    "typegen": "rm -rf ./src/generated && orval --config orval.config.js"
+    "typegen": "rm -rf ./src/generated && orval --config orval.config.js",
+    "test": "node --test src/app/chat/state.test.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",

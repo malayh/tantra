@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from tantra.context import TurnContext
-from tantra.events import SessionEvent, ToolCallRequested
-
-if TYPE_CHECKING:
-    from tantra.loop import Emitted
+from tantra.events import LoggedEvent, SessionEvent, ToolCallRequested
 
 
 @dataclass(frozen=True)
@@ -24,7 +21,7 @@ class Hook:
     """Lifecycle callbacks on the turn loop. Subclass and override only what you need."""
 
     async def before_turn(self, turn: TurnContext) -> None:
-        """Called once per `run()`, after `TurnStarted` is persisted. Not called on `resume()`."""
+        """Called once after `TurnStarted` is persisted."""
 
     async def before_sample(self, turn: TurnContext) -> None:
         """Called before every model call, including retried turns resumed in another process."""
@@ -37,7 +34,7 @@ class Hook:
         result the model can adapt to without ever invoking the tool.
 
         `Escalation` forces the permission verdict to at least `ask`, so the call goes through the
-        normal approval suspend/resume flow with the reason shown to the human. It does not stop the
+        normal approval flow with the reason shown to the human. It does not stop the
         rest of the chain: a later `Denial` still wins, and the first escalation's reason is used.
         """
 
@@ -47,5 +44,5 @@ class Hook:
     async def after_turn(self, turn: TurnContext, event: SessionEvent) -> None:
         """Called with the terminal `TurnCompleted` or `TurnFailed` once it is persisted."""
 
-    async def on_event(self, emitted: Emitted) -> None:
+    async def on_event(self, emitted: LoggedEvent) -> None:
         """Called for every emitted event."""

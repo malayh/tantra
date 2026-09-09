@@ -4,17 +4,11 @@ from typing import Any
 
 import pytest
 
-from tantra.adapters.collect import collect
 from tantra.agent import Agent
-from tantra.ask import Approval, ApprovalResponse
 from tantra.context import TurnContext
-from tantra.events import AskRaised, ToolCallCompleted, ToolCallRequested, ToolCallStarted, TurnCompleted
+from tantra.events import ToolCallRequested
 from tantra.extratools.shell import ShellGuard, bash
-from tantra.harness import Harness
 from tantra.hooks import Denial, Escalation
-from tantra.providers.base import ToolCall
-from tantra.providers.fake import FakeProvider, Sample
-from tantra.stores.memory import MemoryStore
 from tantra.tools import Context
 
 DESTRUCTIVE = [
@@ -386,126 +380,3 @@ class Shell(Agent):
 
 class AskingShell(Agent):
     tools = [bash()]
-
-
-async def build(samples: list[Sample], guard: ShellGuard) -> tuple[Harness, MemoryStore, str]:
-    store = MemoryStore()
-    harness = Harness(FakeProvider(samples), store, [Shell], default_model="fake/model", hooks=[guard])
-    sid = (await harness.create_session(Shell)).id
-    return harness, store, sid
-
-
-async def test_an_escalation_on_an_already_asking_tool_raises_exactly_one_ask() -> None:
-    store = MemoryStore()
-    harness = Harness(
-        FakeProvider([Sample(tool_calls=[ToolCall(id="c1", name="bash", args='{"command": "rm -rf /"}')])]),
-        store,
-        [AskingShell],
-        default_model="fake/model",
-        hooks=[ShellGuard(on_trip="ask")],
-    )
-    sid = (await harness.create_session(AskingShell)).id
-
-    opening = await collect(harness.run(sid, "clean up"))
-
-    raised = picks(opening, AskRaised)
-    assert len(raised) == 1
-    assert "filesystem root" in raised[0].request.body
-
-    second = Harness(
-        FakeProvider([Sample(text="understood")]),
-        store,
-        [AskingShell],
-        default_model="fake/model",
-        hooks=[ShellGuard(on_trip="ask")],
-    )
-    resumed = await collect(second.resume(sid, raised[0].ask_id, ApprovalResponse(allow=False)))
-
-    assert not picks(resumed, AskRaised)
-    assert picks(resumed, ToolCallCompleted)[0].result == "denied by user"
-    assert picks(resumed, TurnCompleted)[0].stop_reason == "completed"
-
-
-async def test_a_tripped_guard_denies_the_call_and_the_turn_completes() -> None:
-    harness, _, sid = await build(
-        [
-            Sample(tool_calls=[ToolCall(id="c1", name="bash", args='{"command": "sh -c \\"rm -rf /\\""}')]),
-            Sample(text="I will not do that"),
-        ],
-        ShellGuard(),
-    )
-
-    events = await collect(harness.run(sid, "wipe the disk"))
-
-    completed = picks(events, ToolCallCompleted)[0]
-    assert completed.is_error
-    assert completed.result.startswith("denied by hook: ")
-    assert "filesystem root" in completed.result
-    assert [event.call_id for event in picks(events, ToolCallStarted)] == [completed.call_id]
-    assert picks(events, TurnCompleted)[0].stop_reason == "completed"
-
-
-async def test_an_escalating_guard_suspends_with_the_reason_and_the_user_can_refuse() -> None:
-    harness, store, sid = await build(
-        [Sample(tool_calls=[ToolCall(id="c1", name="bash", args='{"command": "sh -c \\"rm -rf /\\""}')])],
-        ShellGuard(on_trip="ask"),
-    )
-
-    opening = await collect(harness.run(sid, "clean up"))
-
-    raised = picks(opening, AskRaised)[0]
-    assert isinstance(raised.request, Approval)
-    assert raised.request.extra == {"permission": "bash"}
-    assert "filesystem root" in raised.request.body
-    assert '"command"' in raised.request.body
-    assert not picks(opening, ToolCallStarted)
-    header = await store.header(sid)
-    assert header.status == "awaiting_input"
-    assert header.pending_ask == raised.ask_id
-
-    del harness
-    second = Harness(
-        FakeProvider([Sample(text="understood")]),
-        store,
-        [Shell],
-        default_model="fake/model",
-        hooks=[ShellGuard(on_trip="ask")],
-    )
-
-    resumed = await collect(second.resume(sid, raised.ask_id, ApprovalResponse(allow=False)))
-
-    completed = picks(resumed, ToolCallCompleted)[0]
-    assert completed.is_error
-    assert completed.result == "denied by user"
-    assert [event.call_id for event in picks(resumed, ToolCallStarted)] == [completed.call_id]
-    assert picks(resumed, TurnCompleted)[0].stop_reason == "completed"
-
-
-async def test_an_approved_escalation_runs_the_command_on_a_fresh_harness() -> None:
-    harness, store, sid = await build(
-        [Sample(tool_calls=[ToolCall(id="c1", name="bash", args='{"command": "echo approved"}')])],
-        ShellGuard(on_trip="ask", deny_extra=["echo"]),
-    )
-
-    opening = await collect(harness.run(sid, "say approved"))
-
-    raised = picks(opening, AskRaised)[0]
-    assert "'echo'" in raised.request.body
-    assert not picks(opening, ToolCallStarted)
-
-    del harness
-    second = Harness(
-        FakeProvider([Sample(text="done")]),
-        store,
-        [Shell],
-        default_model="fake/model",
-        hooks=[ShellGuard(on_trip="ask", deny_extra=["echo"])],
-    )
-
-    resumed = await collect(second.resume(sid, raised.ask_id, ApprovalResponse(allow=True)))
-
-    assert picks(resumed, ToolCallStarted)[0].call_id == "c1"
-    completed = picks(resumed, ToolCallCompleted)[0]
-    assert not completed.is_error
-    assert completed.result == "approved\n"
-    assert picks(resumed, TurnCompleted)[0].stop_reason == "completed"

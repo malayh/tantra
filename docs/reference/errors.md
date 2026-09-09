@@ -9,7 +9,6 @@
 | `WriterReplaced` | A newer writable connection owns the root tree |
 | `AskExpired` | The ask is not live in this Runtime |
 | `MaxDepthExceeded` | A spawn would exceed `Runtime.max_depth` |
-| `SeqConflict` | A low-level optimistic append used a stale sequence |
 | `ProviderError` | Provider request failed |
 
 Agent failures represented by terminal journal events return as `TurnResult`. Invalid calls, storage failures, and programming errors raise.

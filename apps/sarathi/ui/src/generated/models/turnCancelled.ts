@@ -5,9 +5,10 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface ReasoningDelta {
+export interface TurnCancelled {
   version?: number;
-  type?: 'reasoning_delta';
-  text: string;
+  type?: 'turn_cancelled';
+  turn_id: string;
+  reason?: string;
   [key: string]: unknown;
  }

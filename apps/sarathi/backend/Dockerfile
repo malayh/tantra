@@ -10,7 +10,6 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
 COPY packages/tantra ./packages/tantra
-COPY apps/agni/pyproject.toml ./apps/agni/pyproject.toml
 COPY apps/sarathi/backend ./apps/sarathi/backend
 
 RUN uv sync --frozen --package sarathi --no-dev

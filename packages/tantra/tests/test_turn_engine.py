@@ -15,6 +15,7 @@ from tantra.errors import ProviderError
 from tantra.events import (
     CompactionApplied,
     InputQueued,
+    LoggedEvent,
     ReasoningDelta,
     SessionEvent,
     SessionHeader,
@@ -27,7 +28,7 @@ from tantra.events import (
     Usage,
 )
 from tantra.hooks import Hook
-from tantra.loop import Emitted, RetryConfig, TurnEngine
+from tantra.loop import RetryConfig, TurnEngine
 from tantra.providers.base import ModelLimits, ProviderEvent, SampleRequest, ToolCall, ToolResultMessage
 from tantra.providers.fake import FAKE_LIMITS, FakeProvider, Sample
 from tantra.stores.memory import MemoryStore
@@ -334,7 +335,7 @@ async def test_hooks_transform_tools_and_receive_terminal() -> None:
         async def after_turn(self, turn: TurnContext, event: SessionEvent) -> None:
             calls.append("after_turn")
 
-        async def on_event(self, emitted: Emitted) -> None:
+        async def on_event(self, emitted: LoggedEvent) -> None:
             calls.append(type(emitted.event).__name__)
 
     class Bot(Agent):
@@ -436,7 +437,7 @@ async def test_notify_precedes_fallible_on_event_hook() -> None:
         pass
 
     class BrokenHook(Hook):
-        async def on_event(self, emitted: Emitted) -> None:
+        async def on_event(self, emitted: LoggedEvent) -> None:
             if isinstance(emitted.event, TextDelta):
                 raise RuntimeError("hook failed")
 

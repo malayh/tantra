@@ -5,10 +5,10 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from tantra.errors import SeqConflict, SessionExists, SessionNotFound
-from tantra.events import Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
+from tantra.errors import InvalidCommandReuse, SeqConflict, SessionExists, SessionNotFound
+from tantra.events import InputQueued, Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
-from tantra.stores.base import UNSET, apply_patch, select_headers, select_memories
+from tantra.stores.base import UNSET, EnqueueResult, apply_patch, select_headers, select_memories
 
 
 class MemoryStore:
@@ -86,6 +86,31 @@ class MemoryStore:
             header.last_seq = seq
             header.updated_at = datetime.now(UTC)
             return seq
+
+    async def enqueue(self, sid: str, event: InputQueued) -> EnqueueResult:
+        with self._lock:
+            header = self._headers.get(sid)
+            if header is None:
+                raise SessionNotFound(sid)
+            log = self._events.setdefault(sid, [])
+            for stamped in log:
+                existing = stamped.event
+                if not isinstance(existing, InputQueued) or existing.command_id != event.command_id:
+                    continue
+                if existing == event:
+                    return EnqueueResult(seq=stamped.seq, duplicate=True)
+                raise InvalidCommandReuse(event.command_id)
+            seq = header.last_seq + 1
+            log.append(Stamped(seq=seq, event=event.model_copy(deep=True)))
+            header.last_seq = seq
+            header.updated_at = datetime.now(UTC)
+            return EnqueueResult(seq=seq, duplicate=False)
+
+    async def read_page(self, sid: str, *, after: int = 0, limit: int = 1000) -> list[Stamped]:
+        with self._lock:
+            start = max(after, 0)
+            page = self._events.get(sid, [])[start : start + max(limit, 0)]
+            return [item.model_copy(deep=True) for item in page]
 
     async def read(self, sid: str, *, from_seq: int = 0) -> AsyncIterator[Stamped]:
         with self._lock:

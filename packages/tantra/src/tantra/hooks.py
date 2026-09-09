@@ -48,4 +48,4 @@ class Hook:
         """Called with the terminal `TurnCompleted` or `TurnFailed` once it is persisted."""
 
     async def on_event(self, emitted: Emitted) -> None:
-        """Called for every emitted event, including the live deltas that are never persisted."""
+        """Called for every emitted event."""

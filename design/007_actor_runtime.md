@@ -479,7 +479,7 @@ application contracts.
 - Record deferred problems in Open Decisions or a Follow-up note; do not expand
   phase scope silently.
 
-### Phase 0 — Journal and turn engine · deps: none · blocks all · —
+### Phase 0 — Journal and turn engine · deps: none · blocks all · CODE DONE, VERIFICATION PENDING
 
 - Add the new session journal and input primitives to
   `stores/base.py`, then implement them for memory, filesystem, SQLite, and
@@ -494,12 +494,15 @@ application contracts.
   gap-free; four store contract suites pass; two slow tools overlap; parallel
   results reach the model in call order; a blocked sync tool does not starve an
   unrelated turn.
+- **Verification pending:** PostgreSQL tests require Docker, which is unavailable
+  in the implementation environment. Memory, filesystem, SQLite, focused engine,
+  lint, and full repository checks pass.
 - Checklist:
-  - [ ] Minimal journal protocol
-  - [ ] Four store implementations
-  - [ ] Durable event vocabulary
-  - [ ] Single-turn engine
-  - [ ] Parallel sync/async tool execution
+  - [x] Minimal journal protocol
+  - [x] Four store implementations
+  - [x] Durable event vocabulary
+  - [x] Single-turn engine
+  - [x] Parallel sync/async tool execution
 
 ### Phase 1 — Root actor Runtime · deps: P0 · —
 

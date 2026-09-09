@@ -11,8 +11,12 @@ from tantra.events import (
 
 PERSISTED = {
     "SessionCreated",
+    "InputQueued",
     "TurnStarted",
     "SampleStarted",
+    "TextDelta",
+    "ReasoningDelta",
+    "ToolCallDelta",
     "TextPart",
     "ReasoningPart",
     "ToolCallRequested",
@@ -25,8 +29,11 @@ PERSISTED = {
     "SampleCompleted",
     "CompactionApplied",
     "CancelRequested",
+    "CancellationRequested",
     "TurnCompleted",
     "TurnFailed",
+    "TurnCancelled",
+    "TurnInterrupted",
 }
 
 

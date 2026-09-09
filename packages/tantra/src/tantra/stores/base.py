@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel
 
-from tantra.events import SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
+from tantra.events import (
+    InputQueued,
+    SessionEvent,
+    SessionHeader,
+    SessionStatus,
+    Stamped,
+    TurnCancelled,
+    TurnCompleted,
+    TurnFailed,
+    TurnInterrupted,
+    TurnStarted,
+    Usage,
+)
 
 if TYPE_CHECKING:
     from tantra.memory import MemoryRecord
@@ -14,6 +27,18 @@ if TYPE_CHECKING:
 _MISSING = object()
 
 UNSET: Any = object()
+
+
+@dataclass(frozen=True)
+class EnqueueResult:
+    seq: int
+    duplicate: bool
+
+
+@dataclass(frozen=True)
+class JournalState:
+    pending: list[InputQueued]
+    incomplete: TurnStarted | None
 
 
 def matches_metadata(metadata: dict[str, Any], wanted: dict[str, Any] | None) -> bool:
@@ -67,6 +92,10 @@ class Store(Protocol):
         last seq is. The first event of a session gets seq 1.
         """
 
+    async def enqueue(self, sid: str, event: InputQueued) -> EnqueueResult: ...
+
+    async def read_page(self, sid: str, *, after: int = 0, limit: int = 1000) -> list[Stamped]: ...
+
     def read(self, sid: str, *, from_seq: int = 0) -> AsyncIterator[Stamped]:
         """Yield every stamped event with `seq > from_seq`, in seq order.
 
@@ -116,6 +145,26 @@ class Store(Protocol):
 
     async def memory_search(self, vector: list[float], k: int) -> list[tuple[MemoryRecord, float]] | None:
         """Return up to `k` live rows nearest `vector` with their distances, or None without a vector path."""
+
+
+def reduce_journal(items: Iterable[SessionEvent | Stamped]) -> JournalState:
+    events = [item.event if isinstance(item, Stamped) else item for item in items]
+    terminal = {
+        event.turn_id
+        for event in events
+        if isinstance(event, TurnCompleted | TurnFailed | TurnCancelled | TurnInterrupted)
+    }
+    started = {event.turn_id for event in events if isinstance(event, TurnStarted)}
+    pending = [
+        event
+        for event in events
+        if isinstance(event, InputQueued) and event.command_id not in started and event.command_id not in terminal
+    ]
+    incomplete = next(
+        (event for event in reversed(events) if isinstance(event, TurnStarted) and event.turn_id not in terminal),
+        None,
+    )
+    return JournalState(pending=pending, incomplete=incomplete)
 
 
 def apply_patch(header: SessionHeader, **fields: Any) -> SessionHeader:

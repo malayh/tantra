@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from tantra.errors import CorruptLog, SeqConflict
-from tantra.events import SessionHeader, Stamped, TextPart
+from tantra.events import InputQueued, SessionHeader, Stamped, TextPart
 from tantra.stores.fs import FileSystemStore
 
 CONTENDERS = 4
@@ -67,7 +67,51 @@ async def test_truncated_final_line_is_skipped(tmp_path: Path) -> None:
     assert [s.seq for s in stamped] == [1, 2, 3]
     assert [s.event for s in stamped] == events
 
-    assert await store.append(header.id, [TextPart(sample_id="s1", text="four")], expect_seq=3) == 4
+    event = TextPart(sample_id="s1", text="four")
+    assert await store.append(header.id, [event], expect_seq=3) == 4
+
+    recovered = [s async for s in store.read(header.id)]
+    assert recovered == [Stamped(seq=index + 1, event=item) for index, item in enumerate([*events, event])]
+
+
+async def test_enqueue_recovers_a_truncated_final_line(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    await store.setup()
+    header = _header()
+    await store.create(header)
+    await store.append(header.id, [TextPart(sample_id="s1", text="one")], expect_seq=0)
+
+    queued = InputQueued(command_id="fresh", input="go")
+    torn = Stamped(seq=2, event=InputQueued(command_id="lost", input="stop")).model_dump_json()
+    with open(tmp_path / header.id / "events.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(torn[:20])
+
+    result = await store.enqueue(header.id, queued)
+
+    assert result.seq == 2
+    assert result.duplicate is False
+    assert await store.read_page(header.id) == [
+        Stamped(seq=1, event=TextPart(sample_id="s1", text="one")),
+        Stamped(seq=2, event=queued),
+    ]
+
+
+async def test_read_page_does_not_parse_beyond_the_bound(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    await store.setup()
+    header = _header()
+    await store.create(header)
+    events = [TextPart(sample_id="s1", text=f"part {index}") for index in range(2)]
+    await store.append(header.id, events, expect_seq=0)
+
+    path = tmp_path / header.id / "events.jsonl"
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write('{"seq":3}\n')
+
+    assert await store.read_page(header.id, limit=0) == []
+    assert await store.read_page(header.id, limit=2) == [
+        Stamped(seq=index + 1, event=event) for index, event in enumerate(events)
+    ]
 
 
 async def test_a_complete_line_that_cannot_be_decoded_raises(tmp_path: Path) -> None:

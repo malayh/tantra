@@ -10,10 +10,10 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from tantra.errors import CorruptLog, SeqConflict, SessionExists, SessionNotFound
-from tantra.events import Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
+from tantra.errors import CorruptLog, InvalidCommandReuse, SeqConflict, SessionExists, SessionNotFound
+from tantra.events import InputQueued, Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
-from tantra.stores.base import UNSET, apply_patch, select_headers, select_memories
+from tantra.stores.base import UNSET, EnqueueResult, apply_patch, select_headers, select_memories
 
 HEADER_FILE = "session.json"
 EVENTS_FILE = "events.jsonl"
@@ -95,6 +95,7 @@ class FileSystemStore:
             header = self._read_header(sid)
             if header is None:
                 raise SessionNotFound(sid)
+            self._truncate_partial_tail(sid)
             tail = self._tail_seq(sid)
             if tail > header.last_seq:
                 header.last_seq = tail
@@ -115,6 +116,51 @@ class FileSystemStore:
             header.updated_at = datetime.now(UTC)
             self._write_header(header)
             return seq
+
+    async def enqueue(self, sid: str, event: InputQueued) -> EnqueueResult:
+        if not (self.root / sid).is_dir():
+            raise SessionNotFound(sid)
+        with self._flock(sid, fcntl.LOCK_EX):
+            header = self._read_header(sid)
+            if header is None:
+                raise SessionNotFound(sid)
+            self._truncate_partial_tail(sid)
+            tail = self._tail_seq(sid)
+            if tail > header.last_seq:
+                header.last_seq = tail
+                self._write_header(header)
+            path = self.root / sid / EVENTS_FILE
+            with open(path, encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.endswith("\n"):
+                        break
+                    stamped = _parse(sid, line)
+                    existing = stamped.event
+                    if not isinstance(existing, InputQueued) or existing.command_id != event.command_id:
+                        continue
+                    if existing == event:
+                        return EnqueueResult(seq=stamped.seq, duplicate=True)
+                    raise InvalidCommandReuse(event.command_id)
+            seq = header.last_seq + 1
+            stamped = Stamped(seq=seq, event=event)
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(stamped.model_dump_json() + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            header.last_seq = seq
+            header.updated_at = datetime.now(UTC)
+            self._write_header(header)
+            return EnqueueResult(seq=seq, duplicate=False)
+
+    async def read_page(self, sid: str, *, after: int = 0, limit: int = 1000) -> list[Stamped]:
+        if limit <= 0:
+            return []
+        page = []
+        async for stamped in self.read(sid, from_seq=after):
+            page.append(stamped)
+            if len(page) == limit:
+                break
+        return page
 
     async def read(self, sid: str, *, from_seq: int = 0) -> AsyncIterator[Stamped]:
         path = self.root / sid / EVENTS_FILE
@@ -210,6 +256,33 @@ class FileSystemStore:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
+
+    def _truncate_partial_tail(self, sid: str) -> None:
+        path = self.root / sid / EVENTS_FILE
+        try:
+            handle = open(path, "r+b")
+        except FileNotFoundError:
+            return
+        with handle:
+            handle.seek(0, os.SEEK_END)
+            end = handle.tell()
+            if end == 0:
+                return
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) == b"\n":
+                return
+            while end > 0:
+                start = max(0, end - TAIL_CHUNK)
+                handle.seek(start)
+                chunk = handle.read(end - start)
+                cut = chunk.rfind(b"\n")
+                if cut >= 0:
+                    end = start + cut + 1
+                    break
+                end = start
+            handle.truncate(end)
+            handle.flush()
+            os.fsync(handle.fileno())
 
     def _tail_seq(self, sid: str) -> int:
         path = self.root / sid / EVENTS_FILE

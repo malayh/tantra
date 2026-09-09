@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from tantra.events import Usage
+from tantra.events import ReasoningDelta, TextDelta, ToolCallDelta, Usage
 
 
 class ModelLimits(BaseModel):
@@ -87,30 +87,6 @@ class SampleRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-class TextDelta(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    type: Literal["text_delta"] = "text_delta"
-    text: str
-
-
-class ReasoningDelta(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    type: Literal["reasoning_delta"] = "reasoning_delta"
-    text: str
-
-
-class ToolCallDelta(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    type: Literal["tool_call_delta"] = "tool_call_delta"
-    index: int
-    id: str | None = None
-    name: str | None = None
-    args_fragment: str = ""
-
-
 class StreamEnd(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -134,8 +110,7 @@ class Provider(Protocol):
     def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
         """Sample the model, yielding live fragments then one terminal `StreamEnd`.
 
-        `TextDelta`, `ReasoningDelta` and `ToolCallDelta` are live-only and never persisted. Each
-        complete `ToolCall` is yielded once its fragments are whole, before `StreamEnd`. `ToolCall.args`
+        Each complete `ToolCall` is yielded once its fragments are whole, before `StreamEnd`. `ToolCall.args`
         is the raw JSON string exactly as the vendor sent it — callers parse it.
         """
 

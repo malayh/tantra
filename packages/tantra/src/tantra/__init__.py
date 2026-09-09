@@ -13,6 +13,7 @@ from tantra.ask import (
 from tantra.compaction import CompactionConfig, Compactor, PruneThenSummarize
 from tantra.context import TurnContext
 from tantra.errors import (
+    InvalidCommandReuse,
     ProviderError,
     SeqConflict,
     SessionBusy,
@@ -79,6 +80,7 @@ __all__ = [
     "FreeTextResponse",
     "Harness",
     "Hook",
+    "InvalidCommandReuse",
     "Lease",
     "Memory",
     "MemoryHit",

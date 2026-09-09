@@ -78,6 +78,7 @@ def assemble_messages(summary: str, events: Sequence[SessionEvent]) -> list[Mess
     samples: dict[str, AssistantMessage] = {}
     results: dict[str, ToolResultMessage] = {}
     requested: set[str] = set()
+    completed: set[str] = set()
 
     def sample_message(sample_id: str) -> AssistantMessage:
         message = samples.get(sample_id)
@@ -100,22 +101,20 @@ def assemble_messages(summary: str, events: Sequence[SessionEvent]) -> list[Mess
             sample_message(event.sample_id).tool_calls.append(
                 ToolCall(id=event.call_id, name=event.name, args=json.dumps(event.args))
             )
+            if event.call_id not in results:
+                result = ToolResultMessage(call_id=event.call_id, content="")
+                results[event.call_id] = result
+                messages.append(result)
         elif isinstance(event, ToolCallCompleted):
             if event.call_id not in requested:
                 continue
-            existing = results.get(event.call_id)
-            if existing is not None:
-                existing.content = _as_content(event.result)
-                existing.is_error = event.is_error
-                continue
-            result = ToolResultMessage(
-                call_id=event.call_id,
-                content=_as_content(event.result),
-                is_error=event.is_error,
-            )
-            results[event.call_id] = result
-            messages.append(result)
-    return messages
+            existing = results[event.call_id]
+            existing.content = _as_content(event.result)
+            existing.is_error = event.is_error
+            completed.add(event.call_id)
+    return [
+        message for message in messages if not isinstance(message, ToolResultMessage) or message.call_id in completed
+    ]
 
 
 def build_messages(events: Sequence[SessionEvent]) -> list[Message]:

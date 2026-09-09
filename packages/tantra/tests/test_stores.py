@@ -1,5 +1,7 @@
+from collections.abc import Iterator
 from pathlib import Path
 
+from tantra.events import SessionHeader, Stamped, TextPart
 from tantra.stores.fs import FileSystemStore
 from tantra.stores.memory import MemoryStore
 from tantra.stores.postgres import PostgresStore
@@ -22,3 +24,25 @@ async def test_sqlite_store_conformance(tmp_path: Path) -> None:
 
 async def test_postgres_store_conformance(postgres_dsn: str, pg_schema: str) -> None:
     await store_conformance(lambda: PostgresStore(postgres_dsn, schema=pg_schema))
+
+
+class SliceOnlyLog(list[Stamped]):
+    def __iter__(self) -> Iterator[Stamped]:
+        raise AssertionError("read_page iterated the journal")
+
+
+async def test_memory_read_page_selects_only_the_requested_slice() -> None:
+    store = MemoryStore()
+    await store.setup()
+    header = SessionHeader(id="bounded", agent="test")
+    await store.create(header)
+    await store.append(
+        header.id,
+        [TextPart(sample_id="sample", text=str(index)) for index in range(100)],
+        expect_seq=0,
+    )
+    store._events[header.id] = SliceOnlyLog(store._events[header.id])
+
+    page = await store.read_page(header.id, after=90, limit=3)
+
+    assert [item.seq for item in page] == [91, 92, 93]

@@ -9,10 +9,10 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from tantra.errors import CorruptLog, SeqConflict, SessionExists, SessionNotFound
-from tantra.events import Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
+from tantra.errors import CorruptLog, InvalidCommandReuse, SeqConflict, SessionExists, SessionNotFound
+from tantra.events import InputQueued, Lease, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
-from tantra.stores.base import UNSET, apply_patch, select_headers, select_memories
+from tantra.stores.base import UNSET, EnqueueResult, apply_patch, select_headers, select_memories
 
 BUSY_TIMEOUT_MS = 30000
 
@@ -144,6 +144,45 @@ class SQLiteStore:
                 (header.model_dump_json(), seq, sid),
             )
             return seq
+
+    async def enqueue(self, sid: str, event: InputQueued) -> EnqueueResult:
+        with self._write() as conn:
+            row = conn.execute("SELECT header, last_seq FROM sessions WHERE id = ?", (sid,)).fetchone()
+            if row is None:
+                raise SessionNotFound(sid)
+            queued = conn.execute(
+                "SELECT seq, stamped FROM events WHERE session_id = ? ORDER BY seq",
+                (sid,),
+            ).fetchall()
+            for seq, raw in queued:
+                existing = _parse(sid, raw).event
+                if not isinstance(existing, InputQueued) or existing.command_id != event.command_id:
+                    continue
+                if existing == event:
+                    return EnqueueResult(seq=seq, duplicate=True)
+                raise InvalidCommandReuse(event.command_id)
+            header = SessionHeader.model_validate_json(row[0])
+            seq = row[1] + 1
+            stamped = Stamped(seq=seq, event=event)
+            conn.execute(
+                "INSERT INTO events (session_id, seq, stamped) VALUES (?, ?, ?)",
+                (sid, seq, stamped.model_dump_json()),
+            )
+            header.last_seq = seq
+            header.updated_at = datetime.now(UTC)
+            conn.execute(
+                "UPDATE sessions SET header = ?, last_seq = ? WHERE id = ?",
+                (header.model_dump_json(), seq, sid),
+            )
+            return EnqueueResult(seq=seq, duplicate=False)
+
+    async def read_page(self, sid: str, *, after: int = 0, limit: int = 1000) -> list[Stamped]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT stamped FROM events WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+                (sid, after, max(limit, 0)),
+            ).fetchall()
+        return [_parse(sid, row[0]) for row in rows]
 
     async def read(self, sid: str, *, from_seq: int = 0) -> AsyncIterator[Stamped]:
         with self._connect() as conn:

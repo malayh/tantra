@@ -8,22 +8,26 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from tantra.errors import SeqConflict, SessionExists, SessionNotFound
+from tantra.errors import InvalidCommandReuse, SeqConflict, SessionExists, SessionNotFound
 from tantra.events import (
+    InputQueued,
+    ReasoningDelta,
     SampleCompleted,
     SampleStarted,
     SessionEvent,
     SessionHeader,
     Stamped,
+    TextDelta,
     TextPart,
     ToolCallCompleted,
+    ToolCallDelta,
     ToolCallRequested,
     TurnCompleted,
     TurnStarted,
     Usage,
 )
 from tantra.memory import MemoryRecord
-from tantra.stores.base import Store
+from tantra.stores.base import Store, reduce_journal
 
 StoreFactory = Callable[[], Store]
 
@@ -54,6 +58,10 @@ async def store_conformance(store_factory: StoreFactory) -> None:
     await _check_create_and_header(store_factory)
     await _check_create_rejects_a_duplicate(store_factory)
     await _check_append_and_read(store_factory)
+    await _check_read_page_and_deltas(store_factory)
+    await _check_enqueue(store_factory)
+    await _check_mixed_journal_contention(store_factory)
+    await _check_journal_reduction(store_factory)
     await _check_stale_expect_seq(store_factory)
     await _check_blind_append(store_factory)
     await _check_put_header(store_factory)
@@ -168,6 +176,105 @@ async def _check_append_and_read(factory: StoreFactory) -> None:
     await store.create(empty)
     assert await _drain(store, empty.id) == []
     assert await store.append(empty.id, [], expect_seq=0) == 0
+
+
+async def _check_read_page_and_deltas(factory: StoreFactory) -> None:
+    store = factory()
+    header = _header()
+    await store.create(header)
+    events: list[SessionEvent] = [
+        TextDelta(text="hello \u0000 \U0001f680", vendor_bytes="00ff"),
+        ReasoningDelta(text="line one\nline two", signature="opaque"),
+        ToolCallDelta(index=2, id="c-2", name="lookup", args_fragment='{"q":"\u03bb"}'),
+    ]
+    await store.append(header.id, events, expect_seq=0)
+
+    first = await factory().read_page(header.id, limit=2)
+    second = await factory().read_page(header.id, after=first[-1].seq, limit=2)
+
+    assert [item.seq for item in first] == [1, 2]
+    assert [item.seq for item in second] == [3]
+    assert [item.event for item in first + second] == events
+    assert await factory().read_page(header.id, after=3) == []
+    assert await factory().read_page(header.id, limit=0) == []
+
+
+async def _check_enqueue(factory: StoreFactory) -> None:
+    store = factory()
+    header = _header()
+    await store.create(header)
+    command = uuid.uuid4().hex
+    queued = InputQueued(command_id=command, input="build p99", source={"kind": "human"})
+
+    accepted = await store.enqueue(header.id, queued)
+    duplicate = await factory().enqueue(header.id, queued.model_copy(deep=True))
+
+    assert accepted.seq == 1
+    assert accepted.duplicate is False
+    assert duplicate.seq == 1
+    assert duplicate.duplicate is True
+    await _expect(
+        InvalidCommandReuse,
+        factory().enqueue(header.id, InputQueued(command_id=command, input="different")),
+        "conflicting command reuse did not raise InvalidCommandReuse",
+    )
+    assert await factory().read_page(header.id) == [Stamped(seq=1, event=queued)]
+
+    concurrent = _header()
+    await store.create(concurrent)
+    same = InputQueued(command_id=uuid.uuid4().hex, input="once")
+    results = await asyncio.gather(
+        *(asyncio.to_thread(_enqueue_in_thread, factory, concurrent.id, same) for _ in range(CONTENDERS))
+    )
+    assert sum(not result.duplicate for result in results) == 1
+    assert {result.seq for result in results} == {1}
+    assert await factory().read_page(concurrent.id) == [Stamped(seq=1, event=same)]
+
+    missing = uuid.uuid4().hex
+    await _expect(
+        SessionNotFound,
+        store.enqueue(missing, InputQueued(command_id=uuid.uuid4().hex, input="missing")),
+        "enqueue to an unknown session did not raise SessionNotFound",
+    )
+
+
+async def _check_mixed_journal_contention(factory: StoreFactory) -> None:
+    store = factory()
+    header = _header()
+    await store.create(header)
+    barrier = threading.Barrier(CONTENDERS)
+    await asyncio.gather(
+        *(asyncio.to_thread(_mixed_write_in_thread, factory, header.id, index, barrier) for index in range(CONTENDERS))
+    )
+    page = await factory().read_page(header.id, limit=CONTENDERS + 1)
+    assert [item.seq for item in page] == list(range(1, CONTENDERS + 1))
+    assert len(page) == CONTENDERS
+
+
+async def _check_journal_reduction(factory: StoreFactory) -> None:
+    store = factory()
+    header = _header()
+    await store.create(header)
+    first = InputQueued(command_id="command-1", input="one")
+    second = InputQueued(command_id="command-2", input="two")
+    third = InputQueued(command_id="command-3", input="three")
+    fourth = InputQueued(command_id="command-4", input="four")
+    for event in (first, second, third, fourth):
+        await store.enqueue(header.id, event)
+    await store.append(
+        header.id,
+        [
+            TurnStarted(turn_id=first.command_id, input=first.input),
+            TurnCompleted(turn_id=first.command_id, stop_reason="completed"),
+            TurnStarted(turn_id=second.command_id, input=second.input),
+        ],
+        expect_seq=None,
+    )
+
+    state = reduce_journal(await factory().read_page(header.id))
+
+    assert state.pending == [third, fourth]
+    assert state.incomplete == TurnStarted(turn_id=second.command_id, input=second.input)
 
 
 async def _check_stale_expect_seq(factory: StoreFactory) -> None:
@@ -433,6 +540,31 @@ async def _check_memory_rows(factory: StoreFactory) -> None:
         assert distances == sorted(distances), "memory_search returned rows out of distance order"
         alive = all(not row.deleted and row.superseded_by is None for row, _ in found)
         assert alive, "memory_search returned a deleted or superseded row"
+
+
+def _enqueue_in_thread(
+    factory: StoreFactory,
+    sid: str,
+    event: InputQueued,
+):
+    return asyncio.run(factory().enqueue(sid, event))
+
+
+def _mixed_write_in_thread(
+    factory: StoreFactory,
+    sid: str,
+    index: int,
+    barrier: threading.Barrier,
+) -> None:
+    async def write() -> None:
+        store = factory()
+        barrier.wait(timeout=30)
+        if index % 2 == 0:
+            await store.enqueue(sid, InputQueued(command_id=f"mixed-{index}", input=str(index)))
+        else:
+            await store.append(sid, [TextDelta(text=str(index))], expect_seq=None)
+
+    asyncio.run(write())
 
 
 def _acquire_in_thread(factory: StoreFactory, sid: str, holder: str, barrier: threading.Barrier) -> bool:

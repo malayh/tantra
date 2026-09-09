@@ -42,6 +42,12 @@ class SessionCreated(EventBase):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class InputQueued(EventBase):
+    type: Literal["input_queued"] = "input_queued"
+    command_id: str
+    input: str
+
+
 class TurnStarted(EventBase):
     type: Literal["turn_started"] = "turn_started"
     turn_id: str
@@ -53,6 +59,24 @@ class SampleStarted(EventBase):
     turn_id: str
     sample_id: str
     model: str
+
+
+class TextDelta(EventBase):
+    type: Literal["text_delta"] = "text_delta"
+    text: str
+
+
+class ReasoningDelta(EventBase):
+    type: Literal["reasoning_delta"] = "reasoning_delta"
+    text: str
+
+
+class ToolCallDelta(EventBase):
+    type: Literal["tool_call_delta"] = "tool_call_delta"
+    index: int
+    id: str | None = None
+    name: str | None = None
+    args_fragment: str = ""
 
 
 class TextPart(EventBase):
@@ -136,6 +160,11 @@ class CancelRequested(EventBase):
     turn_id: str
 
 
+class CancellationRequested(EventBase):
+    type: Literal["cancellation_requested"] = "cancellation_requested"
+    command_id: str
+
+
 class TurnCompleted(EventBase):
     type: Literal["turn_completed"] = "turn_completed"
     turn_id: str
@@ -149,10 +178,26 @@ class TurnFailed(EventBase):
     error: str
 
 
+class TurnCancelled(EventBase):
+    type: Literal["turn_cancelled"] = "turn_cancelled"
+    turn_id: str
+    reason: str = "cancelled"
+
+
+class TurnInterrupted(EventBase):
+    type: Literal["turn_interrupted"] = "turn_interrupted"
+    turn_id: str
+    reason: str
+
+
 SessionEvent = Annotated[
     SessionCreated
+    | InputQueued
     | TurnStarted
     | SampleStarted
+    | TextDelta
+    | ReasoningDelta
+    | ToolCallDelta
     | TextPart
     | ReasoningPart
     | ToolCallRequested
@@ -165,8 +210,11 @@ SessionEvent = Annotated[
     | SampleCompleted
     | CompactionApplied
     | CancelRequested
+    | CancellationRequested
     | TurnCompleted
-    | TurnFailed,
+    | TurnFailed
+    | TurnCancelled
+    | TurnInterrupted,
     Field(discriminator="type"),
 ]
 

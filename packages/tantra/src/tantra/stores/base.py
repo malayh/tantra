@@ -75,6 +75,7 @@ class Store(Protocol):
         pending_ask: str | None = UNSET,
         usage: Usage = UNSET,
         metadata: dict[str, Any] = UNSET,
+        finished: bool = UNSET,
     ) -> SessionHeader:
         """Apply one atomic edit to the header and return the result.
 

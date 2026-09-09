@@ -102,6 +102,7 @@ class SQLiteStore:
         pending_ask: str | None = UNSET,
         usage: Usage = UNSET,
         metadata: dict[str, Any] = UNSET,
+        finished: bool = UNSET,
     ) -> SessionHeader:
         with self._write() as conn:
             row = conn.execute("SELECT header, last_seq, lease FROM sessions WHERE id = ?", (sid,)).fetchone()
@@ -116,6 +117,7 @@ class SQLiteStore:
                 pending_ask=pending_ask,
                 usage=usage,
                 metadata=metadata,
+                finished=finished,
             )
             conn.execute("UPDATE sessions SET header = ? WHERE id = ?", (stored.model_dump_json(), sid))
             stored.lease = _lease(row[2])

@@ -24,6 +24,8 @@ PERSISTED = {
     "ToolProgress",
     "ToolCallCompleted",
     "ChildSessionSpawned",
+    "ChildCreated",
+    "AgentFinished",
     "AskRaised",
     "AskAnswered",
     "SampleCompleted",
@@ -71,6 +73,7 @@ def test_header_defaults() -> None:
     assert header.last_seq == 0
     assert header.lease is None
     assert header.pending_ask is None
+    assert header.finished is False
     assert header.metadata == {}
     assert header.usage.input_tokens == 0
     assert header.created_at.tzinfo is not None

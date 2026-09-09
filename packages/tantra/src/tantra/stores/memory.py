@@ -55,6 +55,7 @@ class MemoryStore:
         pending_ask: str | None = UNSET,
         usage: Usage = UNSET,
         metadata: dict[str, Any] = UNSET,
+        finished: bool = UNSET,
     ) -> SessionHeader:
         with self._lock:
             current = self._headers.get(sid)
@@ -67,6 +68,7 @@ class MemoryStore:
                 pending_ask=pending_ask,
                 usage=usage,
                 metadata=metadata,
+                finished=finished,
             )
             self._headers[sid] = stored
             return self._with_lease(stored)

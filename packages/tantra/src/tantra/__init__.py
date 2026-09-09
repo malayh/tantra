@@ -15,6 +15,7 @@ from tantra.context import TurnContext
 from tantra.errors import (
     AskExpired,
     InvalidCommandReuse,
+    MaxDepthExceeded,
     ProviderError,
     SeqConflict,
     SessionBusy,
@@ -90,6 +91,7 @@ __all__ = [
     "InvalidCommandReuse",
     "Lease",
     "LoggedEvent",
+    "MaxDepthExceeded",
     "Memory",
     "MemoryHit",
     "MemoryRecord",

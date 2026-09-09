@@ -534,7 +534,7 @@ application contracts.
   - [x] Command receipts and TurnResult
   - [x] Ask, cancellation, and shutdown behavior
 
-### Phase 2 — Recursive actor subagents · deps: P1 · —
+### Phase 2 — Recursive actor subagents · deps: P1 · DONE
 
 - Reserve and inject `spawn`, `send`, and `finish` according to each actor's
   relationships.
@@ -547,12 +547,16 @@ application contracts.
   2; depth 4 fails before session creation; root and child cursors replay
   independently; retried delivery occurs once; finish rejects unfinished
   descendants and permanently closes a completed child.
+- **Implementation note:** `CancellationRequested` persists its actor-to-turn
+  target set. A duplicate command resumes only unfinished cancellation from
+  that set, while task-to-turn generation tracking fences post-commit local
+  work without cancelling later turns.
 - Checklist:
-  - [ ] Framework actor tools
-  - [ ] Independent child sessions
-  - [ ] Direct parent-child messaging
-  - [ ] Deep-tree and finish rules
-  - [ ] Tree cancellation
+  - [x] Framework actor tools
+  - [x] Independent child sessions
+  - [x] Direct parent-child messaging
+  - [x] Deep-tree and finish rules
+  - [x] Tree cancellation
 
 ### Phase 3 — 1.0 preparation and Agni removal · deps: P2 · —
 

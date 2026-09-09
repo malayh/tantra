@@ -155,6 +155,7 @@ class PostgresStore:
         pending_ask: str | None = UNSET,
         usage: Usage = UNSET,
         metadata: dict[str, Any] = UNSET,
+        finished: bool = UNSET,
     ) -> SessionHeader:
         async with self._lock:
             conn = await self._connection()
@@ -174,6 +175,7 @@ class PostgresStore:
                     pending_ask=pending_ask,
                     usage=usage,
                     metadata=metadata,
+                    finished=finished,
                 )
                 await conn.execute(
                     self._sql("UPDATE {schema}.sessions SET header = %s, metadata = %s WHERE id = %s"),

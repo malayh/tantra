@@ -10,6 +10,9 @@ from typing import Any
 
 from tantra.errors import InvalidCommandReuse, SeqConflict, SessionExists, SessionNotFound
 from tantra.events import (
+    AgentFinished,
+    CancellationRequested,
+    ChildCreated,
     InputQueued,
     ReasoningDelta,
     SampleCompleted,
@@ -66,6 +69,7 @@ async def store_conformance(store_factory: StoreFactory) -> None:
     await _check_blind_append(store_factory)
     await _check_put_header(store_factory)
     await _check_patch_header(store_factory)
+    await _check_actor_persistence(store_factory)
     await _check_unknown_session(store_factory)
     await _check_list(store_factory)
     await _check_lease(store_factory)
@@ -361,6 +365,7 @@ async def _check_patch_header(factory: StoreFactory) -> None:
     assert patched.title == "renamed"
     assert patched.status == "idle", "patch_header changed a field it was not given"
     assert patched.pending_ask is None, "patch_header changed a field it was not given"
+    assert patched.finished is False, "patch_header changed a field it was not given"
     assert patched.metadata == {"company": 42, "user": 7}, "patch_header changed a field it was not given"
     assert patched.usage.input_tokens == 9, "patch_header changed a field it was not given"
     assert patched.updated_at > before.updated_at, "patch_header did not stamp updated_at"
@@ -382,9 +387,10 @@ async def _check_patch_header(factory: StoreFactory) -> None:
     assert loaded.lease is not None and loaded.lease.holder == "worker-a"
 
     usage = Usage(input_tokens=21, output_tokens=4)
-    filled = await store.patch_header(header.id, usage=usage, pending_ask="ask-1")
+    filled = await store.patch_header(header.id, usage=usage, pending_ask="ask-1", finished=True)
     assert filled.usage == usage, "patch_header did not store usage"
     assert filled.pending_ask == "ask-1", "patch_header did not store pending_ask"
+    assert filled.finished is True, "patch_header did not store finished"
     assert filled.title == "renamed"
 
     usage.input_tokens = 99
@@ -399,11 +405,13 @@ async def _check_patch_header(factory: StoreFactory) -> None:
     assert cleared.usage.input_tokens == 21, "clearing one field disturbed another"
     assert cleared.status == "running", "clearing one field disturbed another"
     assert cleared.metadata == {"company": 42, "user": 8, "team": "sre"}, "clearing one field disturbed another"
+    assert cleared.finished is True, "clearing one field disturbed another"
 
     loaded = await factory().header(header.id)
     assert loaded is not None
     assert loaded.title is None
     assert loaded.pending_ask is None
+    assert loaded.finished is True
 
     await store.release_lease(header.id, "worker-a")
 
@@ -600,3 +608,21 @@ async def _check_lease_contention(factory: StoreFactory) -> None:
             assert loaded.lease.holder == f"worker-{results.index(True)}"
     finally:
         sys.setswitchinterval(switch_interval)
+
+
+async def _check_actor_persistence(factory: StoreFactory) -> None:
+    store = factory()
+    header = _header(parent_id=uuid.uuid4().hex)
+    await store.create(header)
+    events: list[SessionEvent] = [
+        ChildCreated(child_id=uuid.uuid4().hex, agent="child", turn_id="turn", call_id="call"),
+        CancellationRequested(command_id="cancel", targets={header.id: ["turn"]}),
+        AgentFinished(result={"ok": True}),
+    ]
+    await store.append(header.id, events, expect_seq=0)
+    await store.patch_header(header.id, finished=True)
+
+    loaded = await factory().header(header.id)
+    assert loaded is not None
+    assert loaded.finished is True
+    assert [item.event for item in await factory().read_page(header.id)] == events

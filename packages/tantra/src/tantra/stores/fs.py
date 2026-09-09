@@ -69,6 +69,7 @@ class FileSystemStore:
         pending_ask: str | None = UNSET,
         usage: Usage = UNSET,
         metadata: dict[str, Any] = UNSET,
+        finished: bool = UNSET,
     ) -> SessionHeader:
         if not (self.root / sid).is_dir():
             raise SessionNotFound(sid)
@@ -83,6 +84,7 @@ class FileSystemStore:
                 pending_ask=pending_ask,
                 usage=usage,
                 metadata=metadata,
+                finished=finished,
             )
             self._write_header(stored)
         stored.lease = self._read_lease(sid)

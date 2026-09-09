@@ -127,6 +127,19 @@ class ChildSessionSpawned(EventBase):
     agent: str
 
 
+class ChildCreated(EventBase):
+    type: Literal["child_created"] = "child_created"
+    child_id: str
+    agent: str
+    turn_id: str
+    call_id: str
+
+
+class AgentFinished(EventBase):
+    type: Literal["agent_finished"] = "agent_finished"
+    result: Any = None
+
+
 class AskRaised(EventBase):
     type: Literal["ask_raised"] = "ask_raised"
     ask_id: str
@@ -166,6 +179,7 @@ class CancelRequested(EventBase):
 class CancellationRequested(EventBase):
     type: Literal["cancellation_requested"] = "cancellation_requested"
     command_id: str
+    targets: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class TurnCompleted(EventBase):
@@ -208,6 +222,8 @@ SessionEvent = Annotated[
     | ToolProgress
     | ToolCallCompleted
     | ChildSessionSpawned
+    | ChildCreated
+    | AgentFinished
     | AskRaised
     | AskAnswered
     | SampleCompleted
@@ -251,3 +267,4 @@ class SessionHeader(BaseModel):
     usage: Usage = Field(default_factory=Usage)
     lease: Lease | None = None
     pending_ask: str | None = None
+    finished: bool = False

@@ -37,8 +37,10 @@ class Lease(BaseModel):
 class SessionCreated(EventBase):
     type: Literal["session_created"] = "session_created"
     agent: str
+    root_id: str | None = None
     parent_id: str | None = None
     depth: int = 0
+    model: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -136,6 +138,7 @@ class AskAnswered(EventBase):
     type: Literal["ask_answered"] = "ask_answered"
     ask_id: str
     response: AskResponse
+    command_id: str | None = None
     answered_by: str | None = None
 
 
@@ -234,9 +237,11 @@ class SessionHeader(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: str
+    root_id: str | None = None
     agent: str
     parent_id: str | None = None
     depth: int = 0
+    model: str | None = None
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)
     title: str | None = None

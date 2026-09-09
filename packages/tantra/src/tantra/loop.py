@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
@@ -968,6 +968,8 @@ class TurnEngine:
         compactor: Compactor | None = None,
         tracer: Tracer = NULL_TRACER,
         notify: Callable[[Stamped], Any] | None = None,
+        ask_future: Callable[[AskRaised], asyncio.Future[AskResponse]] | None = None,
+        append_events: Callable[[Sequence[SessionEvent]], Awaitable[list[Stamped]]] | None = None,
     ) -> None:
         self.store = store
         self.provider = provider
@@ -986,6 +988,8 @@ class TurnEngine:
         self.compactor = compactor
         self.tracer = tracer
         self.notify = notify
+        self.ask_future = ask_future
+        self.append_events = append_events
         self.schemas = [tool.schema for tool in tools.values()]
         if agent.output_schema is not None:
             self.schemas.append(submit_output_schema(agent.output_schema))
@@ -994,6 +998,29 @@ class TurnEngine:
         self.turn_span: Any = None
         self.terminal: TurnCompleted | TurnFailed | None = None
         self.tool_spans: dict[object, Any] = {}
+
+    async def _absorb(self) -> None:
+        while True:
+            page = await self.store.read_page(self.header.id, after=self.header.last_seq)
+            if not page:
+                return
+            assert self.history is not None
+            self.history.extend(item.event for item in page)
+            self.header.last_seq = page[-1].seq
+
+    async def _ask(self, call_id: str, request: AskRequest) -> AskResponse:
+        if self.ask_future is None:
+            raise TantraError("ctx.ask is unavailable outside Runtime")
+        raised = AskRaised(ask_id=uuid4().hex, call_id=call_id, request=request)
+        future = self.ask_future(raised)
+        try:
+            await self._append([raised])
+        except BaseException:
+            future.cancel()
+            raise
+        response = await future
+        await self._absorb()
+        return response
 
     async def _load_history(self) -> list[SessionEvent]:
         if self.history is not None:
@@ -1013,9 +1040,13 @@ class TurnEngine:
         if not events:
             return []
         async with self._append_lock:
-            last = await self.store.append(self.header.id, events, expect_seq=None)
-            first = last - len(events) + 1
-            stamped = [Stamped(seq=first + index, event=event) for index, event in enumerate(events)]
+            if self.append_events is None:
+                last = await self.store.append(self.header.id, events, expect_seq=None)
+                first = last - len(events) + 1
+                stamped = [Stamped(seq=first + index, event=event) for index, event in enumerate(events)]
+            else:
+                stamped = await self.append_events(events)
+                last = stamped[-1].seq
             self.header.last_seq = last
             assert self.history is not None
             self.history.extend(events)
@@ -1230,14 +1261,26 @@ class TurnEngine:
                 )
                 continue
             if verdict == "ask":
-                await self._complete(
-                    call,
-                    "not executed: approval unavailable",
-                    is_error=True,
-                    tool=tool,
-                    args=effective.args,
+                body = json.dumps(effective.args, default=str)
+                if escalation is not None:
+                    body = f"{escalation.reason}\n\n{body}"
+                response = await self._ask(
+                    call.call_id,
+                    Approval(
+                        title=f"Run {call.name}?",
+                        body=body,
+                        extra={"permission": call.name},
+                    ),
                 )
-                continue
+                if not (isinstance(response, ApprovalResponse) and response.allow):
+                    await self._complete(
+                        call,
+                        "denied by user",
+                        is_error=True,
+                        tool=tool,
+                        args=effective.args,
+                    )
+                    continue
             try:
                 validated = tool.args_model.model_validate(effective.args)
             except ValidationError as exc:
@@ -1269,6 +1312,7 @@ class TurnEngine:
             deps=self.turn.deps,
             store=self.store,
             emit=emit,
+            ask=lambda request: self._ask(call.call_id, request),
             memory=self.memory,
         )
         kwargs = dict(prepared.kwargs)

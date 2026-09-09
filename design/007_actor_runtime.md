@@ -98,6 +98,7 @@ not the subprocess boundary:
 runtime = Runtime(
     provider=provider,
     store=store,
+    agents=[agent],
     default_model=model,
     max_depth=3,
 )
@@ -137,9 +138,13 @@ await runtime.aclose()
 
 ### Runtime
 
-- `Runtime(provider, store, *, default_model=None, max_depth=3)` is
-  process-scoped. Applications create it during lifespan and close it during
-  shutdown.
+- ~~`Runtime(provider, store, *, default_model=None, max_depth=3)` is the
+  process-scoped constructor.~~
+- `Runtime(provider, store, agents, *, default_model=None, max_depth=3,
+  deps_factory=None, retry=DEFAULT_RETRY, hooks=(), default_permission="allow",
+  skills=None, memory=None, compactor=None, telemetry=None)` is process-scoped.
+  The explicit registry resolves durable agent names after process restart;
+  the remaining options preserve the existing engine integration seams.
 - `create(agent, *, session_id=None, model=None, metadata=None) -> UUID`
   creates an idle root actor and durably records its header. A caller may supply
   the UUID for an application-owned URL or database row.
@@ -479,7 +484,7 @@ application contracts.
 - Record deferred problems in Open Decisions or a Follow-up note; do not expand
   phase scope silently.
 
-### Phase 0 — Journal and turn engine · deps: none · blocks all · CODE DONE, VERIFICATION PENDING
+### Phase 0 — Journal and turn engine · deps: none · blocks all · DONE
 
 - Add the new session journal and input primitives to
   `stores/base.py`, then implement them for memory, filesystem, SQLite, and
@@ -494,9 +499,11 @@ application contracts.
   gap-free; four store contract suites pass; two slow tools overlap; parallel
   results reach the model in call order; a blocked sync tool does not starve an
   unrelated turn.
-- **Verification pending:** PostgreSQL tests require Docker, which is unavailable
-  in the implementation environment. Memory, filesystem, SQLite, focused engine,
-  lint, and full repository checks pass.
+- ~~**Verification pending:** PostgreSQL tests require Docker, which is
+  unavailable in the implementation environment.~~
+- **Accepted verification exception:** PostgreSQL remained unavailable; the
+  user accepted the environment limitation after Memory, filesystem, SQLite,
+  focused engine, lint, and full repository checks passed.
 - Checklist:
   - [x] Minimal journal protocol
   - [x] Four store implementations
@@ -504,7 +511,7 @@ application contracts.
   - [x] Single-turn engine
   - [x] Parallel sync/async tool execution
 
-### Phase 1 — Root actor Runtime · deps: P0 · —
+### Phase 1 — Root actor Runtime · deps: P0 · DONE
 
 - Add `runtime.py` with process-wide Runtime state, root creation, on-demand
   inbox drainers, read-only event subscriptions, and writable connections.
@@ -517,12 +524,15 @@ application contracts.
   sequences; a newer writer invalidates an in-flight old socket; zero-reader
   execution finishes; merely subscribing never activates work; a post-crash
   send marks only the started turn interrupted and drains old unstarted input.
+- **Implementation note:** cancellation and shutdown durably terminate and
+  generation-fence a turn before cancelling its task. A cancellation-resistant
+  coroutine is detached and cannot append events or overwrite replacement state.
 - Checklist:
-  - [ ] Runtime actor registry
-  - [ ] Connection and event APIs
-  - [ ] Writer generations
-  - [ ] Command receipts and TurnResult
-  - [ ] Ask, cancellation, and shutdown behavior
+  - [x] Runtime actor registry
+  - [x] Connection and event APIs
+  - [x] Writer generations
+  - [x] Command receipts and TurnResult
+  - [x] Ask, cancellation, and shutdown behavior
 
 ### Phase 2 — Recursive actor subagents · deps: P1 · —
 

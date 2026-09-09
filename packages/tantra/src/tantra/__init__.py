@@ -13,6 +13,7 @@ from tantra.ask import (
 from tantra.compaction import CompactionConfig, Compactor, PruneThenSummarize
 from tantra.context import TurnContext
 from tantra.errors import (
+    AskExpired,
     InvalidCommandReuse,
     ProviderError,
     SeqConflict,
@@ -20,6 +21,8 @@ from tantra.errors import (
     SessionNotFound,
     TantraError,
     TurnIncomplete,
+    WriterReplaced,
+    WriterRequired,
 )
 from tantra.events import (
     CompactionApplied,
@@ -47,6 +50,7 @@ from tantra.memory import (
 from tantra.providers.base import Embedder, ModelLimits, Provider, ProviderEvent, SampleRequest
 from tantra.providers.fake import FakeProvider, Sample
 from tantra.providers.openai_compat import OpenAICompatible, OpenAICompatibleEmbedder
+from tantra.runtime import CommandReceipt, Connection, LoggedEvent, Runtime, TurnResult
 from tantra.skills import FileSystemSkills, Skill, SkillInfo, Skills
 from tantra.stores.base import Store
 from tantra.stores.fs import FileSystemStore
@@ -60,6 +64,7 @@ __all__ = [
     "Agent",
     "Approval",
     "ApprovalResponse",
+    "AskExpired",
     "AskRequest",
     "AskResponse",
     "BuiltinMemory",
@@ -68,6 +73,8 @@ __all__ = [
     "CompactionApplied",
     "CompactionConfig",
     "Compactor",
+    "CommandReceipt",
+    "Connection",
     "Context",
     "Denial",
     "Embedder",
@@ -82,6 +89,7 @@ __all__ = [
     "Hook",
     "InvalidCommandReuse",
     "Lease",
+    "LoggedEvent",
     "Memory",
     "MemoryHit",
     "MemoryRecord",
@@ -98,6 +106,7 @@ __all__ = [
     "ProviderEvent",
     "PruneThenSummarize",
     "RetryConfig",
+    "Runtime",
     "SQLiteStore",
     "Sample",
     "SampleRequest",
@@ -117,7 +126,10 @@ __all__ = [
     "Tracer",
     "TurnContext",
     "TurnIncomplete",
+    "TurnResult",
     "Usage",
+    "WriterReplaced",
+    "WriterRequired",
     "agent_name",
     "build_name_table",
     "collect",

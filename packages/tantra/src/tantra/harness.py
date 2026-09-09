@@ -83,7 +83,7 @@ def _skill_tool(skills: Skills, allowed: list[str] | None) -> Tool:
     return Tool(skill, permission="allow")
 
 
-def _tool_table(agent: type[Agent]) -> dict[str, Tool]:
+def _tool_table(agent: type[Agent], *, include_subagents: bool = True) -> dict[str, Tool]:
     label = f"agent {agent_name(agent)!r}"
     table: dict[str, Tool] = {}
     if agent.max_steps < 1:
@@ -99,11 +99,12 @@ def _tool_table(agent: type[Agent]) -> dict[str, Tool]:
         if entry.name in table:
             raise TantraError(f"{label}: duplicate tool name {entry.name!r}")
         table[entry.name] = entry
-    for sub in agent.subagents:
-        delegate = _subagent_tool(sub)
-        if delegate.name in table:
-            raise TantraError(f"{label}: duplicate tool name {delegate.name!r}")
-        table[delegate.name] = delegate
+    if include_subagents:
+        for sub in agent.subagents:
+            delegate = _subagent_tool(sub)
+            if delegate.name in table:
+                raise TantraError(f"{label}: duplicate tool name {delegate.name!r}")
+            table[delegate.name] = delegate
     return table
 
 

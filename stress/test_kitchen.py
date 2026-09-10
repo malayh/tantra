@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import BaseModel
 
+from stress.conftest import track_runtime
 from stress.driver import Policy, PolicyState, SyntheticEmbedder, SyntheticProvider, by_model, flaky, turn_step
 from stress.invariants import check_log, check_pairs, event_type, log, pairs_intact, picks
 from tantra import (
@@ -201,7 +202,7 @@ def build(
     **options: Any,
 ) -> tuple[Runtime, SyntheticProvider]:
     provider = SyntheticProvider(policy)
-    runtime = Runtime(provider, store, list(agents), deps_factory=desk_factory(), **options)
+    runtime = track_runtime(Runtime(provider, store, list(agents), deps_factory=desk_factory(), **options))
     return runtime, provider
 
 

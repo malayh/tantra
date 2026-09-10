@@ -92,6 +92,7 @@ export type ChatState = {
   active: Record<string, boolean>;
   work: Record<string, string[]>;
   finishedActors: Record<string, boolean>;
+  cancelling: boolean;
   dispatch: (frame: EventFrame) => void;
   subscriptionReady: (frame: SubscriptionReadyFrame) => void;
   expireAsk: (frame: AskExpiredFrame) => void;
@@ -103,8 +104,9 @@ export type ChatStore = ReturnType<typeof createChatStore>;
 
 const ATTACHMENT_LINE = /^\[attachment: (.+)\]$/;
 const PATH_MARKER = " path=";
-const SYNTHETIC_INPUT = /^\[agent ([0-9a-f]{32})(?: finished)?\]/;
-const FINISHED_INPUT = /^\[agent ([0-9a-f]{32}) finished\]/;
+const ACTOR_ID = "([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})";
+const SYNTHETIC_INPUT = new RegExp(`^\\[agent ${ACTOR_ID}(?: finished)?\\]`);
+const FINISHED_INPUT = new RegExp(`^\\[agent ${ACTOR_ID} finished\\]`);
 
 const parseInput = (input: string): { text: string; attachments: Attachment[] } => {
   const lines = input.split("\n");
@@ -131,6 +133,22 @@ const childActors = (items: TranscriptItem[], actors: Set<string>) => {
     actors.add(item.childSessionId);
     childActors(item.items, actors);
   }
+};
+
+export type RunningDescendant = { id: string; agent: string };
+
+const collectRunning = (items: TranscriptItem[], active: Record<string, boolean>, running: RunningDescendant[]) => {
+  for (const item of items) {
+    if (item.kind !== "subagent") continue;
+    if (active[item.childSessionId]) running.push({ id: item.childSessionId, agent: item.agent });
+    collectRunning(item.items, active, running);
+  }
+};
+
+export const runningDescendants = (turns: Turn[], active: Record<string, boolean>): RunningDescendant[] => {
+  const running: RunningDescendant[] = [];
+  for (const turn of turns) collectRunning(turn.items, active, running);
+  return running;
 };
 
 export const subscriptionFrames = (state: ChatState, rootId: string): SubscribeFrame[] => {
@@ -437,6 +455,16 @@ const interruptActor = (state: ChatState, agentId: string, rootId: string): Turn
   }));
 };
 
+const stopLatestHumanTurn = (turns: Turn[]): Turn[] => {
+  const index = turns.findLastIndex((turn) => !turn.synthetic);
+  if (index === -1) return turns;
+  return turns.map((turn, position) =>
+    position === index
+      ? { ...turn, status: "cancelled", items: finalizeItems(updateAsks(turn.items, null, "expired")) }
+      : turn,
+  );
+};
+
 export const reduceEventFrame = (state: ChatState, frame: EventFrame, rootId: string): Partial<ChatState> => {
   if (frame.seq <= (state.cursors[frame.agent_id] ?? 0)) return {};
   const event = frame.event;
@@ -444,6 +472,13 @@ export const reduceEventFrame = (state: ChatState, frame: EventFrame, rootId: st
   const finishedAgent = event.type === "input_queued" ? FINISHED_INPUT.exec(event.input)?.[1] : undefined;
   const active = finishedAgent === undefined ? lifecycle.active : { ...lifecycle.active, [finishedAgent]: false };
   const work = finishedAgent === undefined ? lifecycle.work : { ...lifecycle.work, [finishedAgent]: [] };
+  const requested =
+    frame.agent_id === rootId &&
+    event.type === "cancellation_requested" &&
+    Object.values(event.targets ?? {}).some((turns) => turns.length > 0);
+  const cancelling = state.cancelling || requested;
+  const cancellationComplete = cancelling && Object.values(active).every((value) => !value);
+  const turns = cancellationComplete ? stopLatestHumanTurn(state.turns) : state.turns;
   const finishedActors =
     event.type === "agent_finished"
       ? { ...state.finishedActors, [frame.agent_id]: true }
@@ -455,6 +490,8 @@ export const reduceEventFrame = (state: ChatState, frame: EventFrame, rootId: st
     active,
     work,
     finishedActors,
+    cancelling: cancellationComplete ? false : cancelling,
+    turns,
   };
   if (frame.agent_id !== rootId) {
     const ignoredRestart =
@@ -462,8 +499,8 @@ export const reduceEventFrame = (state: ChatState, frame: EventFrame, rootId: st
     return {
       ...base,
       turns: ignoredRestart
-        ? state.turns
-        : state.turns.map((turn) => ({ ...turn, items: routeChild(turn.items, frame.agent_id, event) })),
+        ? turns
+        : turns.map((turn) => ({ ...turn, items: routeChild(turn.items, frame.agent_id, event) })),
     };
   }
 
@@ -578,15 +615,15 @@ export const reduceEventFrame = (state: ChatState, frame: EventFrame, rootId: st
       };
     }
     default: {
-      const running = state.turns.findLastIndex((turn) => turn.status === "running");
-      const index = running === -1 ? state.turns.findLastIndex((turn) => turn.status === "queued") : running;
+      const running = turns.findLastIndex((turn) => turn.status === "running");
+      const index = running === -1 ? turns.findLastIndex((turn) => turn.status === "queued") : running;
       if (index === -1) return base;
-      const turn = state.turns[index];
+      const turn = turns[index];
       const scope = reduceItems({ items: turn.items, sampleId: state.sampleId }, event);
       if (scope.items === turn.items && scope.sampleId === state.sampleId) return base;
       return {
         ...base,
-        turns: state.turns.map((item, position) => (position === index ? { ...item, items: scope.items } : item)),
+        turns: turns.map((item, position) => (position === index ? { ...item, items: scope.items } : item)),
         sampleId: scope.sampleId,
       };
     }
@@ -603,6 +640,7 @@ export const createChatStore = (sessionId: string) =>
     active: {},
     work: {},
     finishedActors: {},
+    cancelling: false,
     dispatch: (frame) => set((state) => reduceEventFrame(state, frame, sessionId)),
     subscriptionReady: (frame) =>
       set((state) => ({

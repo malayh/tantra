@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
@@ -23,6 +24,8 @@ except ImportError:
     HAS_PSYCOPG = False
 
 MISSING_PSYCOPG = "PostgresStore needs psycopg: install tantra-harness[postgres]"
+EVENT_ENVELOPE = "tantra_stamped"
+EVENT_VERSION = 1
 
 MIGRATIONS: tuple[tuple[str, ...], ...] = (
     (
@@ -198,7 +201,7 @@ class PostgresStore:
                 rows = []
                 for event in events:
                     seq += 1
-                    rows.append((sid, seq, _json(Stamped(seq=seq, event=event))))
+                    rows.append((sid, seq, _event_json(Stamped(seq=seq, event=event))))
                 if rows:
                     await cursor.executemany(
                         self._sql("INSERT INTO {schema}.events (session_id, seq, stamped) VALUES (%s, %s, %s)"), rows
@@ -238,7 +241,7 @@ class PostgresStore:
                 stamped = Stamped(seq=seq, event=event)
                 await conn.execute(
                     self._sql("INSERT INTO {schema}.events (session_id, seq, stamped) VALUES (%s, %s, %s)"),
-                    (sid, seq, _json(stamped)),
+                    (sid, seq, _event_json(stamped)),
                 )
                 header.last_seq = seq
                 header.updated_at = datetime.now(UTC)
@@ -417,6 +420,11 @@ def _json(model: Any) -> Any:
     return Jsonb(model.model_dump(mode="json"))
 
 
+def _event_json(stamped: Stamped) -> Any:
+    payload = base64.b64encode(stamped.model_dump_json().encode()).decode()
+    return Jsonb({EVENT_ENVELOPE: {"version": EVENT_VERSION, "payload": payload}})
+
+
 def _literal(vector: Sequence[float]) -> str:
     return "[" + ",".join(repr(float(value)) for value in vector) + "]"
 
@@ -429,8 +437,16 @@ def _hydrate(row: tuple[Any, ...]) -> SessionHeader:
 
 def _parse(sid: str, raw: Any) -> Stamped:
     try:
+        envelope = raw.get(EVENT_ENVELOPE) if isinstance(raw, dict) else None
+        if envelope is not None:
+            if not isinstance(envelope, dict) or envelope.get("version") != EVENT_VERSION:
+                raise ValueError("unsupported event envelope")
+            payload = envelope.get("payload")
+            if not isinstance(payload, str):
+                raise ValueError("invalid event envelope")
+            return Stamped.model_validate_json(base64.b64decode(payload, validate=True))
         return Stamped.model_validate(raw)
-    except ValidationError as exc:
+    except (ValidationError, ValueError) as exc:
         raise CorruptLog(f"{sid}: unreadable event log row") from exc
 
 

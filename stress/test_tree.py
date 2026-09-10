@@ -5,6 +5,7 @@ import json
 from typing import Any
 from uuid import UUID, uuid4
 
+from stress.conftest import track_runtime
 from stress.driver import Policy, PolicyState, SyntheticProvider, by_model, last_user, turn_step
 from stress.invariants import check_log, check_pairs, log, picks
 from tantra import (
@@ -57,7 +58,7 @@ class Root(Agent):
 
 def build(store: Store, policy: Policy, agents: list[type[Agent]], **options: Any) -> tuple[Runtime, SyntheticProvider]:
     provider = SyntheticProvider(policy)
-    return Runtime(provider, store, agents, max_depth=2, **options), provider
+    return track_runtime(Runtime(provider, store, agents, max_depth=2, **options)), provider
 
 
 def calls(state: PolicyState, wanted: list[tuple[str, dict[str, Any]]]) -> Sample:
@@ -73,6 +74,15 @@ async def wait_for(store: Store, sid: str, kind: str, count: int = 1) -> Any:
             return events[count - 1]
         await asyncio.sleep(0)
     raise AssertionError(f"{kind} was not recorded for {sid}")
+
+
+async def wait_idle(runtime: Runtime) -> None:
+    try:
+        async with asyncio.timeout(10):
+            while runtime.active:
+                await asyncio.sleep(0)
+    except TimeoutError as exc:
+        raise AssertionError("runtime did not become idle") from exc
 
 
 async def test_deep_tree_uses_live_answers_and_explicit_finish(store: Store) -> None:
@@ -193,6 +203,8 @@ async def test_parallel_actors_finish_into_independent_journals(store: Store) ->
     children = await store.list(parent_id=root_id.hex, limit=FAN_TASKS)
     for child in children:
         await wait_for(store, child.id, "agent_finished")
+
+    await wait_idle(runtime)
 
     assert result.text == "dispatched"
     assert peak == FAN_TASKS

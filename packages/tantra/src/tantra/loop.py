@@ -103,6 +103,7 @@ _NO_OUTPUT = object()
 @dataclass(frozen=True)
 class FinishResult:
     output: Any
+    final_events: tuple[SessionEvent, ...] = ()
 
 
 class TurnEngine:
@@ -227,8 +228,12 @@ class TurnEngine:
             verdict = strictest(verdict, decide(name, rules, None, self.default_permission))
         return verdict
 
-    async def _finish(self, terminal: TurnCompleted | TurnFailed) -> TurnCompleted | TurnFailed:
-        await self._append([terminal])
+    async def _finish(
+        self,
+        terminal: TurnCompleted | TurnFailed,
+        final_events: Sequence[SessionEvent] = (),
+    ) -> TurnCompleted | TurnFailed:
+        await self._append([terminal, *final_events])
         self.terminal = terminal
         assert self.turn is not None
         for hook in self.hooks:
@@ -598,7 +603,8 @@ class TurnEngine:
                         turn_id=self.turn.turn_id,
                         stop_reason="finished",
                         output=output.output,
-                    )
+                    ),
+                    output.final_events,
                 )
             if output is not _NO_OUTPUT:
                 return await self._finish(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import subprocess
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from tantra import FileSystemStore, MemoryStore, PostgresStore, SQLiteStore, Store
+from tantra import FileSystemStore, MemoryStore, PostgresStore, Runtime, SQLiteStore, Store
 
 try:
     import psycopg
@@ -24,6 +25,32 @@ IMAGE = "pgvector/pgvector:pg17"
 PASSWORD = "tantra"
 STARTUP_DEADLINE = 60.0
 DOCKER_TIMEOUT = 120
+
+_OPEN_RUNTIMES: set[Runtime] = set()
+
+
+def track_runtime(runtime: Runtime) -> Runtime:
+    _OPEN_RUNTIMES.add(runtime)
+    return runtime
+
+
+async def close_tracked_runtimes() -> None:
+    runtimes = tuple(_OPEN_RUNTIMES)
+    _OPEN_RUNTIMES.clear()
+    for runtime in runtimes:
+        tasks = tuple(runtime.active.values())
+        await runtime.aclose()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.fixture(autouse=True)
+async def runtime_cleanup() -> AsyncIterator[None]:
+    try:
+        yield
+    finally:
+        await close_tracked_runtimes()
+
 
 BACKENDS = ("memory", "fs", "sqlite", "postgres")
 
@@ -58,6 +85,7 @@ async def store(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator
     try:
         yield made
     finally:
+        await close_tracked_runtimes()
         await close_store(made)
         if dsn:
             drop_schema(dsn, schema)

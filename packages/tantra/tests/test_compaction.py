@@ -16,6 +16,7 @@ from tantra.compaction import (
 from tantra.context import TurnContext, assemble_messages, build_messages, compaction_window
 from tantra.errors import ProviderError
 from tantra.events import (
+    CancellationRequested,
     CompactionApplied,
     SampleCompleted,
     SampleStarted,
@@ -609,3 +610,20 @@ class Noter(Agent):
 
 def call(name: str, args: str, cid: str = "c1") -> ToolCall:
     return ToolCall(id=cid, name=name, args=args)
+
+
+def test_cancellation_is_projected_without_orphaning_an_incomplete_tool_call() -> None:
+    events: list[SessionEvent] = [
+        TurnStarted(turn_id="first", input="start work"),
+        ToolCallRequested(sample_id="sample", call_id="call", name="fetch", args={"path": "x"}),
+        CancellationRequested(command_id="cancel", targets={"root": ["first"]}),
+        TurnStarted(turn_id="later", input="what happened?"),
+    ]
+
+    messages = build_messages(events)
+
+    assert any(
+        isinstance(message, UserMessage) and "cancelled the live root and descendant work" in message.content
+        for message in messages
+    )
+    assert pairs(messages) == ([], [])

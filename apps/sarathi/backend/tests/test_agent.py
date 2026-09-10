@@ -79,6 +79,12 @@ def test_web_fetch_is_wired_without_a_proxy_when_unset(monkeypatch: pytest.Monke
     assert "web_fetch" in _names(Researcher)
 
 
+def test_explicit_memory_request_survives_an_interrupted_attempt() -> None:
+    assert "always call memory_write" in Sarathi.prompt
+    assert "earlier attempt was interrupted" in Sarathi.prompt
+    assert "do not call memory_write again for that request" in Sarathi.prompt
+
+
 def test_memory_write_asks_before_it_runs() -> None:
     assert Sarathi.permissions == {"memory_write": "ask"}
 

@@ -16,6 +16,7 @@ from tantra.events import (
     CancellationRequested,
     ChildCreated,
     InputQueued,
+    LoggedEvent,
     SessionEvent,
     ToolCallCompleted,
     TurnCancelled,
@@ -23,6 +24,7 @@ from tantra.events import (
     TurnInterrupted,
     TurnStarted,
 )
+from tantra.hooks import Hook
 from tantra.providers.base import ModelLimits, ProviderEvent, SampleRequest, StreamEnd, ToolCall
 from tantra.providers.fake import FAKE_LIMITS
 from tantra.stores.memory import MemoryStore
@@ -339,12 +341,34 @@ async def test_finish_boundary_closes_child_cancels_queue_and_delivers_once() ->
     assert ran == ["slow"]
     assert sum(isinstance(event, AgentFinished) for event in child_events) == 1
     assert any(isinstance(event, TurnCompleted) and event.stop_reason == "finished" for event in child_events)
+    assert isinstance(child_events[-2], TurnCompleted)
+    assert isinstance(child_events[-1], AgentFinished)
+    assert child.last_seq == len(child_events)
     assert any(isinstance(event, TurnCancelled) and event.reason == "agent_finished" for event in child_events)
     late_result = next(
         event for event in child_events if isinstance(event, ToolCallCompleted) and event.call_id == "late"
     )
     assert late_result.is_error and late_result.result == "not executed: turn completed"
     assert sum(' finished] {"a":"x","z":2}' in event.input for event in parent_inputs) == 1
+
+    child_turn = next(event.turn_id for event in child_events if isinstance(event, TurnStarted))
+    before_duplicate = list(child_events)
+    duplicate = await runtime._actor_finish(
+        child,
+        Child,
+        context(store, child_id, turn=child_turn, cid="finish", depth=1),
+        {"z": 2, "a": "x"},
+    )
+    await wait_idle(runtime, root.id)
+    assert duplicate.output == {"z": 2, "a": "x"}
+    assert await journal(store, child_id) == before_duplicate
+    assert (
+        sum(
+            isinstance(event, InputQueued) and ' finished] {"a":"x","z":2}' in event.input
+            for event in await journal(store, root.id)
+        )
+        == 1
+    )
 
     with pytest.raises(TantraError, match="finished"):
         await runtime._actor_send(
@@ -897,6 +921,7 @@ class GatedFinishedStore(MemoryStore):
         super().__init__()
         self.finished_committed = asyncio.Event()
         self.release_finished = asyncio.Event()
+        self.finished_batch: list[SessionEvent] = []
 
     async def append(
         self,
@@ -905,6 +930,7 @@ class GatedFinishedStore(MemoryStore):
     ) -> int:
         result = await super().append(sid, events)
         if any(isinstance(event, AgentFinished) for event in events):
+            self.finished_batch = list(events)
             self.finished_committed.set()
             await self.release_finished.wait()
         return result
@@ -959,6 +985,8 @@ async def test_cancel_racing_durable_finish_preserves_finished_terminal() -> Non
     ]
     assert terminals == [TurnCompleted(turn_id=turn_id, stop_reason="finished", output="done")]
     assert sum(isinstance(event, AgentFinished) for event in child_events) == 1
+    assert isinstance(store.finished_batch[-2], TurnCompleted)
+    assert isinstance(store.finished_batch[-1], AgentFinished)
     assert any(
         isinstance(event, InputQueued) and f"[agent {UUID(child_public)} finished]" in event.input
         for event in await journal(store, root.id)
@@ -988,7 +1016,76 @@ class FailingFinishCleanupStore(MemoryStore):
         return await super().append(sid, events)
 
 
-async def test_finish_retry_reactivates_durable_parent_delivery() -> None:
+async def test_failed_atomic_finish_retains_parent_delivery_without_partial_close() -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.child_started = asyncio.Event()
+            self.release_child = asyncio.Event()
+            self.root_calls = 0
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            if req.model == "child":
+                self.child_started.set()
+                await self.release_child.wait()
+                yield StreamEnd(tool_calls=[call("finish", '{"result":"done"}', "finish")])
+                return
+            self.root_calls += 1
+            yield StreamEnd(text="done")
+
+    provider = Provider()
+    store = FailingFinishCleanupStore()
+    runtime = Runtime(provider, store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "initial")
+    child_id = UUID(child_public).hex
+    await asyncio.wait_for(provider.child_started.wait(), timeout=2)
+    await store.enqueue(child_id, InputQueued(command_id=uuid4().hex, input="pending"))
+    store.fail_sid = child_id
+    provider.release_child.set()
+    await wait_idle(runtime, child_id)
+
+    child_events = await journal(store, child_id)
+    parent_deliveries = [
+        event
+        for event in await journal(store, root.id)
+        if isinstance(event, InputQueued) and ' finished] "done"' in event.input
+    ]
+    assert not any(isinstance(event, AgentFinished) for event in child_events)
+    assert not any(
+        isinstance(event, TurnCompleted | TurnCancelled) and event.turn_id == child_events[1].command_id
+        for event in child_events
+    )
+    assert len(parent_deliveries) == 1
+    assert root.id not in runtime.active
+
+    async with runtime.connect(root_id, writable=True) as connection:
+        result = await connection.prompt("continue", command_id=uuid4())
+    assert result.outcome == "completed"
+    assert provider.root_calls == 2
+    await runtime.aclose()
+
+
+class PersistentlyFailingFinishedHeaderStore(MemoryStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.finished_patch_attempts = 0
+
+    async def patch_header(self, sid: str, **fields: Any) -> Any:
+        if fields.get("finished") is True:
+            self.finished_patch_attempts += 1
+            raise RuntimeError("finished header patch failed")
+        return await super().patch_header(sid, **fields)
+
+
+async def test_persistent_finished_header_patch_failure_does_not_strand_parent() -> None:
     class Child(Agent):
         model = "child"
 
@@ -1000,47 +1097,99 @@ async def test_finish_retry_reactivates_durable_parent_delivery() -> None:
             self.root_calls = 0
 
         async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
-            if req.model == "root":
-                self.root_calls += 1
+            if req.model == "child":
+                yield StreamEnd(tool_calls=[call("finish", '{"result":"done"}', "finish")])
+                return
+            self.root_calls += 1
             yield StreamEnd(text="done")
 
     provider = Provider()
-    store = FailingFinishCleanupStore()
-    runtime = DroppedActivationRuntime(provider, store, [Root], default_model="root")
+    store = PersistentlyFailingFinishedHeaderStore()
+    runtime = Runtime(provider, store, [Root], default_model="root")
     root_id = await runtime.create(Root)
     root = await store.header(root_id.hex)
     assert root is not None
     child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "initial")
     child_id = UUID(child_public).hex
-    await wait_idle(runtime, child_id)
+    await wait_idle(runtime, child_id, root.id)
+
+    child_events = await journal(store, child_id)
     child = await store.header(child_id)
-    assert child is not None
-    pending = uuid4()
-    await store.enqueue(child_id, InputQueued(command_id=pending.hex, input="pending"))
-    store.fail_sid = child_id
-    runtime.drop_target = root.id
-    ctx = context(store, child.id, turn="finish-turn", cid="finish", depth=1)
-    finish_command = runtime._internal_id(child, ctx, "finish")
-    notification_generation = runtime._signal(root.id).generation
-
-    with pytest.raises(RuntimeError, match="finish cleanup append failed"):
-        await runtime._actor_finish(child, Child, ctx, "result")
-    assert root.id not in runtime.active
-    assert runtime.drop_target is None
-    assert runtime._signal(root.id).generation == notification_generation + 1
-    assert sum(isinstance(event, AgentFinished) for event in await journal(store, child_id)) == 1
-
-    await runtime._actor_finish(child, Child, ctx, "result")
-    result = await runtime._wait_result(root.id, finish_command)
     parent_deliveries = [
         event
         for event in await journal(store, root.id)
-        if isinstance(event, InputQueued) and event.command_id == finish_command.hex
+        if isinstance(event, InputQueued) and ' finished] "done"' in event.input
     ]
-
-    assert result.text == "done"
-    assert provider.root_calls == 1
+    assert child is not None and child.finished is False
+    assert store.finished_patch_attempts == 1
+    assert isinstance(child_events[-2], TurnCompleted)
+    assert isinstance(child_events[-1], AgentFinished)
     assert len(parent_deliveries) == 1
+    assert provider.root_calls == 1
+    with pytest.raises(TantraError, match="finished"):
+        await runtime._actor_send(
+            root,
+            context(store, root.id, turn="later", cid="send"),
+            UUID(child_public),
+            "new",
+        )
+    await runtime.aclose()
+
+
+async def test_post_append_hook_failure_reconciles_durable_finish() -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.root_calls = 0
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            if req.model == "child":
+                yield StreamEnd(tool_calls=[call("finish", '{"result":"done"}', "finish")])
+                return
+            self.root_calls += 1
+            yield StreamEnd(text="done")
+
+    class RaiseAfterDurableFinish(Hook):
+        def __init__(self, store: MemoryStore) -> None:
+            self.raised = False
+            self.store = store
+
+        async def on_event(self, emitted: LoggedEvent) -> None:
+            if not self.raised and isinstance(emitted.event, TurnCompleted) and emitted.event.stop_reason == "finished":
+                self.raised = True
+                await self.store.patch_header(emitted.agent_id.hex, status="idle", pending_ask=None, finished=True)
+                raise RuntimeError("post-append hook failed")
+
+    provider = Provider()
+    store = MemoryStore()
+    hook = RaiseAfterDurableFinish(store)
+    runtime = Runtime(provider, store, [Root], default_model="root", hooks=[hook])
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "initial")
+    child_id = UUID(child_public).hex
+    await wait_idle(runtime, child_id, root.id)
+
+    child_events = await journal(store, child_id)
+    child = await store.header(child_id)
+    parent_deliveries = [
+        event
+        for event in await journal(store, root.id)
+        if isinstance(event, InputQueued) and ' finished] "done"' in event.input
+    ]
+    assert hook.raised
+    assert child is not None and child.finished is True
+    assert isinstance(child_events[-2], TurnCompleted)
+    assert isinstance(child_events[-1], AgentFinished)
+    assert len(parent_deliveries) == 1
+    assert provider.root_calls == 1
+    assert not runtime._errors.get(child_id)
     await runtime.aclose()
 
 

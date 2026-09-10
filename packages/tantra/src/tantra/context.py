@@ -9,6 +9,7 @@ from typing import Any
 from tantra.agent import Agent, agent_name
 from tantra.errors import TantraError
 from tantra.events import (
+    CancellationRequested,
     CompactionApplied,
     ReasoningPart,
     SessionEvent,
@@ -34,6 +35,7 @@ from tantra.skills import SkillInfo
 from tantra.tracing import NULL_TRACER, Tracer
 
 SKILLS_PREAMBLE = "Skills available via the skill(name) tool:"
+CANCELLATION_CONTEXT = "[runtime] The user cancelled the live root and descendant work."
 
 
 @dataclass
@@ -94,6 +96,8 @@ def assemble_messages(summary: str, events: Sequence[SessionEvent]) -> list[Mess
         elif isinstance(event, TextPart):
             message = sample_message(event.sample_id)
             message.text = (message.text or "") + event.text
+        elif isinstance(event, CancellationRequested):
+            messages.append(UserMessage(content=CANCELLATION_CONTEXT))
         elif isinstance(event, ReasoningPart):
             sample_message(event.sample_id).reasoning.append(ReasoningBlock(text=event.text, signature=event.signature))
         elif isinstance(event, ToolCallRequested):
@@ -112,8 +116,13 @@ def assemble_messages(summary: str, events: Sequence[SessionEvent]) -> list[Mess
             existing.content = _as_content(event.result)
             existing.is_error = event.is_error
             completed.add(event.call_id)
+    for message in samples.values():
+        message.tool_calls = [call for call in message.tool_calls if call.id in completed]
     return [
-        message for message in messages if not isinstance(message, ToolResultMessage) or message.call_id in completed
+        message
+        for message in messages
+        if (not isinstance(message, ToolResultMessage) or message.call_id in completed)
+        and (not isinstance(message, AssistantMessage) or message.text or message.reasoning or message.tool_calls)
     ]
 
 

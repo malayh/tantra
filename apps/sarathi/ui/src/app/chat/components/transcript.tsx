@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Bot, ChevronRight, FileText, Globe, Loader2, Search, Wrench } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -11,6 +11,7 @@ import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/componen
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import type { AskItem, Banner, ChatStore, SubagentItem, TextItem, ToolItem, TranscriptItem, Turn } from "../state";
+import { runningDescendants } from "../state";
 
 type AskResponder = (askId: string, response: string) => void;
 
@@ -305,14 +306,16 @@ function TurnBlock({
 
 export function Transcript({ store, onAskResponse }: { store: ChatStore; onAskResponse: AskResponder }) {
   const turns = useStore(store, (state) => state.turns);
+  const active = useStore(store, (state) => state.active);
   const banner = useStore(store, (state) => state.banner);
   const ready = useStore(store, (state) => state.ready);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const running = useMemo(() => runningDescendants(turns, active), [turns, active]);
 
   useEffect(() => {
     const element = scrollRef.current;
     if (element) element.scrollTop = element.scrollHeight;
-  }, [turns]);
+  }, [turns, running]);
 
   return (
     <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
@@ -323,6 +326,18 @@ export function Transcript({ store, onAskResponse }: { store: ChatStore; onAskRe
         {turns.map((turn) => (
           <TurnBlock key={turn.id} turn={turn} banner={banner} onAskResponse={onAskResponse} />
         ))}
+        {running.length > 0 && (
+          <div className="border-border flex flex-col gap-2 border-t pt-4">
+            {running.map((agent) => (
+              <div key={agent.id} className="text-muted-foreground flex items-center gap-2 text-xs">
+                <Bot className="size-3" />
+                <span className="font-medium">{agent.agent}</span>
+                <span>Running</span>
+                <Loader2 className="size-3 animate-spin" />
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

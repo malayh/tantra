@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { EventFrame } from "../../generated/models/eventFrame.ts";
-import { createChatStore, subscriptionFrames } from "./state.ts";
+import { createChatStore, runningDescendants, subscriptionFrames } from "./state.ts";
 
 const root = "11111111111111111111111111111111";
 const child = "22222222222222222222222222222222";
@@ -217,4 +217,77 @@ test("tracks descendant queued running terminal and finish activity", () => {
     }),
   );
   assert.equal(store.getState().active[child], false);
+});
+
+test("canonical actor ids stay synthetic and finish their child block", () => {
+  const store = createChatStore(root);
+  const dispatch = store.getState().dispatch;
+  const canonical = "22222222-2222-2222-2222-222222222222";
+  dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "research" }));
+  dispatch(
+    event(root, 2, {
+      type: "child_created",
+      child_id: canonical,
+      agent: "researcher",
+      turn_id: command,
+      call_id: "spawn",
+    }),
+  );
+  dispatch(
+    event(root, 3, {
+      type: "input_queued",
+      command_id: "55555555555555555555555555555555",
+      input: `[agent ${canonical} finished] result`,
+    }),
+  );
+  dispatch(event(canonical, 1, { type: "agent_finished", result: "result" }));
+
+  const childBlock = store.getState().turns[0].items[0];
+  assert.equal(store.getState().turns[1].synthetic, true);
+  assert.equal(childBlock.kind, "subagent");
+  if (childBlock.kind !== "subagent") return;
+  assert.equal(childBlock.final, true);
+  assert.equal(childBlock.finished, true);
+});
+
+test("shows every running descendant and stops the latest human turn after tree cancellation", () => {
+  const store = createChatStore(root);
+  const dispatch = store.getState().dispatch;
+  const childTurn = "55555555555555555555555555555555";
+  const grandchildTurn = "66666666666666666666666666666666";
+  dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "research" }));
+  dispatch(event(root, 2, { type: "turn_started", turn_id: command, input: "research" }));
+  dispatch(
+    event(root, 3, { type: "child_created", child_id: child, agent: "researcher", turn_id: command, call_id: "child" }),
+  );
+  dispatch(
+    event(child, 1, {
+      type: "child_created",
+      child_id: grandchild,
+      agent: "researcher",
+      turn_id: childTurn,
+      call_id: "grandchild",
+    }),
+  );
+  dispatch(event(root, 4, { type: "turn_completed", turn_id: command, stop_reason: "completed" }));
+  dispatch(event(child, 2, { type: "turn_started", turn_id: childTurn, input: "child" }));
+  dispatch(event(grandchild, 1, { type: "turn_started", turn_id: grandchildTurn, input: "grandchild" }));
+
+  assert.deepEqual(runningDescendants(store.getState().turns, store.getState().active), [
+    { id: child, agent: "researcher" },
+    { id: grandchild, agent: "researcher" },
+  ]);
+
+  dispatch(
+    event(root, 5, {
+      type: "cancellation_requested",
+      command_id: "77777777777777777777777777777777",
+      targets: { [child]: [childTurn], [grandchild]: [grandchildTurn] },
+    }),
+  );
+  dispatch(event(child, 3, { type: "turn_cancelled", turn_id: childTurn, reason: "cancelled" }));
+  assert.equal(store.getState().turns[0].status, "done");
+  dispatch(event(grandchild, 2, { type: "turn_cancelled", turn_id: grandchildTurn, reason: "cancelled" }));
+  assert.equal(store.getState().turns[0].status, "cancelled");
+  assert.deepEqual(runningDescendants(store.getState().turns, store.getState().active), []);
 });

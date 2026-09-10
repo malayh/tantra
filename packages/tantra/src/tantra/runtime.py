@@ -262,7 +262,12 @@ class Runtime:
         async with self._lock(root_id):
             if self._turn_generations.get(agent_id) != generation:
                 raise asyncio.CancelledError
-            return await self._append(agent_id, events)
+            batch = list(events)
+            if any(isinstance(event, AgentFinished) for event in batch):
+                state = reduce_journal(await self._journal(agent_id))
+                cancelled = [TurnCancelled(turn_id=item.command_id, reason="agent_finished") for item in state.pending]
+                batch = [*cancelled, *batch]
+            return await self._append(agent_id, batch)
 
     async def _journal(self, agent_id: str) -> list[Stamped]:
         items: list[Stamped] = []
@@ -466,30 +471,17 @@ class Runtime:
             await self._append(agent_id, [event])
             return True
 
-    async def _close_finished(
-        self,
-        agent_id: str,
-        header: SessionHeader,
-        journal: list[Stamped],
-        finished: AgentFinished,
-    ) -> None:
-        state = reduce_journal(journal)
-        events: list[SessionEvent] = [
-            TurnCancelled(turn_id=item.command_id, reason="agent_finished") for item in state.pending
-        ]
-        if state.incomplete is not None:
-            events.append(
-                TurnCompleted(
-                    turn_id=state.incomplete.turn_id,
-                    stop_reason="finished",
-                    output=finished.result,
-                )
-            )
-        await self._append(agent_id, events)
-        try:
-            await self.store.patch_header(agent_id, status="idle", pending_ask=None, finished=True)
-        except Exception:
-            pass
+    async def _finalize_finished(self, agent_id: str, header: SessionHeader) -> None:
+        if not header.finished:
+            try:
+                await self.store.patch_header(agent_id, status="idle", pending_ask=None, finished=True)
+            except Exception:
+                pass
+        parent_id = header.parent_id
+        if parent_id is not None:
+            await self._notify(parent_id)
+            self._activations[parent_id] = self._activations.get(parent_id, 0) + 1
+            self._activate(parent_id, header.root_id or header.id)
 
     def _framework_tools(self, header: SessionHeader, agent: type[Agent]) -> dict[str, Tool]:
         tools = dict(self.tools[header.agent])
@@ -712,20 +704,7 @@ class Runtime:
                 await self.store.enqueue(parent_id, parent_input)
             elif existing != parent_input:
                 raise InvalidCommandReuse(command.hex)
-            await self._notify(parent_id)
-            self._activations[parent_id] = self._activations.get(parent_id, 0) + 1
-            self._activate(parent_id, root_id)
-            await self._append(header.id, [AgentFinished(result=normalized)])
-            state = reduce_journal(journal)
-            await self._append(
-                header.id,
-                [TurnCancelled(turn_id=item.command_id, reason="agent_finished") for item in state.pending],
-            )
-            try:
-                await self.store.patch_header(header.id, status="idle", pending_ask=None, finished=True)
-            except Exception:
-                pass
-            return FinishResult(normalized)
+            return FinishResult(normalized, (AgentFinished(result=normalized),))
 
     async def _drain(self, agent_id: str, root_id: str, generation: int) -> None:
         task = asyncio.current_task()
@@ -746,7 +725,7 @@ class Runtime:
                         fresh = await self._journal(agent_id)
                         durable = self._finished(fresh)
                         if durable is not None:
-                            await self._close_finished(agent_id, header, fresh, durable)
+                            await self._finalize_finished(agent_id, header)
                         if self.active.get(agent_id) is task:
                             del self.active[agent_id]
                     return
@@ -810,6 +789,11 @@ class Runtime:
                 )
                 terminal = await engine.run(queued)
                 self._task_turns.pop(task, None)
+                finished = isinstance(terminal, TurnCompleted) and terminal.stop_reason == "finished"
+                if finished:
+                    self._errors.get(agent_id, {}).pop(current, None)
+                    current = None
+                    continue
                 async with self._lock(root_id):
                     if self._turn_generations.get(agent_id) == turn_generation:
                         await self.store.patch_header(
@@ -840,9 +824,24 @@ class Runtime:
                     self._errors.setdefault(agent_id, {})[current] = exc
                     await self._notify(agent_id)
         except BaseException as exc:
+            error: BaseException = exc
+            reconciled = False
+            try:
+                async with self._lock(root_id):
+                    header = await self._header(agent_id)
+                    if self._finished(await self._journal(agent_id)) is not None:
+                        await self._finalize_finished(agent_id, header)
+                        reconciled = True
+            except BaseException as finalize_exc:
+                error = finalize_exc
+            if reconciled:
+                if current is not None:
+                    self._errors.get(agent_id, {}).pop(current, None)
+                current = None
+                return
             failed = True
             if current is not None:
-                self._errors.setdefault(agent_id, {})[current] = exc
+                self._errors.setdefault(agent_id, {})[current] = error
             await self._notify(agent_id)
         finally:
             self._task_turns.pop(task, None)

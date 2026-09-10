@@ -582,7 +582,7 @@ application contracts.
   - [x] 1.0 documentation draft
   - [x] Transitional Harness isolation
 
-### Phase 4 — Sarathi migration and Tantra 1.0.0 · deps: P3 · final · CODE DONE, VERIFICATION PENDING
+### Phase 4 — Sarathi migration and Tantra 1.0.0 · deps: P3 · final · DONE
 
 - Create one Runtime in FastAPI lifespan and move all execution ownership to it.
 - Replace the WebSocket coordinator with writer connections and explicit
@@ -602,21 +602,26 @@ application contracts.
   Run `just lint`, `just test`, `just stress`, Sarathi backend tests, UI lint,
   UI tests, UI build, end-to-end tests, and strict documentation build.
 - Checklist:
-  - [ ] FastAPI Runtime lifespan
-  - [ ] Explicit WebSocket subscriptions
-  - [ ] UI per-agent cursor state
-  - [ ] Harness and legacy execution removal
-  - [ ] Full repository verification
-  - [ ] Tantra 1.0.0 metadata
+  - [x] FastAPI Runtime lifespan
+  - [x] Explicit WebSocket subscriptions
+  - [x] UI per-agent cursor state
+  - [x] Harness and legacy execution removal
+  - [x] Full repository verification
+  - [x] Tantra 1.0.0 metadata
 
-- Verification status (2026-09-09): Ruff check and format, 467 package tests,
-  66 stress tests, 67 Sarathi backend tests, four native Node reducer tests,
-  UI lint and production build, strict documentation build, lock validation,
-  package build, diff checks, and legacy-symbol audits pass. Fifteen package
-  tests and 18 stress tests skip for unavailable external services or optional
-  environments. Real PostgreSQL contracts and the credentialed live browser
-  runbook remain outstanding because Docker and provider credentials are not
-  available in this shell.
+- Verification status (2026-09-10): complete. All 486 Tantra package tests and
+  all 84 stress tests pass against the real Compose PostgreSQL service; all 68
+  Sarathi backend tests and all 6 UI reducer tests pass. Ruff lint and format,
+  UI lint and production build, strict documentation build, lock check,
+  package build, diff check, and legacy-symbol audits pass. Credentialed Brave
+  verification passes basic chat, web search, memory approval and recall,
+  denial without re-requesting permission, model switching, replay without
+  duplicates, deterministic writer takeover, recursive child replay and
+  finish, compact running-child status with spinner, tree cancellation, and
+  interruption followed by an explicit retry. Two live-runbook exceptions are
+  recorded: account-isolation signup was not rerun, and the attached Brave
+  control cannot transfer the local PDF fixture into a file input; all backend
+  attachment tests pass.
 
 ## Open Decisions
 

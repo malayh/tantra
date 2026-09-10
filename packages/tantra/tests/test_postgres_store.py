@@ -6,13 +6,14 @@ from datetime import UTC, datetime
 import pytest
 
 from tantra.errors import CorruptLog
-from tantra.events import SessionHeader, TextPart
+from tantra.events import SessionHeader, Stamped, TextPart
 from tantra.memory import BuiltinMemory, MemoryRecord, MemoryWrite
 from tantra.stores.base import select_headers
 from tantra.stores.postgres import PostgresStore
 
 psycopg = pytest.importorskip("psycopg")
 sql = pytest.importorskip("psycopg.sql")
+Jsonb = pytest.importorskip("psycopg.types.json").Jsonb
 
 CONTENDERS = 4
 ROUNDS = 8
@@ -353,3 +354,27 @@ async def test_supersede_hides_the_old_row_from_recall_but_get_still_returns_it(
     stale = await memory.get(old_id)
     assert stale is not None
     assert stale.superseded_by == new_id
+
+
+async def test_event_envelope_preserves_nul_and_legacy_rows(postgres_dsn: str, pg_schema: str) -> None:
+    store = await _store(postgres_dsn, pg_schema)
+    encoded = SessionHeader(id=uuid.uuid4().hex, agent="build")
+    await store.create(encoded)
+    payload = "left\x00right"
+
+    await store.append(encoded.id, [TextPart(sample_id="s1", text=payload)])
+
+    raw = _query(postgres_dsn, pg_schema, "SELECT stamped FROM {schema}.events WHERE session_id = %s", (encoded.id,))
+    assert raw[0][0]["tantra_stamped"]["version"] == 1
+    assert (await store.read_page(encoded.id))[0].event.text == payload
+
+    legacy = SessionHeader(id=uuid.uuid4().hex, agent="build")
+    await store.create(legacy)
+    stamped = Stamped(seq=1, event=TextPart(sample_id="s2", text="legacy"))
+    _query(
+        postgres_dsn,
+        pg_schema,
+        "INSERT INTO {schema}.events (session_id, seq, stamped) VALUES (%s, 1, %s) RETURNING seq",
+        (legacy.id, Jsonb(stamped.model_dump(mode="json"))),
+    )
+    assert (await store.read_page(legacy.id))[0] == stamped

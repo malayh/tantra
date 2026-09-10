@@ -5,6 +5,7 @@ import json
 from typing import Any
 from uuid import UUID, uuid4
 
+from stress.conftest import track_runtime
 from stress.driver import (
     Policy,
     PolicyState,
@@ -77,12 +78,14 @@ class Marathoner(Agent):
 def build(store: Store, policy: Policy, *, seed: int = 0) -> tuple[Runtime, SyntheticProvider]:
     provider = SyntheticProvider(policy, limits=LIMITS, seed=seed)
     provider.state.markers = list(MARKERS)
-    runtime = Runtime(
-        provider,
-        store,
-        [Marathoner],
-        default_model=MODEL,
-        compactor=PruneThenSummarize(CONFIG),
+    runtime = track_runtime(
+        Runtime(
+            provider,
+            store,
+            [Marathoner],
+            default_model=MODEL,
+            compactor=PruneThenSummarize(CONFIG),
+        )
     )
     return runtime, provider
 

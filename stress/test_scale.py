@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from stress.conftest import BACKENDS, close_store, drop_schema
+from stress.conftest import BACKENDS, close_store, close_tracked_runtimes, drop_schema, track_runtime
 from stress.driver import Policy, PolicyState, SyntheticEmbedder, SyntheticProvider, blob, turn_step
 from stress.invariants import check_log, event_type, log
 from tantra import (
@@ -92,6 +92,7 @@ async def substrate(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIter
     try:
         yield Substrate(backend=backend, make=make)
     finally:
+        await close_tracked_runtimes()
         for store in opened:
             await close_store(store)
         if dsn:
@@ -115,7 +116,7 @@ class Runner(Agent):
 
 def build(store: Store, policy: Policy) -> tuple[Runtime, SyntheticProvider]:
     provider = SyntheticProvider(policy)
-    return Runtime(provider, store, [Runner]), provider
+    return track_runtime(Runtime(provider, store, [Runner])), provider
 
 
 def plain(text: str) -> Policy:

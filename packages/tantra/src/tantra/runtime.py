@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4, uuid5
 
+from pydantic import TypeAdapter
+
 from tantra.agent import Agent, agent_name, build_name_table
 from tantra.ask import ApprovalResponse, AskResponse
 from tantra.errors import (
@@ -20,6 +22,7 @@ from tantra.errors import (
     WriterRequired,
 )
 from tantra.events import (
+    ActorStatus,
     AgentFinished,
     AskAnswered,
     AskRaised,
@@ -42,12 +45,14 @@ from tantra.events import (
 )
 from tantra.hooks import Hook
 from tantra.loop import DEFAULT_RETRY, FinishResult, RetryConfig, TurnEngine
-from tantra.permissions import check_permission
+from tantra.permissions import check_permission, decide
 from tantra.providers.base import Provider
 from tantra.skills import SKILL_TOOL, SkillInfo, Skills
 from tantra.stores.base import Store, reduce_journal
 from tantra.tools import Context, Tool
 from tantra.tracing import NULL_TRACER, Tracer
+
+ACTOR_STATUS_ADAPTER: TypeAdapter[ActorStatus] = TypeAdapter(ActorStatus)
 
 if TYPE_CHECKING:
     from tantra.compaction import Compactor
@@ -197,12 +202,22 @@ class Runtime:
         for name, agent in self.agents.items():
             reserved = set()
             if agent.subagents:
-                reserved.update(("spawn", "send"))
+                reserved.update(("spawn", "send", "status"))
             if name in child_agents:
                 reserved.update(("send", "finish"))
             collision = sorted(reserved & self.tools[name].keys())
             if collision:
                 raise TantraError(f"agent {name!r}: duplicate tool name {collision[0]!r}")
+            if name not in child_agents:
+                continue
+            effective = {tool.name: tool.permission for tool in self.tools[name].values()}
+            effective.update({"send": None, "finish": None})
+            if agent.subagents:
+                effective.update({"spawn": None, "status": None})
+            for tool_name, tool_permission in sorted(effective.items()):
+                if decide(tool_name, agent.permissions, tool_permission, self.default_permission) == "ask":
+                    raise TantraError(f"agent {name!r}: child tool {tool_name!r} cannot use 'ask' permission")
+
         self.active: dict[str, asyncio.Task[None]] = {}
         self.asks: dict[str, _LiveAsk] = {}
         self.conditions: dict[str, _Signal] = {}
@@ -306,11 +321,14 @@ class Runtime:
     async def _tree_headers(self, root_id: str) -> list[SessionHeader]:
         root = await self._root_header(root_id)
         headers = [root]
-        pending = [root_id]
-        while pending:
-            children = await self._children(pending.pop(0))
+        level = [root]
+        while level:
+            children = []
+            for parent in level:
+                children.extend(await self._children(parent.id))
+            children.sort(key=lambda child: (child.created_at, child.id))
             headers.extend(children)
-            pending.extend(child.id for child in children)
+            level = children
         return headers
 
     async def _tree_command(self, root_id: str, command_id: str) -> tuple[str, SessionEvent] | None:
@@ -374,6 +392,30 @@ class Runtime:
         if after < 0:
             raise ValueError("after must be non-negative")
         return Connection(self, root_id, sid, after=after, writable=writable)
+
+    def _status_from_header(self, header: SessionHeader) -> ActorStatus:
+        task = self.active.get(header.id)
+        return ActorStatus(
+            agent_id=UUID(hex=header.id),
+            root_id=UUID(hex=header.root_id or header.id),
+            parent_id=UUID(hex=header.parent_id) if header.parent_id is not None else None,
+            agent=header.agent,
+            state="finished" if header.finished else header.status,
+            active=task is not None and not task.done(),
+            current_turn_id=UUID(hex=header.current_turn_id) if header.current_turn_id is not None else None,
+            last_turn=header.last_turn,
+            last_seq=header.last_seq,
+            updated_at=header.updated_at,
+        )
+
+    async def status(self, agent_id: UUID) -> ActorStatus:
+        _, sid = _id(agent_id, "agent_id")
+        return self._status_from_header(await self._header(sid))
+
+    async def tree_status(self, root_id: UUID) -> list[ActorStatus]:
+        _, sid = _id(root_id, "root_id")
+        headers = await self._tree_headers(sid)
+        return [self._status_from_header(header) for header in headers]
 
     async def events(self, agent_id: UUID, *, after: int = 0) -> AsyncIterator[LoggedEvent]:
         public_id, sid = _id(agent_id, "agent_id")
@@ -474,7 +516,7 @@ class Runtime:
     async def _finalize_finished(self, agent_id: str, header: SessionHeader) -> None:
         if not header.finished:
             try:
-                await self.store.patch_header(agent_id, status="idle", pending_ask=None, finished=True)
+                await self.store.patch_header(agent_id, status="finished", pending_ask=None, finished=True)
             except Exception:
                 pass
         parent_id = header.parent_id
@@ -492,6 +534,10 @@ class Runtime:
         async def send(agent_id: UUID, input: str, ctx: Context) -> dict[str, Any]:
             return await self._actor_send(header, ctx, agent_id, input)
 
+        async def status(agent_id: UUID) -> dict[str, Any]:
+            child_status = await self._child_status(header, agent_id)
+            return ACTOR_STATUS_ADAPTER.dump_python(child_status, mode="json")
+
         async def finish(result: Any, ctx: Context) -> FinishResult:
             return await self._actor_finish(header, agent, ctx, result)
 
@@ -499,6 +545,10 @@ class Runtime:
             tools["spawn"] = Tool(
                 spawn,
                 description="Create a declared child agent, queue its input, and return its ID.",
+            )
+            tools["status"] = Tool(
+                status,
+                description="Return durable status for one direct child agent.",
             )
         if header.parent_id is not None or agent.subagents:
             tools["send"] = Tool(
@@ -636,6 +686,12 @@ class Runtime:
             self._activate(target_id, root_id)
             return {"command_id": str(command), "duplicate": accepted.duplicate}
 
+    async def _child_status(self, header: SessionHeader, child_uuid: UUID) -> ActorStatus:
+        child = await self._header(child_uuid.hex)
+        if child.parent_id != header.id:
+            raise TantraError("status is allowed only for direct child agents")
+        return self._status_from_header(child)
+
     async def _descendants(self, agent_id: str) -> list[SessionHeader]:
         descendants: list[SessionHeader] = []
         pending = [agent_id]
@@ -763,7 +819,6 @@ class Runtime:
                     turn_generation = self._turn_generations.get(agent_id, 0) + 1
                     self._turn_generations[agent_id] = turn_generation
                     self._task_turns[task] = current
-                    await self.store.patch_header(agent_id, status="running")
                 tools = self._framework_tools(header, agent)
                 engine = TurnEngine(
                     store=self.store,
@@ -782,6 +837,7 @@ class Runtime:
                     compactor=self.compactor,
                     tracer=self.tracer,
                     ask_future=lambda event: self._register_ask(root_id, agent_id, event),
+                    allow_asks=header.parent_id is None,
                     append_events=lambda events, generation=turn_generation: self._engine_append(
                         agent_id, root_id, generation, events
                     ),
@@ -794,13 +850,6 @@ class Runtime:
                     self._errors.get(agent_id, {}).pop(current, None)
                     current = None
                     continue
-                async with self._lock(root_id):
-                    if self._turn_generations.get(agent_id) == turn_generation:
-                        await self.store.patch_header(
-                            agent_id,
-                            status="failed" if isinstance(terminal, TurnFailed) else "idle",
-                            pending_ask=None,
-                        )
                 self._errors.get(agent_id, {}).pop(current, None)
                 current = None
         except asyncio.CancelledError:
@@ -814,12 +863,6 @@ class Runtime:
                     event = TurnCancelled(turn_id=current, reason=reason)
                 try:
                     await self._interrupt_if_incomplete(agent_id, event)
-                    async with self._lock(root_id):
-                        if (
-                            self.active.get(agent_id) is task
-                            and self._turn_generations.get(agent_id) == turn_generation
-                        ):
-                            await self.store.patch_header(agent_id, status="idle", pending_ask=None)
                 except BaseException as exc:
                     self._errors.setdefault(agent_id, {})[current] = exc
                     await self._notify(agent_id)
@@ -1010,7 +1053,6 @@ class Runtime:
                     if self.active.get(agent_id) is task:
                         del self.active[agent_id]
                     task.cancel()
-                await self.store.patch_header(agent_id, status="idle", pending_ask=None)
             return CommandReceipt(command_id=public_id, duplicate=duplicate)
 
     async def _wait_result(self, agent_id: str, command_id: UUID) -> TurnResult:
@@ -1060,7 +1102,6 @@ class Runtime:
                                 agent_id,
                                 [TurnInterrupted(turn_id=state.incomplete.turn_id, reason="runtime_closed")],
                             )
-                        await self.store.patch_header(agent_id, status="idle", pending_ask=None)
                     except BaseException as exc:
                         if state is not None and state.incomplete is not None:
                             self._errors.setdefault(agent_id, {})[state.incomplete.turn_id] = exc

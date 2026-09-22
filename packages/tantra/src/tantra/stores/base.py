@@ -4,10 +4,14 @@ from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
+from uuid import UUID
 
 from pydantic import BaseModel
 
 from tantra.events import (
+    AgentFinished,
+    AskAnswered,
+    AskRaised,
     InputQueued,
     SessionEvent,
     SessionHeader,
@@ -18,6 +22,7 @@ from tantra.events import (
     TurnFailed,
     TurnInterrupted,
     TurnStarted,
+    TurnSummary,
     Usage,
 )
 
@@ -156,6 +161,52 @@ def apply_patch(header: SessionHeader, **fields: Any) -> SessionHeader:
             continue
         patched = {**updated.metadata, **value} if name == "metadata" else value
         setattr(updated, name, patched.model_copy(deep=True) if isinstance(patched, BaseModel) else patched)
+    updated.updated_at = datetime.now(UTC)
+    return updated
+
+
+def reduce_header(header: SessionHeader, events: Sequence[SessionEvent]) -> SessionHeader:
+    updated = header.model_copy(deep=True)
+    for event in events:
+        if isinstance(event, InputQueued):
+            if updated.current_turn_id is None and not updated.finished:
+                updated.status = "queued"
+        elif isinstance(event, TurnStarted):
+            updated.status = "running"
+            updated.current_turn_id = event.turn_id
+            updated.pending_ask = None
+        elif isinstance(event, AskRaised):
+            if updated.parent_id is None:
+                updated.status = "awaiting_input"
+                updated.pending_ask = event.ask_id
+        elif isinstance(event, AskAnswered):
+            updated.status = "running"
+            updated.pending_ask = None
+        elif isinstance(event, TurnCompleted):
+            updated.status = "idle"
+            updated.current_turn_id = None
+            updated.pending_ask = None
+            updated.last_turn = TurnSummary(UUID(hex=event.turn_id), "completed", event.stop_reason, None)
+        elif isinstance(event, TurnFailed):
+            updated.status = "failed"
+            updated.current_turn_id = None
+            updated.pending_ask = None
+            updated.last_turn = TurnSummary(UUID(hex=event.turn_id), "failed", None, event.error)
+        elif isinstance(event, TurnCancelled):
+            updated.status = "cancelled"
+            updated.current_turn_id = None
+            updated.pending_ask = None
+            updated.last_turn = TurnSummary(UUID(hex=event.turn_id), "cancelled", event.reason, None)
+        elif isinstance(event, TurnInterrupted):
+            updated.status = "interrupted"
+            updated.current_turn_id = None
+            updated.pending_ask = None
+            updated.last_turn = TurnSummary(UUID(hex=event.turn_id), "interrupted", event.reason, None)
+        elif isinstance(event, AgentFinished):
+            updated.status = "finished"
+            updated.finished = True
+            updated.current_turn_id = None
+            updated.pending_ask = None
     updated.updated_at = datetime.now(UTC)
     return updated
 

@@ -220,7 +220,38 @@ SessionEvent = Annotated[
 
 SESSION_EVENT_ADAPTER: TypeAdapter[SessionEvent] = TypeAdapter(SessionEvent)
 
-SessionStatus = Literal["idle", "running", "awaiting_input", "failed"]
+SessionStatus = Literal[
+    "queued",
+    "running",
+    "awaiting_input",
+    "idle",
+    "finished",
+    "failed",
+    "cancelled",
+    "interrupted",
+]
+
+
+@dataclass(frozen=True)
+class TurnSummary:
+    turn_id: UUID
+    outcome: Literal["completed", "failed", "cancelled", "interrupted"]
+    stop_reason: str | None
+    error: str | None
+
+
+@dataclass(frozen=True)
+class ActorStatus:
+    agent_id: UUID
+    root_id: UUID
+    parent_id: UUID | None
+    agent: str
+    state: SessionStatus
+    active: bool
+    current_turn_id: UUID | None
+    last_turn: TurnSummary | None
+    last_seq: int
+    updated_at: datetime
 
 
 class Stamped(BaseModel):
@@ -255,3 +286,5 @@ class SessionHeader(BaseModel):
     usage: Usage = Field(default_factory=Usage)
     pending_ask: str | None = None
     finished: bool = False
+    current_turn_id: str | None = None
+    last_turn: TurnSummary | None = None

@@ -4,7 +4,6 @@ import asyncio
 import base64
 import hashlib
 from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import ValidationError
@@ -12,7 +11,7 @@ from pydantic import ValidationError
 from tantra.errors import CorruptLog, InvalidCommandReuse, SessionExists, SessionNotFound, TantraError
 from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
-from tantra.stores.base import UNSET, EnqueueResult, apply_patch
+from tantra.stores.base import UNSET, EnqueueResult, apply_patch, reduce_header
 
 try:
     import psycopg
@@ -206,8 +205,8 @@ class PostgresStore:
                     await cursor.executemany(
                         self._sql("INSERT INTO {schema}.events (session_id, seq, stamped) VALUES (%s, %s, %s)"), rows
                     )
+                header = reduce_header(header, events)
                 header.last_seq = seq
-                header.updated_at = datetime.now(UTC)
                 await conn.execute(
                     self._sql("UPDATE {schema}.sessions SET header = %s, last_seq = %s WHERE id = %s"),
                     (_json(header), seq, sid),
@@ -243,8 +242,8 @@ class PostgresStore:
                     self._sql("INSERT INTO {schema}.events (session_id, seq, stamped) VALUES (%s, %s, %s)"),
                     (sid, seq, _event_json(stamped)),
                 )
+                header = reduce_header(header, [event])
                 header.last_seq = seq
-                header.updated_at = datetime.now(UTC)
                 await conn.execute(
                     self._sql("UPDATE {schema}.sessions SET header = %s, last_seq = %s WHERE id = %s"),
                     (_json(header), seq, sid),

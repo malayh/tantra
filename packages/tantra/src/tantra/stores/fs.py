@@ -4,7 +4,6 @@ import fcntl
 import os
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +12,7 @@ from pydantic import ValidationError
 from tantra.errors import CorruptLog, InvalidCommandReuse, SessionExists, SessionNotFound
 from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
-from tantra.stores.base import UNSET, EnqueueResult, apply_patch, select_headers, select_memories
+from tantra.stores.base import UNSET, EnqueueResult, apply_patch, reduce_header, select_headers, select_memories
 
 HEADER_FILE = "session.json"
 EVENTS_FILE = "events.jsonl"
@@ -107,9 +106,9 @@ class FileSystemStore:
                     handle.write("".join(lines))
                     handle.flush()
                     os.fsync(handle.fileno())
-            header.last_seq = seq
-            header.updated_at = datetime.now(UTC)
-            self._write_header(header)
+            stored = reduce_header(header, events)
+            stored.last_seq = seq
+            self._write_header(stored)
             return seq
 
     async def enqueue(self, sid: str, event: InputQueued) -> EnqueueResult:
@@ -142,9 +141,9 @@ class FileSystemStore:
                 handle.write(stamped.model_dump_json() + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            header.last_seq = seq
-            header.updated_at = datetime.now(UTC)
-            self._write_header(header)
+            stored = reduce_header(header, [event])
+            stored.last_seq = seq
+            self._write_header(stored)
             return EnqueueResult(seq=seq, duplicate=False)
 
     async def read_page(self, sid: str, *, after: int = 0, limit: int = 1000) -> list[Stamped]:

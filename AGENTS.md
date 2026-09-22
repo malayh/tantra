@@ -63,27 +63,17 @@ These guidelines are working when diffs contain fewer unnecessary changes, solut
 - Keep plans, specs, and user responses brief.
 - Prefer short bullets where they improve readability.
 
+## Subagent models
 
-## Orchestrating implementation
+- Use only `gpt-5.6-terra` and `gpt-5.6-sol` for subagents, including reviewers.
+- Use `gpt-5.6-terra` with `high` reasoning effort for routine, non-critical work. Do not use a cheaper model.
+- Use `gpt-5.6-sol` with `high` reasoning effort for security, authorization, migrations, concurrency, architecture, public contracts, data-loss risk, or a failed Terra attempt. Do not use a more expensive model.
 
-Roles:
-- The main session runs `gpt-5.6-sol` with `reasoning_effort: "high"`. It orchestrates only: plans, spawns subagents, verifies, commits. It does not write implementation code itself.
-- Implementation and review run in general-purpose subagents with `gpt-5.6-sol` with `reasoning_effort: "high"`. Never use `fork` — forks inherit main session model.
+## Executing feature-spec phases
 
-For each phase in the spec:
-1. Enter plan mode. Plan the phase from the spec: files, approach, verify criteria. Exit plan mode for approval.
-2. Spawn a general-purpose subagent (`gpt-5.6-sol`, synchronous) to implement:
-   - Prompt must include: spec path, phase number, the approved plan, and "follow the spec's Conventions section".
-   - Subagent implements, runs `just lint` + `just test`, reports what passed. (or equivalent commands)
-3. Spawn a second general-purpose subagent (`gpt-5.6-sol`, synchronous) to review:
-   - Prompt: review the phase diff against the spec's deliverables and Verify criteria; report defects with file:line.
-4. If the review finds real defects, send them back to the implementer subagent (SendMessage) or spawn a fix subagent. Re-review only if changes were large.
-5. Orchestrator verifies: run the phase's Verify criteria from the spec, plus `just lint` + `just test`.
-6. Update the spec: status marker, checklist ticks, deviations struck with reasons.
-7. Ask use to run compact
-8. Ask user to commit the phase.
-
-Rules:
-- Subagents start with zero context — the prompt and the spec must carry everything.
-- One phase at a time unless the spec's dependency graph says parallel; parallel phases use worktree isolation.
-- Never mark a phase done with failing tests. Report failures honestly.
+- Work on one requested phase at a time. Do not pull work from another phase into the current phase. If crossing a phase boundary is necessary, explain why and get user approval before proceeding.
+- Delegate bounded work only when it materially saves time, reduces context pressure, or benefits from independent investigation.
+- Apply the Ponytail skill at full intensity during implementation.
+- Review once when code changes are made. Skip review for plans, specs, status updates, and documentation-only changes. Re-review only when review fixes materially change behavior.
+- Run the phase Verify criteria and relevant project checks. Do not broaden or repeat checks without new changes, failures, or unresolved concerns.
+- Update the feature spec according to its Keeping this spec current rules.

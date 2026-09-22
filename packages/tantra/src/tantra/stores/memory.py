@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import threading
 from collections.abc import AsyncIterator, Sequence
-from datetime import UTC, datetime
 from typing import Any
 
 from tantra.errors import InvalidCommandReuse, SessionExists, SessionNotFound
 from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
-from tantra.stores.base import UNSET, EnqueueResult, apply_patch, select_headers, select_memories
+from tantra.stores.base import UNSET, EnqueueResult, apply_patch, reduce_header, select_headers, select_memories
 
 
 class MemoryStore:
@@ -82,8 +81,9 @@ class MemoryStore:
             for event in events:
                 seq += 1
                 log.append(Stamped(seq=seq, event=event.model_copy(deep=True)))
-            header.last_seq = seq
-            header.updated_at = datetime.now(UTC)
+            stored = reduce_header(header, events)
+            stored.last_seq = seq
+            self._headers[sid] = stored
             return seq
 
     async def enqueue(self, sid: str, event: InputQueued) -> EnqueueResult:
@@ -101,8 +101,9 @@ class MemoryStore:
                 raise InvalidCommandReuse(event.command_id)
             seq = header.last_seq + 1
             log.append(Stamped(seq=seq, event=event.model_copy(deep=True)))
-            header.last_seq = seq
-            header.updated_at = datetime.now(UTC)
+            stored = reduce_header(header, [event])
+            stored.last_seq = seq
+            self._headers[sid] = stored
             return EnqueueResult(seq=seq, duplicate=False)
 
     async def read_page(self, sid: str, *, after: int = 0, limit: int = 1000) -> list[Stamped]:

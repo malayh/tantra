@@ -7,9 +7,12 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from tantra.ask import FreeText, FreeTextResponse
 from tantra.errors import InvalidCommandReuse, SessionExists, SessionNotFound
 from tantra.events import (
     AgentFinished,
+    AskAnswered,
+    AskRaised,
     CancellationRequested,
     ChildCreated,
     InputQueued,
@@ -24,7 +27,10 @@ from tantra.events import (
     ToolCallCompleted,
     ToolCallDelta,
     ToolCallRequested,
+    TurnCancelled,
     TurnCompleted,
+    TurnFailed,
+    TurnInterrupted,
     TurnStarted,
     Usage,
 )
@@ -55,6 +61,7 @@ async def store_conformance(store_factory: StoreFactory) -> None:
     await _check_append_and_read(store_factory)
     await _check_read_page_and_deltas(store_factory)
     await _check_enqueue(store_factory)
+    await _check_status_snapshots(store_factory)
     await _check_mixed_journal_contention(store_factory)
     await _check_journal_reduction(store_factory)
     await _check_put_header(store_factory)
@@ -88,13 +95,14 @@ async def _expect(error: type[Exception], coro: Awaitable[Any], message: str) ->
 
 
 def _events() -> list[SessionEvent]:
+    turn = uuid.uuid4().hex
     return [
-        TurnStarted(turn_id="t1", input="fix the p99 panel"),
-        SampleStarted(turn_id="t1", sample_id="s1", model="google/gemini-3-pro"),
+        TurnStarted(turn_id=turn, input="fix the p99 panel"),
+        SampleStarted(turn_id=turn, sample_id="s1", model="google/gemini-3-pro"),
         ToolCallRequested(sample_id="s1", call_id="c1", name="search_metrics", args={"query": "x" * 8192}),
         ToolCallCompleted(call_id="c1", result={"rows": [1, 2, 3]}, is_error=False),
         SampleCompleted(sample_id="s1", usage=Usage(input_tokens=10, output_tokens=5), finish_reason="stop"),
-        TurnCompleted(turn_id="t1", stop_reason="done", output={"ok": True}),
+        TurnCompleted(turn_id=turn, stop_reason="done", output={"ok": True}),
     ]
 
 
@@ -228,6 +236,158 @@ async def _check_enqueue(factory: StoreFactory) -> None:
     )
 
 
+async def _check_status_snapshots(factory: StoreFactory) -> None:
+    store = factory()
+    header = _header(root_id=None)
+    await store.create(header)
+
+    first = uuid.uuid4()
+    queued = InputQueued(command_id=first.hex, input="one")
+    accepted = await store.enqueue(header.id, queued)
+    queued_header = await factory().header(header.id)
+    assert queued_header is not None
+    assert accepted.duplicate is False
+    assert queued_header.status == "queued"
+    assert queued_header.current_turn_id is None
+    assert queued_header.last_turn is None
+
+    duplicate = await factory().enqueue(header.id, queued.model_copy(deep=True))
+    duplicate_header = await factory().header(header.id)
+    assert duplicate_header is not None
+    assert duplicate.duplicate is True
+    assert duplicate_header.model_dump() == queued_header.model_dump()
+
+    ask_id = uuid.uuid4().hex
+    await store.append(
+        header.id,
+        [
+            TurnStarted(turn_id=first.hex, input="one"),
+            AskRaised(ask_id=ask_id, call_id="call", request=FreeText(prompt="continue?")),
+        ],
+    )
+    asking = await factory().header(header.id)
+    assert asking is not None
+    assert (asking.status, asking.current_turn_id, asking.pending_ask) == ("awaiting_input", first.hex, ask_id)
+
+    await store.append(
+        header.id,
+        [
+            AskAnswered(
+                ask_id=ask_id,
+                response=FreeTextResponse(text="yes"),
+                command_id=uuid.uuid4().hex,
+            )
+        ],
+    )
+    answered = await factory().header(header.id)
+    assert answered is not None
+    assert (answered.status, answered.current_turn_id, answered.pending_ask) == ("running", first.hex, None)
+
+    await store.append(header.id, [TurnCompleted(turn_id=first.hex, stop_reason="completed")])
+    completed = await factory().header(header.id)
+    assert completed is not None
+    assert completed.status == "idle"
+    assert completed.current_turn_id is None
+    assert completed.last_turn is not None
+    assert completed.last_turn.turn_id == first
+    assert completed.last_turn.outcome == "completed"
+    assert completed.last_turn.stop_reason == "completed"
+    assert completed.last_turn.error is None
+
+    exhausted_id = uuid.uuid4()
+    await store.enqueue(header.id, InputQueued(command_id=exhausted_id.hex, input="two"))
+    await store.append(
+        header.id,
+        [
+            TurnStarted(turn_id=exhausted_id.hex, input="two"),
+            TurnCompleted(turn_id=exhausted_id.hex, stop_reason="max_steps"),
+        ],
+    )
+    exhausted = await factory().header(header.id)
+    assert exhausted is not None and exhausted.last_turn is not None
+    assert exhausted.status == "idle"
+    assert exhausted.last_turn.turn_id == exhausted_id
+    assert exhausted.last_turn.stop_reason == "max_steps"
+
+    failed_id = uuid.uuid4()
+    await store.enqueue(header.id, InputQueued(command_id=failed_id.hex, input="three"))
+    await store.append(
+        header.id,
+        [
+            TurnStarted(turn_id=failed_id.hex, input="three"),
+            TurnFailed(turn_id=failed_id.hex, error="provider failed"),
+        ],
+    )
+    failed = await factory().header(header.id)
+    assert failed is not None and failed.last_turn is not None
+    assert failed.status == "failed"
+    assert failed.last_turn.outcome == "failed"
+    assert failed.last_turn.error == "provider failed"
+
+    cancelled_id = uuid.uuid4()
+    await store.enqueue(header.id, InputQueued(command_id=cancelled_id.hex, input="four"))
+    assert (await factory().header(header.id)).status == "queued"
+    await store.append(
+        header.id,
+        [
+            TurnStarted(turn_id=cancelled_id.hex, input="four"),
+            TurnCancelled(turn_id=cancelled_id.hex, reason="cancelled"),
+        ],
+    )
+    cancelled = await factory().header(header.id)
+    assert cancelled is not None and cancelled.last_turn is not None
+    assert cancelled.status == "cancelled"
+    assert cancelled.last_turn.outcome == "cancelled"
+    assert cancelled.last_turn.stop_reason == "cancelled"
+
+    interrupted_id = uuid.uuid4()
+    await store.enqueue(header.id, InputQueued(command_id=interrupted_id.hex, input="five"))
+    await store.append(
+        header.id,
+        [
+            TurnStarted(turn_id=interrupted_id.hex, input="five"),
+            TurnInterrupted(turn_id=interrupted_id.hex, reason="process_stopped"),
+        ],
+    )
+    interrupted = await factory().header(header.id)
+    assert interrupted is not None and interrupted.last_turn is not None
+    assert interrupted.status == "interrupted"
+    assert interrupted.last_turn.outcome == "interrupted"
+    assert interrupted.last_turn.stop_reason == "process_stopped"
+
+    finished_id = uuid.uuid4()
+    await store.enqueue(header.id, InputQueued(command_id=finished_id.hex, input="six"))
+    await store.append(
+        header.id,
+        [
+            TurnStarted(turn_id=finished_id.hex, input="six"),
+            TurnCompleted(turn_id=finished_id.hex, stop_reason="finished"),
+            AgentFinished(result="done"),
+        ],
+    )
+    finished = await factory().header(header.id)
+    assert finished is not None and finished.last_turn is not None
+    assert finished.status == "finished"
+    assert finished.finished is True
+    assert finished.last_turn.turn_id == finished_id
+    assert finished.last_turn.stop_reason == "finished"
+
+    child = _header(parent_id=header.id, root_id=header.id, depth=1)
+    await store.create(child)
+    child_turn = uuid.uuid4()
+    await store.append(
+        child.id,
+        [
+            TurnStarted(turn_id=child_turn.hex, input="child"),
+            AskRaised(ask_id=uuid.uuid4().hex, call_id="child-call", request=FreeText(prompt="blocked")),
+        ],
+    )
+    child_header = await factory().header(child.id)
+    assert child_header is not None
+    assert child_header.status == "running"
+    assert child_header.pending_ask is None
+
+
 async def _check_mixed_journal_contention(factory: StoreFactory) -> None:
     store = factory()
     header = _header()
@@ -245,10 +405,10 @@ async def _check_journal_reduction(factory: StoreFactory) -> None:
     store = factory()
     header = _header()
     await store.create(header)
-    first = InputQueued(command_id="command-1", input="one")
-    second = InputQueued(command_id="command-2", input="two")
-    third = InputQueued(command_id="command-3", input="three")
-    fourth = InputQueued(command_id="command-4", input="four")
+    first = InputQueued(command_id=uuid.uuid4().hex, input="one")
+    second = InputQueued(command_id=uuid.uuid4().hex, input="two")
+    third = InputQueued(command_id=uuid.uuid4().hex, input="three")
+    fourth = InputQueued(command_id=uuid.uuid4().hex, input="four")
     for event in (first, second, third, fourth):
         await store.enqueue(header.id, event)
     await store.append(

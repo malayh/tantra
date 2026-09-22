@@ -3,7 +3,6 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +11,7 @@ from pydantic import ValidationError
 from tantra.errors import CorruptLog, InvalidCommandReuse, SessionExists, SessionNotFound
 from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
-from tantra.stores.base import UNSET, EnqueueResult, apply_patch, select_headers, select_memories
+from tantra.stores.base import UNSET, EnqueueResult, apply_patch, reduce_header, select_headers, select_memories
 
 BUSY_TIMEOUT_MS = 30000
 
@@ -134,8 +133,8 @@ class SQLiteStore:
                 rows.append((sid, seq, Stamped(seq=seq, event=event).model_dump_json()))
             if rows:
                 conn.executemany("INSERT INTO events (session_id, seq, stamped) VALUES (?, ?, ?)", rows)
+            header = reduce_header(header, events)
             header.last_seq = seq
-            header.updated_at = datetime.now(UTC)
             conn.execute(
                 "UPDATE sessions SET header = ?, last_seq = ? WHERE id = ?",
                 (header.model_dump_json(), seq, sid),
@@ -165,8 +164,8 @@ class SQLiteStore:
                 "INSERT INTO events (session_id, seq, stamped) VALUES (?, ?, ?)",
                 (sid, seq, stamped.model_dump_json()),
             )
+            header = reduce_header(header, [event])
             header.last_seq = seq
-            header.updated_at = datetime.now(UTC)
             conn.execute(
                 "UPDATE sessions SET header = ?, last_seq = ? WHERE id = ?",
                 (header.model_dump_json(), seq, sid),

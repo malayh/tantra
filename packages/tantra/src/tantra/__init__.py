@@ -22,12 +22,14 @@ from tantra.errors import (
     WriterRequired,
 )
 from tantra.events import (
+    ActorStatus,
     CompactionApplied,
     LoggedEvent,
     SessionEvent,
     SessionHeader,
     SessionStatus,
     Stamped,
+    TurnSummary,
     Usage,
 )
 from tantra.hooks import Denial, Escalation, Hook
@@ -57,6 +59,7 @@ from tantra.tools import Context, Tool, tool
 from tantra.tracing import NullTracer, Tracer
 
 __all__ = [
+    "ActorStatus",
     "Agent",
     "Approval",
     "ApprovalResponse",
@@ -118,6 +121,7 @@ __all__ = [
     "Tracer",
     "TurnContext",
     "TurnResult",
+    "TurnSummary",
     "Usage",
     "WriterReplaced",
     "WriterRequired",

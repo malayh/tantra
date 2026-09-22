@@ -128,6 +128,7 @@ class TurnEngine:
         tracer: Tracer = NULL_TRACER,
         notify: Callable[[Stamped], Any] | None = None,
         ask_future: Callable[[AskRaised], asyncio.Future[AskResponse]] | None = None,
+        allow_asks: bool = True,
         append_events: Callable[[Sequence[SessionEvent]], Awaitable[list[Stamped]]] | None = None,
         terminal_tool: str | None = None,
     ) -> None:
@@ -149,6 +150,7 @@ class TurnEngine:
         self.tracer = tracer
         self.notify = notify
         self.ask_future = ask_future
+        self.allow_asks = allow_asks
         self.append_events = append_events
         self.terminal_tool = terminal_tool
         self.schemas = [tool.schema for tool in tools.values()]
@@ -170,6 +172,8 @@ class TurnEngine:
             self.header.last_seq = page[-1].seq
 
     async def _ask(self, call_id: str, request: AskRequest) -> AskResponse:
+        if not self.allow_asks:
+            raise TantraError("child agents cannot ask humans; use send() to message the parent")
         if self.ask_future is None:
             raise TantraError("ctx.ask is unavailable outside Runtime")
         raised = AskRaised(ask_id=uuid4().hex, call_id=call_id, request=request)
@@ -431,6 +435,15 @@ class TurnEngine:
                 )
                 continue
             if verdict == "ask":
+                if not self.allow_asks:
+                    await self._complete(
+                        call,
+                        "child agents cannot ask humans; use send() to message the parent",
+                        is_error=True,
+                        tool=tool,
+                        args=effective.args,
+                    )
+                    continue
                 body = json.dumps(effective.args, default=str)
                 if escalation is not None:
                     body = f"{escalation.reason}\n\n{body}"

@@ -1,31 +1,34 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 from pydantic import BaseModel
 
-from tantra import Agent, FreeText, FreeTextResponse, InvalidCommandReuse, MaxDepthExceeded, Runtime, TantraError, tool
+from tantra import Agent, FreeText, InvalidCommandReuse, MaxDepthExceeded, Runtime, TantraError, tool
 from tantra.events import (
     AgentFinished,
-    AskAnswered,
     AskRaised,
     CancellationRequested,
     ChildCreated,
     InputQueued,
     LoggedEvent,
     SessionEvent,
+    SessionHeader,
     ToolCallCompleted,
+    ToolCallRequested,
     TurnCancelled,
     TurnCompleted,
     TurnInterrupted,
     TurnStarted,
 )
-from tantra.hooks import Hook
-from tantra.providers.base import ModelLimits, ProviderEvent, SampleRequest, StreamEnd, ToolCall
+from tantra.hooks import Escalation, Hook
+from tantra.providers.base import ModelLimits, ProviderEvent, SampleRequest, StreamEnd, ToolCall, ToolResultMessage
 from tantra.providers.fake import FAKE_LIMITS
 from tantra.stores.memory import MemoryStore
 from tantra.tools import Context
@@ -68,6 +71,155 @@ class EchoProvider:
 
 async def journal(store: MemoryStore, sid: str) -> list[Any]:
     return [item.event for item in await store.read_page(sid)]
+
+
+class HeaderOnlyStore(MemoryStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.forbid_reads = False
+
+    async def read_page(self, sid: str, *, after: int = 0, limit: int = 1000) -> list[Any]:
+        if self.forbid_reads:
+            raise AssertionError("status read journal events")
+        return await super().read_page(sid, after=after, limit=limit)
+
+
+async def test_status_and_tree_status_read_headers_only_without_activation() -> None:
+    class Grandchild(Agent):
+        pass
+
+    class Child(Agent):
+        subagents = [Grandchild]
+
+    class Root(Agent):
+        subagents = [Child]
+
+    store = HeaderOnlyStore()
+    runtime = Runtime(EchoProvider(), store, [Root], default_model="m")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    child_later = SessionHeader(
+        id=uuid4().hex,
+        root_id=root.id,
+        parent_id=root.id,
+        agent="child",
+        depth=1,
+        model="m",
+        created_at=base + timedelta(seconds=2),
+        status="queued",
+    )
+    child_earlier = SessionHeader(
+        id=uuid4().hex,
+        root_id=root.id,
+        parent_id=root.id,
+        agent="child",
+        depth=1,
+        model="m",
+        created_at=base + timedelta(seconds=1),
+    )
+    grandchild = SessionHeader(
+        id=uuid4().hex,
+        root_id=root.id,
+        parent_id=child_earlier.id,
+        agent="grandchild",
+        depth=2,
+        model="m",
+        created_at=base,
+    )
+    for header in (child_later, child_earlier, grandchild):
+        await store.create(header)
+
+    live = asyncio.create_task(asyncio.Event().wait())
+    runtime.active[child_later.id] = live
+    store.forbid_reads = True
+
+    child_status = await runtime.status(UUID(hex=child_later.id))
+    tree = await runtime.tree_status(root_id)
+    status_tool = runtime._framework_tools(root, Root)["status"]
+    tool_status = await status_tool.invoke(
+        {"agent_id": str(UUID(hex=child_earlier.id))},
+        context(store, root.id),
+    )
+
+    assert child_status.agent_id == UUID(hex=child_later.id)
+    assert child_status.state == "queued"
+    assert child_status.active is True
+    assert tool_status["agent_id"] == str(UUID(hex=child_earlier.id))
+    assert [status.agent_id.hex for status in tree] == [
+        root.id,
+        child_earlier.id,
+        child_later.id,
+        grandchild.id,
+    ]
+    assert set(runtime.active) == {child_later.id}
+    with pytest.raises(TantraError, match="direct child"):
+        await status_tool.invoke({"agent_id": str(UUID(hex=grandchild.id))}, context(store, root.id))
+    with pytest.raises(TantraError, match="not a root"):
+        await runtime.tree_status(UUID(hex=child_earlier.id))
+
+    await runtime.aclose()
+    await asyncio.gather(live, return_exceptions=True)
+
+
+async def test_status_tool_reaches_the_provider_as_a_json_object() -> None:
+    class Child(Agent):
+        pass
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.child_id: UUID | None = None
+            self.requests: list[SampleRequest] = []
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            self.requests.append(req)
+            if len(self.requests) == 1:
+                assert self.child_id is not None
+                args = json.dumps({"agent_id": str(self.child_id)})
+                yield StreamEnd(tool_calls=[call("status", args, "status")])
+                return
+            yield StreamEnd(text="done")
+
+    provider = Provider()
+    store = MemoryStore()
+    runtime = Runtime(provider, store, [Root], default_model="m")
+    root_id = await runtime.create(Root)
+    updated_at = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    child_id = uuid4()
+    provider.child_id = child_id
+    await store.create(
+        SessionHeader(
+            id=child_id.hex,
+            root_id=root_id.hex,
+            parent_id=root_id.hex,
+            agent="child",
+            depth=1,
+            model="m",
+            updated_at=updated_at,
+        )
+    )
+
+    async with runtime.connect(root_id, writable=True) as connection:
+        await connection.prompt("inspect", command_id=uuid4())
+
+    tool_result = next(message for message in provider.requests[1].messages if isinstance(message, ToolResultMessage))
+    payload = json.loads(tool_result.content)
+    assert isinstance(payload, dict)
+    assert payload["agent_id"] == str(child_id)
+    assert payload["root_id"] == str(root_id)
+    assert payload["parent_id"] == str(root_id)
+    assert payload["state"] == "idle"
+    assert payload["active"] is False
+    assert payload["current_turn_id"] is None
+    assert payload["last_turn"] is None
+    assert payload["updated_at"] == "2026-01-02T03:04:05Z"
+    completed = next(event for event in await journal(store, root_id.hex) if isinstance(event, ToolCallCompleted))
+    assert completed.result == payload
+    await runtime.aclose()
 
 
 async def test_spawn_is_immediate_siblings_overlap_and_headers_are_independent() -> None:
@@ -227,13 +379,14 @@ async def test_grandchildren_and_inclusive_depth_fail_before_create() -> None:
     await runtime.aclose()
 
 
-async def test_root_writer_answers_descendant_ask_in_child_log() -> None:
+async def test_child_ctx_ask_is_an_ordered_tool_error_without_ask_raised() -> None:
     @tool
     async def question(ctx: Context) -> str:
         response = await ctx.ask(FreeText(prompt="name?"))
         return response.text
 
     class Child(Agent):
+        model = "child"
         tools = [question]
 
     class Root(Agent):
@@ -249,7 +402,7 @@ async def test_root_writer_answers_descendant_ask_in_child_log() -> None:
                 if self.child_calls == 1:
                     yield StreamEnd(tool_calls=[call("question", "{}", "q")])
                 else:
-                    yield StreamEnd(text="answered")
+                    yield StreamEnd(text="continued")
                 return
             yield StreamEnd(text="root")
 
@@ -258,24 +411,108 @@ async def test_root_writer_answers_descendant_ask_in_child_log() -> None:
     root_id = await runtime.create(Root)
     root = await store.header(root_id.hex)
     assert root is not None
-    Child.model = "child"
     child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "ask")
     child_id = UUID(child_public).hex
 
-    async def raised() -> AskRaised:
-        while True:
-            found = next((event for event in await journal(store, child_id) if isinstance(event, AskRaised)), None)
-            if found is not None:
-                return found
-            await asyncio.sleep(0)
-
-    ask = await asyncio.wait_for(raised(), timeout=2)
-    async with runtime.connect(root_id, writable=True) as connection:
-        await connection.answer(UUID(hex=ask.ask_id), FreeTextResponse(text="Malay"), command_id=uuid4())
     await wait_idle(runtime, child_id)
     child_events = await journal(store, child_id)
-    assert any(isinstance(event, AskAnswered) and event.answered_by == root_id.hex for event in child_events)
-    assert not any(isinstance(event, AskAnswered) for event in await journal(store, root_id.hex))
+    result = next(event for event in child_events if isinstance(event, ToolCallCompleted) and event.call_id == "q")
+    assert result.is_error is True
+    assert result.result == "child agents cannot ask humans; use send() to message the parent"
+    assert not any(isinstance(event, AskRaised) for event in child_events)
+    assert (await runtime.status(UUID(hex=child_id))).state == "idle"
+    await runtime.aclose()
+
+
+def test_runtime_rejects_static_child_ask_permissions() -> None:
+    @tool(permission="ask")
+    async def explicit() -> str:
+        return "no"
+
+    class ExplicitChild(Agent):
+        tools = [explicit]
+
+    class ExplicitRoot(Agent):
+        subagents = [ExplicitChild]
+
+    with pytest.raises(TantraError, match="child tool 'explicit' cannot use 'ask' permission"):
+        Runtime(EchoProvider(), MemoryStore(), [ExplicitRoot], default_model="m")
+
+    @tool
+    async def ruled() -> str:
+        return "no"
+
+    class RuledChild(Agent):
+        tools = [ruled]
+        permissions = {"ruled": "ask"}
+
+    class RuledRoot(Agent):
+        subagents = [RuledChild]
+
+    with pytest.raises(TantraError, match="child tool 'ruled' cannot use 'ask' permission"):
+        Runtime(EchoProvider(), MemoryStore(), [RuledRoot], default_model="m")
+
+    class DefaultChild(Agent):
+        pass
+
+    class DefaultRoot(Agent):
+        subagents = [DefaultChild]
+
+    with pytest.raises(TantraError, match="child tool 'finish' cannot use 'ask' permission"):
+        Runtime(EchoProvider(), MemoryStore(), [DefaultRoot], default_model="m", default_permission="ask")
+
+
+async def test_dynamic_child_permission_ask_is_a_tool_error_without_ask_raised() -> None:
+    called = False
+
+    @tool
+    async def action() -> str:
+        nonlocal called
+        called = True
+        return "no"
+
+    class Child(Agent):
+        model = "child"
+        tools = [action]
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class EscalateChild(Hook):
+        async def before_tool(self, call: ToolCallRequested, turn: Any) -> Escalation | None:
+            if turn.depth > 0:
+                return Escalation("approval needed")
+            return None
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.child_calls = 0
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            if req.model == "child":
+                self.child_calls += 1
+                if self.child_calls == 1:
+                    yield StreamEnd(tool_calls=[call("action", "{}", "action")])
+                else:
+                    yield StreamEnd(text="continued")
+                return
+            yield StreamEnd(text="root")
+
+    store = MemoryStore()
+    runtime = Runtime(Provider(), store, [Root], default_model="root", hooks=[EscalateChild()])
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "go")
+    child_id = UUID(child_public).hex
+
+    await wait_idle(runtime, child_id)
+    child_events = await journal(store, child_id)
+    result = next(event for event in child_events if isinstance(event, ToolCallCompleted) and event.call_id == "action")
+    assert called is False
+    assert result.is_error is True
+    assert result.result == "child agents cannot ask humans; use send() to message the parent"
+    assert not any(isinstance(event, AskRaised) for event in child_events)
     await runtime.aclose()
 
 
@@ -423,6 +660,17 @@ async def test_finish_rejects_unfinished_descendant_and_reserved_collisions() ->
 
     with pytest.raises(TantraError, match="duplicate tool name 'finish'"):
         Runtime(EchoProvider(), MemoryStore(), [BadRoot], default_model="m")
+
+    @tool(name="status")
+    async def status_collision() -> str:
+        return "no"
+
+    class BadStatusRoot(Agent):
+        tools = [status_collision]
+        subagents = [BadChild]
+
+    with pytest.raises(TantraError, match="duplicate tool name 'status'"):
+        Runtime(EchoProvider(), MemoryStore(), [BadStatusRoot], default_model="m")
 
 
 async def test_tree_cancel_fences_child_late_writes_and_leaves_other_root_running() -> None:
@@ -1073,19 +1321,7 @@ async def test_failed_atomic_finish_retains_parent_delivery_without_partial_clos
     await runtime.aclose()
 
 
-class PersistentlyFailingFinishedHeaderStore(MemoryStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.finished_patch_attempts = 0
-
-    async def patch_header(self, sid: str, **fields: Any) -> Any:
-        if fields.get("finished") is True:
-            self.finished_patch_attempts += 1
-            raise RuntimeError("finished header patch failed")
-        return await super().patch_header(sid, **fields)
-
-
-async def test_persistent_finished_header_patch_failure_does_not_strand_parent() -> None:
+async def test_finished_header_is_reduced_atomically_and_parent_is_not_stranded() -> None:
     class Child(Agent):
         model = "child"
 
@@ -1104,7 +1340,7 @@ async def test_persistent_finished_header_patch_failure_does_not_strand_parent()
             yield StreamEnd(text="done")
 
     provider = Provider()
-    store = PersistentlyFailingFinishedHeaderStore()
+    store = MemoryStore()
     runtime = Runtime(provider, store, [Root], default_model="root")
     root_id = await runtime.create(Root)
     root = await store.header(root_id.hex)
@@ -1120,8 +1356,8 @@ async def test_persistent_finished_header_patch_failure_does_not_strand_parent()
         for event in await journal(store, root.id)
         if isinstance(event, InputQueued) and ' finished] "done"' in event.input
     ]
-    assert child is not None and child.finished is False
-    assert store.finished_patch_attempts == 1
+    assert child is not None and child.finished is True
+    assert child.status == "finished"
     assert isinstance(child_events[-2], TurnCompleted)
     assert isinstance(child_events[-1], AgentFinished)
     assert len(parent_deliveries) == 1

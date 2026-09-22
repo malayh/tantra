@@ -5,12 +5,13 @@ import json
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 from pydantic import BaseModel
 
 from tantra import Agent, FreeText, InvalidCommandReuse, MaxDepthExceeded, Runtime, TantraError, tool
+from tantra.errors import ProviderError
 from tantra.events import (
     AgentFinished,
     AskRaised,
@@ -587,6 +588,7 @@ async def test_finish_boundary_closes_child_cancels_queue_and_delivers_once() ->
     )
     assert late_result.is_error and late_result.result == "not executed: turn completed"
     assert sum(' finished] {"a":"x","z":2}' in event.input for event in parent_inputs) == 1
+    assert not any(" turn ended] " in event.input for event in parent_inputs)
 
     child_turn = next(event.turn_id for event in child_events if isinstance(event, TurnStarted))
     before_duplicate = list(child_events)
@@ -843,7 +845,7 @@ async def test_duplicate_send_reactivates_after_acceptance_before_activation() -
     child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "start")
     child = await store.header(UUID(child_public).hex)
     assert child is not None
-    await wait_idle(runtime, child.id)
+    await wait_idle(runtime, child.id, root.id)
     runtime.drop_target = root.id
     ctx = context(store, child.id, turn="turn", cid="send", depth=1)
 
@@ -1473,4 +1475,487 @@ async def test_finished_header_without_event_is_not_authoritative() -> None:
     )
     result = await runtime._wait_result(child_id, UUID(receipt["command_id"]))
     assert result.outcome == "completed"
+    await runtime.aclose()
+
+
+def lifecycle_inputs(events: list[Any]) -> list[InputQueued]:
+    return [
+        event
+        for event in events
+        if isinstance(event, InputQueued) and event.input.startswith("[agent ") and " turn ended] " in event.input
+    ]
+
+
+async def test_child_lifecycle_notice_is_exact_status_only_and_reusable() -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.child_calls = 0
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            if req.model == "child":
+                self.child_calls += 1
+                yield StreamEnd(text=f"secret-output-{self.child_calls}")
+                return
+            yield StreamEnd(text="parent")
+
+    provider = Provider()
+    store = MemoryStore()
+    runtime = Runtime(provider, store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "first")
+    child_id = UUID(child_public).hex
+    await wait_idle(runtime, child_id, root.id)
+
+    first_turn = next(event.command_id for event in await journal(store, child_id) if isinstance(event, InputQueued))
+    first = lifecycle_inputs(await journal(store, root.id))[0]
+    expected_payload = {
+        "child_id": str(UUID(hex=child_id)),
+        "outcome": "completed",
+        "stop_reason": "completed",
+        "turn_id": str(UUID(hex=first_turn)),
+    }
+    expected_json = json.dumps(expected_payload, sort_keys=True, separators=(",", ":"))
+    assert first.command_id == uuid5(UUID(hex=child_id), first_turn).hex
+    assert first.input == f"[agent {UUID(hex=child_id)} turn ended] {expected_json}"
+    assert "secret-output" not in first.input
+
+    receipt = await runtime._actor_send(
+        root,
+        context(store, root.id, turn="again", cid="send"),
+        UUID(hex=child_id),
+        "again",
+    )
+    await wait_idle(runtime, child_id, root.id)
+    notices = lifecycle_inputs(await journal(store, root.id))
+    assert len(notices) == 2
+    assert notices[-1].command_id == uuid5(UUID(hex=child_id), UUID(receipt["command_id"]).hex).hex
+    assert provider.child_calls == 2
+    tools = runtime._framework_tools(root, Root)
+    assert "status only" in tools["spawn"].description
+    assert "finish()" in tools["spawn"].description
+    assert "returns no child output" in tools["status"].description
+    await runtime.aclose()
+
+
+async def test_child_lifecycle_reports_max_steps_and_failure_without_output() -> None:
+    @tool
+    async def ping() -> None:
+        return None
+
+    class Exhausted(Agent):
+        model = "exhausted"
+        max_steps = 1
+        tools = [ping]
+
+    class Broken(Agent):
+        model = "broken"
+
+    class Root(Agent):
+        subagents = [Exhausted, Broken]
+
+    class Provider(EchoProvider):
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            if req.model == "exhausted":
+                yield StreamEnd(text="hidden-max", tool_calls=[call("ping", "{}", "ping")])
+                return
+            if req.model == "broken":
+                raise ProviderError("vendor down")
+            yield StreamEnd(text="parent")
+
+    store = MemoryStore()
+    runtime = Runtime(Provider(), store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    exhausted_public = await runtime._actor_spawn(
+        root,
+        Root,
+        context(store, root.id, turn="exhausted", cid="spawn"),
+        "exhausted",
+        "work",
+    )
+    broken_public = await runtime._actor_spawn(
+        root,
+        Root,
+        context(store, root.id, turn="broken", cid="spawn"),
+        "broken",
+        "work",
+    )
+    await wait_idle(runtime, UUID(exhausted_public).hex, UUID(broken_public).hex, root.id)
+
+    payloads = {
+        json.loads(notice.input.split("] ", 1)[1])["child_id"]: json.loads(notice.input.split("] ", 1)[1])
+        for notice in lifecycle_inputs(await journal(store, root.id))
+    }
+    exhausted = payloads[str(UUID(exhausted_public))]
+    broken = payloads[str(UUID(broken_public))]
+    assert exhausted["outcome"] == "completed"
+    assert exhausted["stop_reason"] == "max_steps"
+    assert "error" not in exhausted
+    assert broken["outcome"] == "failed"
+    assert broken["stop_reason"] is None
+    assert broken["error"] == "vendor down"
+    assert "hidden-max" not in json.dumps(payloads)
+    await runtime.aclose()
+
+
+async def test_child_lifecycle_reports_active_and_queued_cancellation() -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            if req.model == "child":
+                self.started.set()
+                await asyncio.Event().wait()
+            yield StreamEnd(text="parent")
+
+    provider = Provider()
+    store = MemoryStore()
+    runtime = Runtime(provider, store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    connection = runtime.connect(root_id, writable=True)
+    await connection.__aenter__()
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "active")
+    child_id = UUID(child_public).hex
+    await asyncio.wait_for(provider.started.wait(), timeout=2)
+    queued = uuid4()
+    await store.enqueue(child_id, InputQueued(command_id=queued.hex, input="queued"))
+    await connection.cancel(command_id=uuid4())
+    await wait_idle(runtime, child_id, root.id)
+
+    child_turns = {event.turn_id for event in await journal(store, child_id) if isinstance(event, TurnCancelled)}
+    notices = lifecycle_inputs(await journal(store, root.id))
+    payloads = [json.loads(notice.input.split("] ", 1)[1]) for notice in notices]
+    assert child_turns == {payload["turn_id"].replace("-", "") for payload in payloads}
+    assert {payload["outcome"] for payload in payloads} == {"cancelled"}
+    assert {payload["stop_reason"] for payload in payloads} == {"cancelled"}
+    assert len(notices) == 2
+    await connection.__aexit__(None, None, None)
+    await runtime.aclose()
+
+
+class LifecycleFailureStore(MemoryStore):
+    def __init__(self, mode: str, *, fail_at: int = 1) -> None:
+        super().__init__()
+        self.mode: str | None = mode
+        self.fail_at = fail_at
+        self.lifecycle_enqueues = 0
+        self.failed = False
+
+    async def enqueue(self, sid: str, event: InputQueued) -> Any:
+        lifecycle = " turn ended] " in event.input
+        if lifecycle:
+            self.lifecycle_enqueues += 1
+        fail = lifecycle and not self.failed and self.lifecycle_enqueues == self.fail_at
+        if fail and self.mode == "before":
+            self.failed = True
+            raise RuntimeError("lifecycle enqueue failed before commit")
+        accepted = await super().enqueue(sid, event)
+        if fail and self.mode == "after":
+            self.failed = True
+            raise RuntimeError("lifecycle enqueue failed after commit")
+        return accepted
+
+
+class GatedLifecycleFailureStore(MemoryStore):
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+        self.attempts = 0
+        self.first_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def enqueue(self, sid: str, event: InputQueued) -> Any:
+        if " turn ended] " not in event.input:
+            return await super().enqueue(sid, event)
+        self.attempts += 1
+        if self.attempts == 1:
+            self.first_started.set()
+            await self.release_first.wait()
+        if self.attempts <= self.failures:
+            raise RuntimeError("gated lifecycle enqueue failed")
+        return await super().enqueue(sid, event)
+
+
+@pytest.mark.parametrize("mode", ["before", "after"])
+async def test_child_lifecycle_reconciliation_converges_across_enqueue_failures(mode: str) -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+
+    store = LifecycleFailureStore(mode)
+    runtime = Runtime(EchoProvider(), store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "work")
+    child_id = UUID(child_public).hex
+    await wait_idle(runtime, child_id)
+    assert store.failed
+
+    child = await store.header(child_id)
+    assert child is not None and child.last_turn is not None
+    with pytest.raises(RuntimeError, match="lifecycle enqueue failed"):
+        await runtime._wait_result(child_id, child.last_turn.turn_id)
+
+    store.mode = None
+    runtime._activate(child_id, root.id)
+    await wait_idle(runtime, child_id, root.id)
+    result = await runtime._wait_result(child_id, child.last_turn.turn_id)
+    assert result.outcome == "completed"
+    runtime._activate(child_id, root.id)
+    await wait_idle(runtime, child_id, root.id)
+    notices = lifecycle_inputs(await journal(store, root.id))
+    assert len(notices) == 1
+    assert notices[0].command_id == uuid5(UUID(hex=child_id), child.last_turn.turn_id.hex).hex
+    await runtime.aclose()
+
+
+@pytest.mark.parametrize(("mode", "committed"), [("before", 1), ("after", 2)])
+async def test_cancellation_failure_preserves_every_child_terminal_notice(mode: str, committed: int) -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            if req.model == "child":
+                self.started.set()
+                await asyncio.Event().wait()
+            yield StreamEnd(text="parent")
+
+    provider = Provider()
+    store = LifecycleFailureStore(mode, fail_at=2)
+    runtime = DroppedActivationRuntime(provider, store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    connection = runtime.connect(root_id, writable=True)
+    await connection.__aenter__()
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "active")
+    child_id = UUID(child_public).hex
+    await asyncio.wait_for(provider.started.wait(), timeout=2)
+    runtime.drop_target = root.id
+    queued = [uuid4(), uuid4()]
+    for command_id in queued:
+        await store.enqueue(child_id, InputQueued(command_id=command_id.hex, input="queued"))
+    cancel_id = uuid4()
+
+    with pytest.raises(RuntimeError, match="lifecycle enqueue failed"):
+        await connection.cancel(command_id=cancel_id)
+    assert len(lifecycle_inputs(await journal(store, root.id))) == committed
+    assert len([event for event in await journal(store, child_id) if isinstance(event, TurnCancelled)]) == 2
+
+    store.mode = None
+    retry = await connection.cancel(command_id=cancel_id)
+    await wait_idle(runtime, child_id, root.id)
+    terminals = [event for event in await journal(store, child_id) if isinstance(event, TurnCancelled)]
+    notices = lifecycle_inputs(await journal(store, root.id))
+    notice_turns = [json.loads(notice.input.split("] ", 1)[1])["turn_id"].replace("-", "") for notice in notices]
+    assert retry.duplicate is True
+    assert len(terminals) == 3
+    assert len(notices) == 3
+    assert sorted(notice_turns) == sorted(event.turn_id for event in terminals)
+    assert len(set(notice.command_id for notice in notices)) == 3
+    await connection.__aexit__(None, None, None)
+    await runtime.aclose()
+
+
+@pytest.mark.parametrize(("failures", "repaired"), [(1, True), (2, False)])
+async def test_runtime_close_reconciles_a_racing_durable_child_terminal(failures: int, repaired: bool) -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+
+    store = GatedLifecycleFailureStore(failures)
+    runtime = Runtime(EchoProvider(), store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "work")
+    child_id = UUID(child_public).hex
+    await asyncio.wait_for(store.first_started.wait(), timeout=2)
+    child = await store.header(child_id)
+    assert child is not None and child.last_turn is not None
+    close = asyncio.create_task(runtime.aclose())
+    while not runtime._closed:
+        await asyncio.sleep(0)
+    store.release_first.set()
+
+    if repaired:
+        await close
+    else:
+        with pytest.raises(RuntimeError, match="gated lifecycle enqueue failed"):
+            await close
+    notices = lifecycle_inputs(await journal(store, root.id))
+    assert runtime.active == {}
+    assert store.attempts == 2
+    assert len(notices) == int(repaired)
+    if repaired:
+        assert notices[0].command_id == uuid5(UUID(hex=child_id), child.last_turn.turn_id.hex).hex
+
+
+async def test_runtime_close_finishes_cleanup_then_raises_lifecycle_error() -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            if req.model == "child":
+                self.started.set()
+                await asyncio.Event().wait()
+            yield StreamEnd(text="root")
+
+    provider = Provider()
+    store = LifecycleFailureStore("before")
+    runtime = Runtime(provider, store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "work")
+    child_id = UUID(child_public).hex
+    await asyncio.wait_for(provider.started.wait(), timeout=2)
+
+    with pytest.raises(RuntimeError, match="lifecycle enqueue failed before commit"):
+        await runtime.aclose()
+    child_events = await journal(store, child_id)
+    assert runtime.active == {}
+    assert any(isinstance(event, TurnInterrupted) and event.reason == "runtime_closed" for event in child_events)
+    assert lifecycle_inputs(await journal(store, root.id)) == []
+
+
+async def test_child_lifecycle_reports_process_and_runtime_interruptions() -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+
+    store = MemoryStore()
+    runtime = Runtime(EchoProvider(), store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    child_id = uuid4()
+    turn_id = uuid4()
+    await store.create(
+        SessionHeader(
+            id=child_id.hex,
+            root_id=root_id.hex,
+            parent_id=root_id.hex,
+            agent="child",
+            depth=1,
+            model="child",
+        )
+    )
+    await store.enqueue(child_id.hex, InputQueued(command_id=turn_id.hex, input="orphan"))
+    await store.append(child_id.hex, [TurnStarted(turn_id=turn_id.hex, input="orphan")])
+    runtime._known_roots[child_id.hex] = root_id.hex
+    runtime._activate(child_id.hex, root_id.hex)
+    await wait_idle(runtime, child_id.hex, root_id.hex)
+    notice = lifecycle_inputs(await journal(store, root_id.hex))[0]
+    payload = json.loads(notice.input.split("] ", 1)[1])
+    assert payload["outcome"] == "interrupted"
+    assert payload["stop_reason"] == "process_stopped"
+
+    class BlockingProvider(EchoProvider):
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            if req.model == "child":
+                self.started.set()
+                await asyncio.Event().wait()
+            yield StreamEnd(text="root")
+
+    blocking = BlockingProvider()
+    closed_store = MemoryStore()
+    closed_runtime = Runtime(blocking, closed_store, [Root], default_model="root")
+    closed_root_id = await closed_runtime.create(Root)
+    closed_root = await closed_store.header(closed_root_id.hex)
+    assert closed_root is not None
+    closed_child_public = await closed_runtime._actor_spawn(
+        closed_root,
+        Root,
+        context(closed_store, closed_root.id),
+        "child",
+        "work",
+    )
+    await asyncio.wait_for(blocking.started.wait(), timeout=2)
+    await closed_runtime.aclose()
+    closed_notice = lifecycle_inputs(await journal(closed_store, closed_root.id))[0]
+    closed_payload = json.loads(closed_notice.input.split("] ", 1)[1])
+    assert closed_payload["child_id"] == str(UUID(closed_child_public))
+    assert closed_payload["outcome"] == "interrupted"
+    assert closed_payload["stop_reason"] == "runtime_closed"
+    await runtime.aclose()
+
+
+async def test_grandchild_lifecycle_notifies_only_its_direct_parent() -> None:
+    class Leaf(Agent):
+        pass
+
+    class Middle(Agent):
+        subagents = [Leaf]
+
+    class Root(Agent):
+        subagents = [Middle]
+
+    store = MemoryStore()
+    runtime = Runtime(EchoProvider(), store, [Root], default_model="m")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    middle_public = await runtime._actor_spawn(root, Root, context(store, root.id), "middle", "start")
+    middle = await store.header(UUID(middle_public).hex)
+    assert middle is not None
+    await wait_idle(runtime, middle.id, root.id)
+    leaf_public = await runtime._actor_spawn(
+        middle,
+        Middle,
+        context(store, middle.id, turn="leaf", cid="spawn", depth=1),
+        "leaf",
+        "start",
+    )
+    leaf_id = UUID(leaf_public).hex
+    await wait_idle(runtime, leaf_id, middle.id, root.id)
+
+    middle_notices = lifecycle_inputs(await journal(store, middle.id))
+    root_notices = lifecycle_inputs(await journal(store, root.id))
+    assert any(
+        json.loads(event.input.split("] ", 1)[1])["child_id"] == str(UUID(leaf_public)) for event in middle_notices
+    )
+    assert not any(
+        json.loads(event.input.split("] ", 1)[1])["child_id"] == str(UUID(leaf_public)) for event in root_notices
+    )
     await runtime.aclose()

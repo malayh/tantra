@@ -41,6 +41,7 @@ from tantra.events import (
     TurnFailed,
     TurnInterrupted,
     TurnStarted,
+    TurnSummary,
     Usage,
 )
 from tantra.hooks import Hook
@@ -148,6 +149,35 @@ def _id(value: UUID, label: str) -> tuple[UUID, str]:
 def _consume(task: asyncio.Future[Any]) -> None:
     if not task.cancelled():
         task.exception()
+
+
+def _terminal_summary(event: TurnCompleted | TurnFailed | TurnCancelled | TurnInterrupted) -> TurnSummary:
+    if isinstance(event, TurnCompleted):
+        return TurnSummary(UUID(hex=event.turn_id), "completed", event.stop_reason, None)
+    if isinstance(event, TurnFailed):
+        return TurnSummary(UUID(hex=event.turn_id), "failed", None, event.error)
+    if isinstance(event, TurnCancelled):
+        return TurnSummary(UUID(hex=event.turn_id), "cancelled", event.reason, None)
+    return TurnSummary(UUID(hex=event.turn_id), "interrupted", event.reason, None)
+
+
+def _lifecycle_input(child_id: str, turn: TurnSummary) -> InputQueued | None:
+    if turn.outcome == "completed" and turn.stop_reason == "finished":
+        return None
+    child_uuid = UUID(hex=child_id)
+    payload = {
+        "child_id": str(child_uuid),
+        "outcome": turn.outcome,
+        "stop_reason": turn.stop_reason,
+        "turn_id": str(turn.turn_id),
+    }
+    if turn.error is not None:
+        payload["error"] = turn.error
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return InputQueued(
+        command_id=uuid5(child_uuid, turn.turn_id.hex).hex,
+        input=f"[agent {child_uuid} turn ended] {encoded}",
+    )
 
 
 async def _shielded[T](awaitable: Awaitable[T]) -> T:
@@ -525,6 +555,33 @@ class Runtime:
             self._activations[parent_id] = self._activations.get(parent_id, 0) + 1
             self._activate(parent_id, header.root_id or header.id)
 
+    async def _deliver_lifecycle_locked(self, child: SessionHeader, turn: TurnSummary) -> None:
+        queued = _lifecycle_input(child.id, turn)
+        if child.parent_id is None or queued is None:
+            return
+        root_id = child.root_id or child.id
+        await self._header(child.parent_id)
+        await self.store.enqueue(child.parent_id, queued)
+        await self._notify(child.parent_id)
+        self._activations[child.parent_id] = self._activations.get(child.parent_id, 0) + 1
+        self._activate(child.parent_id, root_id)
+
+    async def _deliver_lifecycle(self, child: SessionHeader, turn: TurnSummary) -> None:
+        root_id = child.root_id or child.id
+        async with self._lock(root_id):
+            await self._deliver_lifecycle_locked(child, turn)
+
+    async def _reconcile_lifecycle(self, header: SessionHeader) -> None:
+        if header.last_turn is not None:
+            await self._deliver_lifecycle(header, header.last_turn)
+            if header.parent_id is not None and _lifecycle_input(header.id, header.last_turn) is not None:
+                self._errors.get(header.id, {}).pop(header.last_turn.turn_id.hex, None)
+        for child in await self._children(header.id):
+            if child.last_turn is not None:
+                await self._deliver_lifecycle(child, child.last_turn)
+                if _lifecycle_input(child.id, child.last_turn) is not None:
+                    self._errors.get(child.id, {}).pop(child.last_turn.turn_id.hex, None)
+
     def _framework_tools(self, header: SessionHeader, agent: type[Agent]) -> dict[str, Tool]:
         tools = dict(self.tools[header.agent])
 
@@ -544,11 +601,14 @@ class Runtime:
         if agent.subagents:
             tools["spawn"] = Tool(
                 spawn,
-                description="Create a declared child agent, queue its input, and return its ID.",
+                description=(
+                    "Create a declared child agent, queue its input, and return its ID. "
+                    "Turn-ended messages contain status only; the child must call finish() to deliver a result."
+                ),
             )
             tools["status"] = Tool(
                 status,
-                description="Return durable status for one direct child agent.",
+                description="Return durable status for one direct child agent. It returns no child output.",
             )
         if header.parent_id is not None or agent.subagents:
             tools["send"] = Tool(
@@ -774,6 +834,7 @@ class Runtime:
                 if self._closed:
                     return
                 header = await self._header(agent_id)
+                await self._reconcile_lifecycle(header)
                 journal = await self._journal(agent_id)
                 finished = self._finished(journal)
                 if finished is not None:
@@ -788,10 +849,13 @@ class Runtime:
                 state = reduce_journal(journal)
                 if state.incomplete is not None:
                     current = state.incomplete.turn_id
-                    await self._interrupt_if_incomplete(
+                    event = TurnInterrupted(turn_id=current, reason="process_stopped")
+                    interrupted = await self._interrupt_if_incomplete(
                         agent_id,
-                        TurnInterrupted(turn_id=current, reason="process_stopped"),
+                        event,
                     )
+                    if interrupted:
+                        await self._deliver_lifecycle(header, _terminal_summary(event))
                     self._errors.get(agent_id, {}).pop(current, None)
                     current = None
                     continue
@@ -850,6 +914,7 @@ class Runtime:
                     self._errors.get(agent_id, {}).pop(current, None)
                     current = None
                     continue
+                await self._deliver_lifecycle(header, _terminal_summary(terminal))
                 self._errors.get(agent_id, {}).pop(current, None)
                 current = None
         except asyncio.CancelledError:
@@ -862,7 +927,9 @@ class Runtime:
                 else:
                     event = TurnCancelled(turn_id=current, reason=reason)
                 try:
-                    await self._interrupt_if_incomplete(agent_id, event)
+                    interrupted = await self._interrupt_if_incomplete(agent_id, event)
+                    if interrupted:
+                        await self._deliver_lifecycle(header, _terminal_summary(event))
                 except BaseException as exc:
                     self._errors.setdefault(agent_id, {})[current] = exc
                     await self._notify(agent_id)
@@ -1027,25 +1094,38 @@ class Runtime:
                 actor_journal = await self._journal(agent_id)
                 if self._finished(actor_journal) is not None:
                     continue
+                header = await self._header(agent_id)
+                if agent_id != connection._root and header.last_turn is not None:
+                    await self._deliver_lifecycle_locked(header, header.last_turn)
+                    if _lifecycle_input(header.id, header.last_turn) is not None:
+                        self._errors.get(header.id, {}).pop(header.last_turn.turn_id.hex, None)
                 state = reduce_journal(actor_journal)
                 live_turns = {item.command_id for item in state.pending}
                 if state.incomplete is not None:
                     live_turns.add(state.incomplete.turn_id)
-                terminal = [
-                    TurnCancelled(turn_id=turn_id, reason="cancelled")
-                    for turn_id in target_turns
-                    if turn_id in live_turns
-                ]
                 task = self.active.get(agent_id)
                 task_turn = self._task_turns.get(task) if task is not None else None
                 cancel_task = (
                     task is not None
                     and not task.done()
-                    and (task_turn in target_turns or task_turn is None and bool(terminal))
+                    and (task_turn in target_turns or task_turn is None and bool(live_turns & set(target_turns)))
                 )
-                if not terminal and not cancel_task:
-                    continue
-                await self._append(agent_id, terminal)
+                for turn_id in target_turns:
+                    if turn_id not in live_turns:
+                        continue
+                    terminal = TurnCancelled(turn_id=turn_id, reason="cancelled")
+                    await self._append(agent_id, [terminal])
+                    if cancel_task and (task_turn is None or task_turn == turn_id):
+                        assert task is not None
+                        self._turn_generations[agent_id] = self._turn_generations.get(agent_id, 0) + 1
+                        self._task_reasons[task] = ("cancelled", "cancelled")
+                        if self.active.get(agent_id) is task:
+                            del self.active[agent_id]
+                        task.cancel()
+                        cancel_task = False
+                    if agent_id != connection._root:
+                        await self._deliver_lifecycle_locked(header, _terminal_summary(terminal))
+                        self._errors.get(agent_id, {}).pop(turn_id, None)
                 if cancel_task:
                     assert task is not None
                     self._turn_generations[agent_id] = self._turn_generations.get(agent_id, 0) + 1
@@ -1060,23 +1140,23 @@ class Runtime:
         signal = self._signal(agent_id)
         while True:
             journal = await self._journal(agent_id)
-            result = _turn_result(UUID(hex=agent_id), command_id, journal)
-            if result is not None:
-                return result
             error = self._errors.get(agent_id, {}).get(cid)
             if error is not None:
                 raise error
+            result = _turn_result(UUID(hex=agent_id), command_id, journal)
+            if result is not None:
+                return result
             if self._closed:
                 raise TantraError(f"runtime closed before command {command_id} finished")
             async with signal.condition:
                 generation = signal.generation
             journal = await self._journal(agent_id)
-            result = _turn_result(UUID(hex=agent_id), command_id, journal)
-            if result is not None:
-                return result
             error = self._errors.get(agent_id, {}).get(cid)
             if error is not None:
                 raise error
+            result = _turn_result(UUID(hex=agent_id), command_id, journal)
+            if result is not None:
+                return result
             async with signal.condition:
                 if signal.generation == generation and not self._closed:
                     await signal.condition.wait()
@@ -1086,6 +1166,7 @@ class Runtime:
             return
         self._closed = True
         tasks = [task for task in self.active.values() if not task.done()]
+        first_error: BaseException | None = None
         for root_id in set(self._known_roots.values()) | set(self.writers):
             async with self._lock(root_id):
                 self.writers[root_id] = self.writers.get(root_id, 0) + 1
@@ -1094,15 +1175,33 @@ class Runtime:
                         continue
                     self._turn_generations[agent_id] = self._turn_generations.get(agent_id, 0) + 1
                     self._task_reasons[task] = ("interrupted", "runtime_closed")
+                    header = None
+                    last_turn = None
+                    if agent_id != root_id:
+                        try:
+                            header = await self._header(agent_id)
+                            last_turn = header.last_turn
+                            if last_turn is not None and _lifecycle_input(header.id, last_turn) is not None:
+                                await self._deliver_lifecycle_locked(header, last_turn)
+                                self._errors.get(agent_id, {}).pop(last_turn.turn_id.hex, None)
+                        except BaseException as exc:
+                            if first_error is None:
+                                first_error = exc
+                            if last_turn is not None:
+                                self._errors.setdefault(agent_id, {})[last_turn.turn_id.hex] = exc
                     state = None
                     try:
                         state = reduce_journal(await self._journal(agent_id))
                         if state.incomplete is not None:
-                            await self._append(
-                                agent_id,
-                                [TurnInterrupted(turn_id=state.incomplete.turn_id, reason="runtime_closed")],
-                            )
+                            event = TurnInterrupted(turn_id=state.incomplete.turn_id, reason="runtime_closed")
+                            await self._append(agent_id, [event])
+                            if agent_id != root_id:
+                                if header is None:
+                                    header = await self._header(agent_id)
+                                await self._deliver_lifecycle_locked(header, _terminal_summary(event))
                     except BaseException as exc:
+                        if first_error is None:
+                            first_error = exc
                         if state is not None and state.incomplete is not None:
                             self._errors.setdefault(agent_id, {})[state.incomplete.turn_id] = exc
         self.active.clear()
@@ -1115,6 +1214,8 @@ class Runtime:
                 live.future.set_exception(AskExpired(ask_id))
         for agent_id in list(self.conditions):
             await self._notify(agent_id)
+        if first_error is not None:
+            raise first_error
 
 
 class Connection:

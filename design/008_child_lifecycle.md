@@ -188,7 +188,7 @@ Checklist:
 
 Verification: Ruff check and format passed; 474 package tests passed with 16 Docker-backed PostgreSQL skips; the shared store contract also passed against the live PostgreSQL service (5 tests); `git diff --check` passed.
 
-### Phase 1 — Parent lifecycle delivery · deps: P0 · —
+### Phase 1 — Parent lifecycle delivery · deps: P0 · ✅ DONE
 
 Deliverables:
 
@@ -209,11 +209,13 @@ Verify:
 
 Checklist:
 
-- [ ] Stable lifecycle payload and UUID5 command IDs
-- [ ] Parent wake-up
-- [ ] Activation-time reconciliation
-- [ ] Deep-tree behavior
-- [ ] Failure-window tests
+- [x] Stable lifecycle payload and UUID5 command IDs
+- [x] Parent wake-up
+- [x] Activation-time reconciliation
+- [x] Deep-tree behavior
+- [x] Failure-window tests
+
+Verification: Ruff check and format passed; 35 actor-runtime tests and 486 package tests passed with 16 Docker-backed PostgreSQL skips; pre-commit and post-commit delivery failures, multi-terminal cancellation, and shutdown reconciliation were verified; `git diff --check` passed.
 
 ### Phase 2 — Sarathi lazy child observation · deps: P0, P1 · —
 

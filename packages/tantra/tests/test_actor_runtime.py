@@ -325,15 +325,16 @@ async def test_child_lifecycle_guidance_reaches_only_the_child_provider() -> Non
     )
     root_request = next(request for request in provider.requests if any(tool.name == "spawn" for tool in request.tools))
     lifecycle = (
-        "Child lifecycle: normal turn completion leaves you reusable and sends status only to your parent. When the "
-        "assignment is complete and you have a final result to deliver, call finish(result) instead of ending "
-        "normally. This permanently closes you and delivers the result to your parent."
+        "Child lifecycle\n\n"
+        "Ordinary turn completion leaves the child reusable and sends a status-only notification to the parent. "
+        "When the assignment is complete and a final result is ready, use the finish tool. Finishing permanently "
+        "closes the child and delivers its result to the parent."
     )
     finish = next(tool for tool in child_request.tools if tool.name == "finish")
     spawn = next(tool for tool in root_request.tools if tool.name == "spawn")
 
-    assert lifecycle in [block.text for block in child_request.system]
-    assert lifecycle not in [block.text for block in root_request.system]
+    assert child_request.system[-1].text == "Execution environment\n\n" + lifecycle
+    assert all(lifecycle not in block.text for block in root_request.system)
     assert spawn.parameters["properties"]["agent_name"]["enum"] == ["child"]
     assert finish.description == "Permanently close this child agent and deliver its result to its parent."
     await runtime.aclose()

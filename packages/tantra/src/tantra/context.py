@@ -34,9 +34,14 @@ from tantra.providers.base import (
 from tantra.skills import SkillInfo
 from tantra.tracing import NULL_TRACER, Tracer
 
-SKILLS_PREAMBLE = (
-    "Skills available via the skill(name) tool. Load a skill when its description matches the task or the user "
-    "explicitly requests it:"
+SKILLS_GUIDANCE = (
+    "Available skills can be loaded on demand with the skill tool. Load a skill when its description matches the "
+    "task or the user explicitly requests it:"
+)
+CHILD_LIFECYCLE_GUIDANCE = (
+    "Ordinary turn completion leaves the child reusable and sends a status-only notification to the parent. When the "
+    "assignment is complete and a final result is ready, use the finish tool. Finishing permanently closes the child "
+    "and delivers its result to the parent."
 )
 CANCELLATION_CONTEXT = "[runtime] The user cancelled the live root and descendant work."
 
@@ -134,9 +139,19 @@ def build_messages(events: Sequence[SessionEvent]) -> list[Message]:
     return assemble_messages(summary, window)
 
 
-def _skills_block(skills: Sequence[SkillInfo]) -> SystemBlock:
-    lines = [SKILLS_PREAMBLE, *(f"- {skill.name}: {skill.description}" for skill in skills)]
-    return SystemBlock(text="\n".join(lines))
+def _execution_environment_block(
+    skills: Sequence[SkillInfo],
+    child_lifecycle: bool,
+) -> SystemBlock | None:
+    sections = []
+    if skills:
+        lines = [SKILLS_GUIDANCE, *(f"- {skill.name}: {skill.description}" for skill in skills)]
+        sections.append("Skills\n\n" + "\n".join(lines))
+    if child_lifecycle:
+        sections.append("Child lifecycle\n\n" + CHILD_LIFECYCLE_GUIDANCE)
+    if not sections:
+        return None
+    return SystemBlock(text="Execution environment\n\n" + "\n\n".join(sections))
 
 
 def build_sample_request(
@@ -147,10 +162,12 @@ def build_sample_request(
     tools: Sequence[ToolSchema],
     params: dict[str, Any] | None = None,
     skills: Sequence[SkillInfo] = (),
+    child_lifecycle: bool = False,
 ) -> SampleRequest:
     system = [SystemBlock(text=prompt)] if prompt else []
-    if skills:
-        system.append(_skills_block(skills))
+    environment = _execution_environment_block(skills, child_lifecycle)
+    if environment is not None:
+        system.append(environment)
     return SampleRequest(
         model=model,
         system=system,

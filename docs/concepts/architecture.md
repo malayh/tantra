@@ -19,3 +19,12 @@ A root or child actor runs at most one turn at a time. Different actors and inde
 Only a writable root connection accepts human commands. Opening a newer writer atomically invalidates the previous writer. Readers never own execution, and disconnecting does not cancel accepted work.
 
 Every actor has its own journal. `ChildCreated` reveals a child UUID, after which clients subscribe to that child explicitly. There is no merged tree stream or composite cursor.
+
+## Model guidance layers
+
+Model guidance has four layers:
+
+1. The application behavior prompt comes from `Agent.prompt` and remains the first system block.
+2. The execution environment is one final system block assembled from active capabilities, such as available skill names and child lifecycle semantics. It is omitted when no guidance applies.
+3. Tool schemas and descriptions define tool arguments and ordinary usage.
+4. Skill bodies provide detailed instructions only after the model loads them on demand with the skill tool.

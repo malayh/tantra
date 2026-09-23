@@ -42,7 +42,6 @@ from tantra.providers.base import (
     ReasoningDelta,
     SampleRequest,
     StreamEnd,
-    SystemBlock,
     TextDelta,
     ToolCallDelta,
     ToolSchema,
@@ -58,11 +57,6 @@ if TYPE_CHECKING:
 
 SUBMIT_OUTPUT = "submit_output"
 COMPLETED_RESULT = "not executed: turn completed"
-_CHILD_LIFECYCLE_CONTEXT = (
-    "Child lifecycle: normal turn completion leaves you reusable and sends status only to your parent. When the "
-    "assignment is complete and you have a final result to deliver, call finish(result) instead of ending normally. "
-    "This permanently closes you and delivers the result to your parent."
-)
 
 
 @dataclass(frozen=True)
@@ -605,9 +599,8 @@ class TurnEngine:
                 events=self.history,
                 tools=self.schemas,
                 skills=self.skills_index,
+                child_lifecycle=self.terminal_tool == "finish",
             )
-            if self.terminal_tool == "finish":
-                req.system.append(SystemBlock(text=_CHILD_LIFECYCLE_CONTEXT))
             await self._append([SampleStarted(turn_id=self.turn.turn_id, sample_id=sample_id, model=self.model)])
             end = await self._sample(req, sample_id, compacted)
             parts, calls, invalid = self._parts(sample_id, end)

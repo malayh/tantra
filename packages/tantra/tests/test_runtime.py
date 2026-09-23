@@ -986,8 +986,10 @@ async def test_runtime_skills_are_disclosed_and_load_through_the_internal_tool()
     assert result.text == "done"
     assert catalog.loaded == ["release"]
     assert provider.requests[0].system[-1].text == (
-        "Skills available via the skill(name) tool. Load a skill when its description matches the task or the user "
-        "explicitly requests it:\n"
+        "Execution environment\n\n"
+        "Skills\n\n"
+        "Available skills can be loaded on demand with the skill tool. Load a skill when its description matches "
+        "the task or the user explicitly requests it:\n"
         "- release: Ship safely."
     )
     assert "Read the checklist." not in provider.requests[0].system[-1].text

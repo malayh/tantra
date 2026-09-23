@@ -7,8 +7,9 @@ from typing import Any
 import pytest
 
 from tantra.agent import Agent
+from tantra.context import build_sample_request
 from tantra.errors import TantraError
-from tantra.providers.base import SampleRequest, ToolCall
+from tantra.providers.base import SampleRequest, ToolCall, ToolSchema
 from tantra.skills import FileSystemSkills, Skill, SkillInfo
 
 COLD_EMAIL = """---
@@ -101,6 +102,49 @@ class RecordingSkills:
 
 class Writer(Agent):
     prompt = "You are a writer."
+
+
+def test_execution_environment_is_one_final_capability_block() -> None:
+    tools = [
+        ToolSchema(name="skill", description="Skill description.", parameters={"type": "object"}),
+        ToolSchema(name="finish", description="Finish description.", parameters={"type": "object"}),
+    ]
+
+    request = build_sample_request(
+        model="m",
+        prompt=Writer.prompt,
+        events=[],
+        tools=tools,
+        skills=[SkillInfo(name="release", description="Ship safely.")],
+        child_lifecycle=True,
+    )
+
+    assert request.system[0].text == Writer.prompt
+    assert len(request.system) == 2
+    environment = request.system[-1].text
+    assert environment == (
+        "Execution environment\n\n"
+        "Skills\n\n"
+        "Available skills can be loaded on demand with the skill tool. Load a skill when its description matches "
+        "the task or the user explicitly requests it:\n"
+        "- release: Ship safely.\n\n"
+        "Child lifecycle\n\n"
+        "Ordinary turn completion leaves the child reusable and sends a status-only notification to the parent. "
+        "When the assignment is complete and a final result is ready, use the finish tool. Finishing permanently "
+        "closes the child and delivers its result to the parent."
+    )
+    assert "Skill description." not in environment
+    assert "Finish description." not in environment
+    assert "Tantra" not in environment
+    assert "Harness" not in environment
+    assert "You are" not in environment
+    assert request.tools == tools
+
+
+def test_execution_environment_is_omitted_without_relevant_capabilities() -> None:
+    request = build_sample_request(model="m", prompt="", events=[], tools=[])
+
+    assert request.system == []
 
 
 async def test_the_index_reports_every_skill_directory(root: Path) -> None:

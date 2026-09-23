@@ -32,6 +32,7 @@ class Usage(BaseModel):
 class SessionCreated(EventBase):
     type: Literal["session_created"] = "session_created"
     agent: str
+    name: str | None = None
     root_id: str | None = None
     parent_id: str | None = None
     depth: int = 0
@@ -119,6 +120,7 @@ class ChildCreated(EventBase):
     type: Literal["child_created"] = "child_created"
     child_id: str
     agent: str
+    name: str | None = None
     turn_id: str
     call_id: str
 
@@ -246,6 +248,7 @@ class ActorStatus:
     root_id: UUID
     parent_id: UUID | None
     agent: str
+    name: str
     state: SessionStatus
     active: bool
     current_turn_id: UUID | None
@@ -274,6 +277,7 @@ class SessionHeader(BaseModel):
     id: str
     root_id: str | None = None
     agent: str
+    name: str | None = None
     parent_id: str | None = None
     depth: int = 0
     model: str | None = None

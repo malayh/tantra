@@ -15,3 +15,5 @@ Every durable event belongs to one actor journal. `LoggedEvent(agent_id, seq, ev
 A terminal event carries the accepted command ID as its turn ID. `TurnResult` reduces one turn's text, output, usage, stop reason, error, and outcome.
 
 Root and child sequence numbers are independent. Clients discover a child from `ChildCreated` and subscribe to its journal separately.
+
+Child `SessionHeader`, `SessionCreated`, and `ChildCreated` records may carry an optional durable display `name`. The `agent` field remains the registered actor type; older records without `name` remain valid.

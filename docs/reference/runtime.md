@@ -27,6 +27,10 @@ Runtime(
 
 `events(agent_id, *, after=0) -> AsyncIterator[LoggedEvent]` replays and tails any root or child journal without activating it.
 
+`status(agent_id) -> ActorStatus` reads one actor's durable header. `tree_status(root_id) -> list[ActorStatus]` reads the root and descendants breadth-first without activating actors or reading journals.
+
+`ActorStatus.name` is the header's durable display name when present and otherwise the registered `agent` type.
+
 `aclose()` stops new work, interrupts known active turns, releases writer authority, and leaves application-owned providers and stores open.
 
 ## Connection

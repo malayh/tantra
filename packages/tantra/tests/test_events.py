@@ -2,6 +2,8 @@ from typing import get_args
 
 from tantra.events import (
     SESSION_EVENT_ADAPTER,
+    ChildCreated,
+    SessionCreated,
     SessionEvent,
     SessionHeader,
     Stamped,
@@ -62,6 +64,26 @@ def test_stamped_round_trip_restores_the_event_class() -> None:
 
     assert parsed == stamped
     assert isinstance(parsed.event, ToolCallCompleted)
+
+
+def test_legacy_name_fields_default_to_none() -> None:
+    header = SessionHeader.model_validate({"id": "s1", "agent": "build"})
+    created = SESSION_EVENT_ADAPTER.validate_python({"type": "session_created", "agent": "build"})
+    child = SESSION_EVENT_ADAPTER.validate_python(
+        {
+            "type": "child_created",
+            "child_id": "s2",
+            "agent": "worker",
+            "turn_id": "turn",
+            "call_id": "call",
+        }
+    )
+
+    assert header.name is None
+    assert isinstance(created, SessionCreated)
+    assert created.name is None
+    assert isinstance(child, ChildCreated)
+    assert child.name is None
 
 
 def test_header_defaults() -> None:

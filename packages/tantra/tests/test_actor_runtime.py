@@ -19,6 +19,7 @@ from tantra.events import (
     ChildCreated,
     InputQueued,
     LoggedEvent,
+    SessionCreated,
     SessionEvent,
     SessionHeader,
     ToolCallCompleted,
@@ -96,16 +97,19 @@ async def test_status_and_tree_status_read_headers_only_without_activation() -> 
         subagents = [Child]
 
     store = HeaderOnlyStore()
-    runtime = Runtime(EchoProvider(), store, [Root], default_model="m")
-    root_id = await runtime.create(Root)
+    creator = Runtime(EchoProvider(), store, [Root], default_model="m")
+    root_id = await creator.create(Root)
+    await creator.aclose()
     root = await store.header(root_id.hex)
     assert root is not None
+    runtime = Runtime(EchoProvider(), store, [Root], default_model="m")
     base = datetime(2026, 1, 1, tzinfo=UTC)
     child_later = SessionHeader(
         id=uuid4().hex,
         root_id=root.id,
         parent_id=root.id,
         agent="child",
+        name="Reviewer",
         depth=1,
         model="m",
         created_at=base + timedelta(seconds=2),
@@ -145,15 +149,18 @@ async def test_status_and_tree_status_read_headers_only_without_activation() -> 
     )
 
     assert child_status.agent_id == UUID(hex=child_later.id)
+    assert child_status.name == "Reviewer"
     assert child_status.state == "queued"
     assert child_status.active is True
     assert tool_status["agent_id"] == str(UUID(hex=child_earlier.id))
+    assert tool_status["name"] == "child"
     assert [status.agent_id.hex for status in tree] == [
         root.id,
         child_earlier.id,
         child_later.id,
         grandchild.id,
     ]
+    assert [status.name for status in tree] == ["root", "child", "Reviewer", "grandchild"]
     assert set(runtime.active) == {child_later.id}
     with pytest.raises(TantraError, match="direct child"):
         await status_tool.invoke({"agent_id": str(UUID(hex=grandchild.id))}, context(store, root.id))
@@ -220,6 +227,81 @@ async def test_status_tool_reaches_the_provider_as_a_json_object() -> None:
     assert payload["updated_at"] == "2026-01-02T03:04:05Z"
     completed = next(event for event in await journal(store, root_id.hex) if isinstance(event, ToolCallCompleted))
     assert completed.result == payload
+    await runtime.aclose()
+
+
+async def test_spawn_names_are_normalized_persisted_and_idempotent() -> None:
+    class Worker(Agent):
+        pass
+
+    class Root(Agent):
+        subagents = [Worker]
+
+    store = MemoryStore()
+    runtime = Runtime(EchoProvider(), store, [Root], default_model="m")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    ctx = context(store, root.id)
+    spawn = runtime._framework_tools(root, Root)["spawn"]
+
+    child_public = await spawn.invoke(
+        {"agent_name": "worker", "input": "start", "name": "  Audit worker  "},
+        ctx,
+    )
+    assert UUID(child_public) == runtime._internal_id(root, ctx, "spawn")
+    child_id = UUID(child_public).hex
+    await wait_idle(runtime, child_id)
+    child = await store.header(child_id)
+    assert child is not None
+    created = next(event for event in await journal(store, child_id) if isinstance(event, SessionCreated))
+    linked = next(
+        event
+        for event in await journal(store, root.id)
+        if isinstance(event, ChildCreated) and event.child_id == child_id
+    )
+    assert (child.agent, child.name, created.name, linked.name) == (
+        "worker",
+        "Audit worker",
+        "Audit worker",
+        "Audit worker",
+    )
+
+    assert (
+        await spawn.invoke(
+            {"agent_name": "worker", "input": "start", "name": "Audit worker"},
+            ctx,
+        )
+        == child_public
+    )
+    await wait_idle(runtime, child_id)
+    before = (
+        (await store.header(child_id)).model_dump(),
+        await journal(store, child_id),
+        await journal(store, root.id),
+    )
+    with pytest.raises(InvalidCommandReuse):
+        await spawn.invoke({"agent_name": "worker", "input": "start", "name": "Different"}, ctx)
+    with pytest.raises(InvalidCommandReuse):
+        await spawn.invoke({"agent_name": "worker", "input": "changed", "name": "Audit worker"}, ctx)
+    assert (
+        (await store.header(child_id)).model_dump(),
+        await journal(store, child_id),
+        await journal(store, root.id),
+    ) == before
+
+    for turn, args in (
+        ("blank", {"agent_name": "worker", "input": "blank", "name": "   "}),
+        ("omitted", {"agent_name": "worker", "input": "omitted"}),
+    ):
+        child_public = await spawn.invoke(args, context(store, root.id, turn=turn, cid=turn))
+        child_id = UUID(child_public).hex
+        await wait_idle(runtime, child_id)
+        child = await store.header(child_id)
+        assert child is not None
+        assert child.name is None
+        assert (await runtime.status(UUID(child_public))).name == "worker"
+
     await runtime.aclose()
 
 

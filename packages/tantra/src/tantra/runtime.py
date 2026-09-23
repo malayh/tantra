@@ -430,6 +430,7 @@ class Runtime:
             root_id=UUID(hex=header.root_id or header.id),
             parent_id=UUID(hex=header.parent_id) if header.parent_id is not None else None,
             agent=header.agent,
+            name=header.name or header.agent,
             state="finished" if header.finished else header.status,
             active=task is not None and not task.done(),
             current_turn_id=UUID(hex=header.current_turn_id) if header.current_turn_id is not None else None,
@@ -585,8 +586,8 @@ class Runtime:
     def _framework_tools(self, header: SessionHeader, agent: type[Agent]) -> dict[str, Tool]:
         tools = dict(self.tools[header.agent])
 
-        async def spawn(agent_name: str, input: str, ctx: Context) -> str:
-            return await self._actor_spawn(header, agent, ctx, agent_name, input)
+        async def spawn(agent_name: str, input: str, ctx: Context, name: str | None = None) -> str:
+            return await self._actor_spawn(header, agent, ctx, agent_name, input, name)
 
         async def send(agent_id: UUID, input: str, ctx: Context) -> dict[str, Any]:
             return await self._actor_send(header, ctx, agent_id, input)
@@ -633,7 +634,9 @@ class Runtime:
         ctx: Context,
         requested: str,
         input: str,
+        name: str | None = None,
     ) -> str:
+        name = name.strip() or None if name is not None else None
         declared = {agent_name(child): child for child in agent.subagents}
         child_agent = declared.get(requested)
         if child_agent is None:
@@ -662,6 +665,7 @@ class Runtime:
                     root_id=root_id,
                     parent_id=header.id,
                     agent=requested,
+                    name=name,
                     depth=depth,
                     model=model,
                     metadata=dict(root.metadata),
@@ -671,12 +675,14 @@ class Runtime:
                 child.root_id != root_id
                 or child.parent_id != header.id
                 or child.agent != requested
+                or child.name != name
                 or child.depth != depth
             ):
                 raise InvalidCommandReuse(child_id)
             child_journal = await self._journal(child_id)
             created = SessionCreated(
                 agent=requested,
+                name=name,
                 root_id=root_id,
                 parent_id=header.id,
                 depth=depth,
@@ -688,6 +694,7 @@ class Runtime:
             event = ChildCreated(
                 child_id=child_id,
                 agent=requested,
+                name=name,
                 turn_id=ctx.turn_id,
                 call_id=ctx.call_id,
             )

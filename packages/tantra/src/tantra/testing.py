@@ -19,6 +19,7 @@ from tantra.events import (
     ReasoningDelta,
     SampleCompleted,
     SampleStarted,
+    SessionCreated,
     SessionEvent,
     SessionHeader,
     Stamped,
@@ -114,13 +115,14 @@ async def _check_create_and_header(factory: StoreFactory) -> None:
     store = factory()
     assert await store.header(uuid.uuid4().hex) is None
 
-    header = _header(metadata={"company": 42, "user": 7}, title="p99")
+    header = _header(metadata={"company": 42, "user": 7}, name="P99 analyst", title="p99")
     await store.create(header)
 
     loaded = await factory().header(header.id)
     assert loaded is not None
     assert loaded.id == header.id
     assert loaded.agent == "build"
+    assert loaded.name == "P99 analyst"
     assert loaded.title == "p99"
     assert loaded.metadata == {"company": 42, "user": 7}
     assert loaded.status == "idle"
@@ -623,10 +625,11 @@ def _mixed_write_in_thread(
 
 async def _check_actor_persistence(factory: StoreFactory) -> None:
     store = factory()
-    header = _header(parent_id=uuid.uuid4().hex)
+    header = _header(parent_id=uuid.uuid4().hex, name="Planner")
     await store.create(header)
     events: list[SessionEvent] = [
-        ChildCreated(child_id=uuid.uuid4().hex, agent="child", turn_id="turn", call_id="call"),
+        SessionCreated(agent="build", name="Planner"),
+        ChildCreated(child_id=uuid.uuid4().hex, agent="child", name="Researcher", turn_id="turn", call_id="call"),
         CancellationRequested(command_id="cancel", targets={header.id: ["turn"]}),
         AgentFinished(result={"ok": True}),
     ]
@@ -635,5 +638,6 @@ async def _check_actor_persistence(factory: StoreFactory) -> None:
 
     loaded = await factory().header(header.id)
     assert loaded is not None
+    assert loaded.name == "Planner"
     assert loaded.finished is True
     assert [item.event for item in await factory().read_page(header.id)] == events

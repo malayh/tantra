@@ -251,6 +251,14 @@ Checklist:
 
 Verification: Ruff check and format passed; 486 Tantra tests passed with 16 Docker-backed PostgreSQL skips; 71 Sarathi backend tests and 7 native UI reducer tests passed; UI lint and production build passed; OpenAPI matched the live schema; independent review was clean; the rebuilt Compose stack passed Brave verification for lazy observation, drawer replay, refresh, queued root input, lifecycle delivery, cancellation, and retained child history; `git diff --check` passed.
 
+#### Phase 2 follow-up — Agent placement and transcript UX · ✅ DONE
+
+- Show only queued and running descendants above the composer; render every inactive child as the same clickable status button at its original `spawn` position.
+- Buffer each actor's historical replay until `SubscriptionReady`, then hydrate its journal in one client state update while preserving live streaming afterward.
+- Follow streamed output only while the transcript is near the bottom so manual upward scrolling remains stable.
+
+Verification: Independent review was clean; Ruff check and format passed; 486 Tantra tests passed with 16 Docker-backed PostgreSQL skips; 71 Sarathi backend tests and 9 native UI reducer tests passed; UI lint and production build passed; the rebuilt Compose stack passed live browser verification for active-only placement, inline inactive history, drawer access, replay hydration, stable upward scrolling, resumed bottom-following, and a clean browser console; `git diff --check` passed.
+
 ### Phase 3 — Documentation and Tantra 1.1.0 · deps: P0, P1, P2 · —
 
 Deliverables:

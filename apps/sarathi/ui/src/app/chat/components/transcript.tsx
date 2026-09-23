@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ChevronRight, FileText, Globe, Loader2, Search, Wrench } from "lucide-react";
+import { Bot, ChevronRight, FileText, Globe, Loader2, Search, Wrench } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useStore } from "zustand";
@@ -10,7 +10,18 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
-import type { AskItem, Banner, ChatStore, TextItem, ToolItem, TranscriptItem, Turn } from "../state";
+import type { ActorStatusOut } from "@/generated/models";
+import {
+  actorStatusLabel,
+  isNearBottom,
+  type AskItem,
+  type Banner,
+  type ChatStore,
+  type TextItem,
+  type ToolItem,
+  type TranscriptItem,
+  type Turn,
+} from "../state";
 
 type AskResponder = (askId: string, response: string) => void;
 
@@ -91,7 +102,28 @@ function TextBlock({ item }: { item: TextItem }) {
   );
 }
 
-function ToolChip({ item }: { item: ToolItem }) {
+function ChildButton({ actor, onOpen }: { actor: ActorStatusOut; onOpen: (agentId: string) => void }) {
+  const running = actor.state === "queued" || actor.state === "running";
+
+  return (
+    <Button variant="outline" size="sm" className="max-w-full" onClick={() => onOpen(actor.agent_id)}>
+      <Bot />
+      <span className="truncate">{actor.agent}</span>
+      <span className="text-muted-foreground truncate font-normal">{actorStatusLabel(actor.state)}</span>
+      {running && <Loader2 className="animate-spin" />}
+    </Button>
+  );
+}
+
+function ToolChip({
+  item,
+  actor,
+  onOpen,
+}: {
+  item: ToolItem;
+  actor?: ActorStatusOut;
+  onOpen?: (agentId: string) => void;
+}) {
   const [open, setOpen] = useState(!item.final);
 
   useEffect(() => {
@@ -101,6 +133,11 @@ function ToolChip({ item }: { item: ToolItem }) {
   const Icon = TOOL_ICONS[item.name as keyof typeof TOOL_ICONS] ?? Wrench;
   const summary = summarizeArgs(item.args);
   const result = formatResult(item.result);
+
+  if (item.child && actor) {
+    if (actor.state === "queued" || actor.state === "running") return null;
+    if (onOpen) return <ChildButton actor={actor} onOpen={onOpen} />;
+  }
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
@@ -186,10 +223,14 @@ function Item({
   item,
   banner,
   onAskResponse,
+  actors,
+  onOpen,
 }: {
   item: TranscriptItem;
   banner: Banner | null;
   onAskResponse?: AskResponder;
+  actors: ActorStatusOut[];
+  onOpen?: (agentId: string) => void;
 }) {
   switch (item.kind) {
     case "thinking":
@@ -197,7 +238,13 @@ function Item({
     case "text":
       return <TextBlock item={item} />;
     case "tool":
-      return <ToolChip item={item} />;
+      return (
+        <ToolChip
+          item={item}
+          actor={item.child ? actors.find((actor) => actor.agent_id === item.child?.agent_id) : undefined}
+          onOpen={onOpen}
+        />
+      );
     case "ask":
       return onAskResponse ? <AskCard item={item} banner={banner} onAskResponse={onAskResponse} /> : null;
   }
@@ -207,10 +254,14 @@ function TurnBlock({
   turn,
   banner,
   onAskResponse,
+  actors,
+  onOpen,
 }: {
   turn: Turn;
   banner: Banner | null;
   onAskResponse?: AskResponder;
+  actors: ActorStatusOut[];
+  onOpen?: (agentId: string) => void;
 }) {
   const empty = turn.items.every((item) => item.kind !== "tool" && item.kind !== "ask" && item.content.length === 0);
 
@@ -239,7 +290,7 @@ function TurnBlock({
 
       {turn.items.map((item, index) => (
         <div key={itemKey(item, index)}>
-          <Item item={item} banner={banner} onAskResponse={onAskResponse} />
+          <Item item={item} banner={banner} onAskResponse={onAskResponse} actors={actors} onOpen={onOpen} />
         </div>
       ))}
 
@@ -260,44 +311,74 @@ export function JournalTranscript({
   ready,
   banner = null,
   onAskResponse,
+  actors = [],
+  onOpen,
   emptyText,
 }: {
   turns: Turn[];
   ready: boolean;
   banner?: Banner | null;
   onAskResponse?: AskResponder;
+  actors?: ActorStatusOut[];
+  onOpen?: (agentId: string) => void;
   emptyText: string;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const followingRef = useRef(true);
 
   useEffect(() => {
     const element = scrollRef.current;
-    if (element) element.scrollTop = element.scrollHeight;
+    if (element && followingRef.current) element.scrollTop = element.scrollHeight;
   }, [turns]);
 
   return (
-    <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
+    <div
+      ref={scrollRef}
+      className="min-h-0 flex-1 overflow-y-auto"
+      onScroll={(event) => {
+        const element = event.currentTarget;
+        followingRef.current = isNearBottom(element.scrollHeight, element.scrollTop, element.clientHeight);
+      }}
+    >
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-6 py-8">
         {ready && turns.length === 0 && <p className="text-muted-foreground py-16 text-center text-sm">{emptyText}</p>}
         {!ready && <Loader2 className="text-muted-foreground mx-auto my-16 size-4 animate-spin" />}
         {turns.map((turn) => (
-          <TurnBlock key={turn.id} turn={turn} banner={banner} onAskResponse={onAskResponse} />
+          <TurnBlock
+            key={turn.id}
+            turn={turn}
+            banner={banner}
+            onAskResponse={onAskResponse}
+            actors={actors}
+            onOpen={onOpen}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-export function Transcript({ store, onAskResponse }: { store: ChatStore; onAskResponse: AskResponder }) {
+export function Transcript({
+  store,
+  onAskResponse,
+  onOpen,
+}: {
+  store: ChatStore;
+  onAskResponse: AskResponder;
+  onOpen: (agentId: string) => void;
+}) {
   const turns = useStore(store, (state) => state.turns);
   const banner = useStore(store, (state) => state.banner);
   const ready = useStore(store, (state) => state.ready);
+  const actors = useStore(store, (state) => state.actors);
   return (
     <JournalTranscript
       turns={turns}
       ready={ready}
       banner={banner}
       onAskResponse={onAskResponse}
+      actors={actors}
+      onOpen={onOpen}
       emptyText="Send a message to get started"
     />
   );

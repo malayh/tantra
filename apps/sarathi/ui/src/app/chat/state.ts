@@ -42,6 +42,7 @@ export type ToolItem = ItemBase & {
   result?: unknown;
   isError: boolean;
   progress: string[];
+  child?: { agent_id: string; agent: string };
 };
 
 export type AskItem = ItemBase & {
@@ -151,6 +152,15 @@ const completeCall = (items: TranscriptItem[], callId: string, result: unknown, 
   if (index === -1) return items;
   return items.map((item, position) => (position === index ? { ...item, result, isError, final: true } : item));
 };
+
+export const associateChild = (
+  items: TranscriptItem[],
+  callId: string,
+  child: { agent_id: string; agent: string },
+): TranscriptItem[] =>
+  items.map((item) =>
+    item.kind === "tool" && item.name === "spawn" && item.callId === callId ? { ...item, child } : item,
+  );
 
 const askText = (request: AskRaised["request"]): { title: string; body: string } => {
   if (request.kind === "free_text") return { title: request.prompt, body: "" };
@@ -360,6 +370,14 @@ const reduceJournal = (
         })),
         sampleId: null,
       };
+    case "child_created":
+      return {
+        ...journal,
+        turns: journal.turns.map((turn) => ({
+          ...turn,
+          items: associateChild(turn.items, event.call_id, { agent_id: event.child_id, agent: event.agent }),
+        })),
+      };
     default: {
       const running = journal.turns.findLastIndex((turn) => turn.status === "running");
       const index = running === -1 ? journal.turns.findLastIndex((turn) => turn.status === "queued") : running;
@@ -387,6 +405,9 @@ export const actorStatusLabel = (state: ActorStatusOut["state"]): string =>
     cancelled: "Cancelled",
     interrupted: "Interrupted",
   })[state];
+
+export const isNearBottom = (scrollHeight: number, scrollTop: number, clientHeight: number): boolean =>
+  scrollHeight - scrollTop - clientHeight <= 80;
 
 export const composerDisabled = (
   ready: boolean,
@@ -426,39 +447,90 @@ export const reduceEventFrame = (state: ChatState, frame: EventFrame, rootId: st
   };
 };
 
-export const createChatStore = (sessionId: string) =>
-  createStore<ChatState>((set) => ({
+export const reduceEventFrames = (state: ChatState, frames: EventFrame[], rootId: string): ChatState =>
+  frames.reduce((next, frame) => ({ ...next, ...reduceEventFrame(next, frame, rootId) }), state);
+
+const journalReady = (state: ChatState, agentId: string, rootId: string): boolean =>
+  agentId === rootId ? state.ready : (state.children[agentId]?.ready ?? false);
+
+const subscribed = (state: ChatState, agentId: string, rootId: string): boolean =>
+  agentId === rootId || agentId === state.openChildId;
+
+export const createChatStore = (sessionId: string) => {
+  const replayBuffers = new Map<string, EventFrame[]>();
+
+  return createStore<ChatState>((set, get) => ({
     ...EMPTY_JOURNAL,
     banner: null,
     cursors: {},
     children: {},
     actors: [],
     openChildId: null,
-    dispatch: (frame) => set((state) => reduceEventFrame(state, frame, sessionId)),
-    subscriptionReady: (frame) =>
+    dispatch: (frame) => {
+      const state = get();
+      if (!subscribed(state, frame.agent_id, sessionId)) return;
+      if (journalReady(state, frame.agent_id, sessionId)) {
+        set((current) => reduceEventFrame(current, frame, sessionId));
+        return;
+      }
+      const frames = replayBuffers.get(frame.agent_id) ?? [];
+      frames.push(frame);
+      replayBuffers.set(frame.agent_id, frames);
+    },
+    subscriptionReady: (frame) => {
+      if (!subscribed(get(), frame.agent_id, sessionId)) return;
+      const frames = replayBuffers.get(frame.agent_id) ?? [];
+      replayBuffers.delete(frame.agent_id);
       set((state) => {
+        const reduced = reduceEventFrames(state, frames, sessionId);
         if (frame.agent_id === sessionId) {
-          const journal = frame.active ? state : interruptJournal(state);
+          const journal = frame.active ? reduced : interruptJournal(reduced);
           return { ...journal, ready: true };
         }
-        const journal = state.children[frame.agent_id] ?? EMPTY_JOURNAL;
+        const journal = reduced.children[frame.agent_id] ?? EMPTY_JOURNAL;
         return {
+          ...reduced,
           children: {
-            ...state.children,
+            ...reduced.children,
             [frame.agent_id]: { ...journal, ready: true },
           },
         };
-      }),
+      });
+    },
     expireAsk: (frame) =>
       set((state) => ({
         turns: state.turns.map((turn) => ({ ...turn, items: updateAsks(turn.items, frame.ask_id, "expired") })),
         banner: { kind: "error", message: frame.message },
       })),
-    setReady: (ready) => set({ ready }),
+    setReady: (ready) => {
+      if (!ready) replayBuffers.clear();
+      set((state) => {
+        if (ready) return { ready };
+        return {
+          ready,
+          children: Object.fromEntries(
+            Object.entries(state.children).map(([agentId, journal]) => [agentId, { ...journal, ready: false }]),
+          ),
+        };
+      });
+    },
     setBanner: (banner) => set({ banner }),
     setActors: (actors) => set({ actors }),
-    setOpenChild: (openChildId) => set({ openChildId }),
+    setOpenChild: (openChildId) => {
+      const current = get().openChildId;
+      if (current === openChildId) return;
+      if (current !== null) replayBuffers.delete(current);
+      if (openChildId !== null) replayBuffers.delete(openChildId);
+      set((state) => ({
+        openChildId,
+        children:
+          openChildId === null
+            ? state.children
+            : { ...state.children, [openChildId]: { ...(state.children[openChildId] ?? EMPTY_JOURNAL), ready: false } },
+      }));
+    },
   }));
+};
 
 let pending: ({ sessionId: string } & PendingMessage) | null = null;
 

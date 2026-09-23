@@ -43,7 +43,7 @@ export function ActorStrip({
   selected: string | null;
   onOpen: (agentId: string) => void;
 }) {
-  const descendants = actors.filter((actor) => actor.parent_id !== null);
+  const descendants = actors.filter((actor) => actor.parent_id !== null && isRunning(actor));
   if (descendants.length === 0) return null;
 
   return (
@@ -96,6 +96,8 @@ export function ChildDrawer({
             <JournalTranscript
               turns={journal?.turns ?? []}
               ready={journal?.ready ?? false}
+              actors={actors}
+              onOpen={onSelect}
               emptyText="No journal entries yet"
             />
           </>

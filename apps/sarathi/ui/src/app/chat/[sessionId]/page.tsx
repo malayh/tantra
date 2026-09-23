@@ -55,6 +55,7 @@ export default function SessionPage() {
           onAskResponse={(askId, response) =>
             sendFrame({ type: "ask_response", command_id: commandId(), ask_id: askId, response })
           }
+          onOpen={openChild}
         />
 
         {banner !== null && (

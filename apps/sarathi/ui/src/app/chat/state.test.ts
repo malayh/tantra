@@ -7,6 +7,8 @@ import {
   actorStatusLabel,
   composerDisabled,
   createChatStore,
+  isNearBottom,
+  type ChatStore,
   pendingAsk,
   subscriptionFrames,
 } from "./state.ts";
@@ -15,6 +17,9 @@ const root = "11111111111111111111111111111111";
 const child = "22222222222222222222222222222222";
 const grandchild = "33333333333333333333333333333333";
 const command = "44444444444444444444444444444444";
+
+const ready = (store: ChatStore, agentId = root) =>
+  store.getState().subscriptionReady({ type: "subscription_ready", agent_id: agentId, seq: 0, active: true });
 
 const event = (agentId: string, seq: number, value: EventFrame["event"]): EventFrame => ({
   type: "event",
@@ -38,6 +43,7 @@ const actor = (agentId: string, state: ActorStatusOut["state"], parentId: string
 
 test("root is the only default subscription and spawn remains an ordinary tool", () => {
   const store = createChatStore(root);
+  ready(store);
   const dispatch = store.getState().dispatch;
   dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "research" }));
   dispatch(event(root, 2, { type: "turn_started", turn_id: command, input: "research" }));
@@ -78,11 +84,15 @@ test("root is the only default subscription and spawn remains an ordinary tool",
   const item = store.getState().turns[0].items[0];
   assert.equal(item.kind, "tool");
   assert.equal(item.final, true);
-  if (item.kind === "tool") assert.equal(item.name, "spawn");
+  if (item.kind === "tool") {
+    assert.equal(item.name, "spawn");
+    assert.deepEqual(item.child, { agent_id: child, agent: "researcher" });
+  }
 });
 
 test("child journals keep independent cursors, history, readiness, and deduplication", () => {
   const store = createChatStore(root);
+  ready(store);
   store.getState().dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "root" }));
   store.getState().setOpenChild(grandchild);
   store
@@ -118,10 +128,13 @@ test("child journals keep independent cursors, history, readiness, and deduplica
 
 test("switching the open child reconnects only root and the selected journal", () => {
   const store = createChatStore(root);
-  store.getState().dispatch(event(child, 1, { type: "input_queued", command_id: command, input: "child" }));
-  store.getState().dispatch(event(grandchild, 1, { type: "input_queued", command_id: command, input: "nested" }));
+  ready(store);
   store.getState().setOpenChild(child);
+  ready(store, child);
+  store.getState().dispatch(event(child, 1, { type: "input_queued", command_id: command, input: "child" }));
   store.getState().setOpenChild(grandchild);
+  store.getState().dispatch(event(grandchild, 1, { type: "input_queued", command_id: command, input: "nested" }));
+  ready(store, grandchild);
 
   assert.deepEqual(subscriptionFrames(store.getState(), root), [
     { type: "subscribe", agent_id: root, after: 0, writable: true },
@@ -132,6 +145,7 @@ test("switching the open child reconnects only root and the selected journal", (
 
 test("lifecycle and finish inputs are hidden while queued human messages remain FIFO", () => {
   const store = createChatStore(root);
+  ready(store);
   const next = "55555555555555555555555555555555";
   const finish = "66666666666666666666666666666666";
   const lifecycle = "77777777777777777777777777777777";
@@ -155,6 +169,7 @@ test("lifecycle and finish inputs are hidden while queued human messages remain 
 
 test("only root asks enter interactive state", () => {
   const store = createChatStore(root);
+  ready(store);
   const askId = "55555555555555555555555555555555";
   store.getState().dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "root" }));
   store.getState().dispatch(event(root, 2, { type: "turn_started", turn_id: command, input: "root" }));
@@ -185,6 +200,8 @@ test("only root asks enter interactive state", () => {
   store.getState().dispatch(event(root, 6, { type: "turn_completed", turn_id: command, stop_reason: "completed" }));
   assert.equal(treeRunning(store.getState().turns, store.getState().actors), false);
 
+  store.getState().setOpenChild(child);
+  ready(store, child);
   store.getState().dispatch(event(child, 1, { type: "input_queued", command_id: command, input: "child" }));
   store.getState().dispatch(event(child, 2, { type: "turn_started", turn_id: command, input: "child" }));
   store
@@ -230,6 +247,7 @@ test("actor statuses drive running controls and complete labels", () => {
 
 test("root journal drives busy state immediately and clears before the next poll", () => {
   const store = createChatStore(root);
+  ready(store);
   store.getState().setActors([actor(root, "idle", null)]);
 
   store.getState().dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "queued" }));
@@ -244,4 +262,30 @@ test("root journal drives busy state immediately and clears before the next poll
 
   store.getState().setActors([actor(root, "running", null), actor(child, "queued")]);
   assert.equal(treeRunning(store.getState().turns, store.getState().actors), true);
+});
+
+test("replay buffers are independent and cursor deduplication matches live dispatch", () => {
+  const buffered = createChatStore(root);
+  const live = createChatStore(root);
+  const frames = [
+    event(root, 1, { type: "input_queued", command_id: command, input: "queued" }),
+    event(root, 2, { type: "turn_started", turn_id: command, input: "queued" }),
+    event(root, 2, { type: "turn_started", turn_id: command, input: "duplicate" }),
+  ];
+
+  for (const frame of frames) buffered.getState().dispatch(frame);
+  assert.equal(buffered.getState().turns.length, 0);
+  ready(buffered);
+  ready(live);
+  for (const frame of frames) live.getState().dispatch(frame);
+
+  assert.deepEqual(
+    { cursors: buffered.getState().cursors, turns: buffered.getState().turns },
+    { cursors: live.getState().cursors, turns: live.getState().turns },
+  );
+});
+
+test("near-bottom threshold follows at 80px and stops above it", () => {
+  assert.equal(isNearBottom(1_000, 900, 20), true);
+  assert.equal(isNearBottom(1_000, 899, 20), false);
 });

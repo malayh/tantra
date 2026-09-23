@@ -377,17 +377,113 @@ async def test_no_system_blocks_means_no_system_message(provider) -> None:
     assert [message["role"] for message in seen[0]["messages"]] == ["user"]
 
 
-async def test_limits_configured_and_fallback(provider) -> None:
+async def test_configured_limits_skip_catalogue_discovery(provider) -> None:
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(500)
+
     configured = ModelLimits(context_window=1_000_000, max_output=65_536)
     api = provider(
-        httpx.MockTransport(lambda request: httpx.Response(200, content=OK_STREAM)),
+        httpx.MockTransport(handler),
         limits={"google/gemini-3-pro": configured},
     )
 
-    assert api.limits("google/gemini-3-pro") == configured
-    assert api.limits("who/knows") == FALLBACK_LIMITS
-    assert FALLBACK_LIMITS.context_window == 128_000
-    assert FALLBACK_LIMITS.max_output == 4_096
+    assert await api.limits("google/gemini-3-pro") == configured
+    assert requests == 0
+
+
+async def test_limits_are_discovered_from_top_level_and_openrouter_metadata(provider) -> None:
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {
+                        "id": "top-level",
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "test",
+                        "context_length": 200_000,
+                        "max_completion_tokens": 8_000,
+                    },
+                    {
+                        "id": "nested",
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "test",
+                        "top_provider": {
+                            "context_length": 300_000,
+                            "max_completion_tokens": 12_000,
+                        },
+                    },
+                ],
+            },
+        )
+
+    api = provider(httpx.MockTransport(handler))
+
+    assert await api.limits("top-level") == ModelLimits(context_window=200_000, max_output=8_000)
+    assert await api.limits("nested") == ModelLimits(context_window=300_000, max_output=12_000)
+    assert await api.limits("missing") == FALLBACK_LIMITS
+    assert requests == 1
+
+
+async def test_standard_and_malformed_catalogue_metadata_fall_back_per_field(provider) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {"id": "standard", "object": "model", "created": 0, "owned_by": "test"},
+                    {
+                        "id": "malformed",
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "test",
+                        "context_length": -1,
+                        "max_completion_tokens": "many",
+                    },
+                    {
+                        "id": "partial",
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "test",
+                        "context_length": 64_000,
+                    },
+                ],
+            },
+        )
+
+    api = provider(httpx.MockTransport(handler))
+
+    assert await api.limits("standard") == FALLBACK_LIMITS
+    assert await api.limits("malformed") == FALLBACK_LIMITS
+    assert await api.limits("partial") == ModelLimits(context_window=64_000, max_output=4_096)
+    assert FALLBACK_LIMITS == ModelLimits(context_window=128_000, max_output=4_096)
+
+
+async def test_catalogue_failure_is_cached_and_uses_fallback(provider) -> None:
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(503, json={"error": "unavailable"})
+
+    api = provider(httpx.MockTransport(handler))
+
+    assert await api.limits("first") == FALLBACK_LIMITS
+    assert await api.limits("second") == FALLBACK_LIMITS
+    assert requests == 1
 
 
 async def test_embedder_returns_vectors_in_input_order(embedder) -> None:

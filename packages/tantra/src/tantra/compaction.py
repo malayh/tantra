@@ -41,14 +41,37 @@ Reply with the brief and nothing else."""
 
 @dataclass(frozen=True)
 class CompactionConfig:
-    buffer: int = 20_000
+    buffer: int = 4_096
     prune_pool_min: int = 40_000
     prune_gain_min: int = 20_000
     tail_turns: int = 2
     summarize_at: float = 0.95
+    trigger_at: float = 0.80
+    recent_tokens: int = 20_000
+    summary_max_output: int = 4_096
+
+    def __post_init__(self) -> None:
+        if isinstance(self.trigger_at, bool) or not isinstance(self.trigger_at, (int, float)):
+            raise ValueError("trigger_at must be a number")
+        if not 0 < self.trigger_at <= 1:
+            raise ValueError("trigger_at must be greater than 0 and at most 1")
+        if isinstance(self.summarize_at, bool) or not isinstance(self.summarize_at, (int, float)):
+            raise ValueError("summarize_at must be a number")
+        if not 0 < self.summarize_at < 1:
+            raise ValueError("summarize_at must be greater than 0 and less than 1")
+        for name in ("recent_tokens", "summary_max_output"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        for name in ("buffer", "prune_pool_min", "prune_gain_min", "tail_turns"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
 
     def usable(self, limits: ModelLimits) -> int:
-        return limits.context_window - limits.max_output - self.buffer
+        ratio = int(limits.context_window * self.trigger_at)
+        hard_ceiling = limits.context_window - limits.max_output - self.buffer
+        return min(ratio, hard_ceiling)
 
 
 DEFAULT_COMPACTION = CompactionConfig()
@@ -73,6 +96,11 @@ def _rough(events: Sequence[SessionEvent], summary: str = "") -> int:
 
 def _reported(usage: Usage) -> int:
     return usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens + usage.output_tokens
+
+
+def estimate_request_tokens(request: SampleRequest) -> int:
+    payload = json.dumps(request.model_dump(mode="json"), default=str, separators=(",", ":")).encode()
+    return (len(payload) + 3) // 4
 
 
 def estimate_tokens(events: Sequence[SessionEvent], summary: str = "") -> int:
@@ -125,13 +153,15 @@ class PruneThenSummarize:
         self.instruction = instruction
 
     async def compact(self, ctx: TurnContext) -> list[SessionEvent]:
-        usable = self.config.usable(ctx.limits)
+        trigger = self.config.usable(ctx.limits)
         summary, window = compaction_window(ctx.history)
         before = estimate_tokens(window, summary)
-        if before <= usable:
+        if ctx.sample_request is not None:
+            before = max(before, estimate_request_tokens(ctx.sample_request))
+        if before < trigger:
             return []
 
-        target = int(usable * self.config.summarize_at)
+        target = int(trigger * self.config.summarize_at)
         names = {event.call_id: event.name for event in window if isinstance(event, ToolCallRequested)}
         boundary = _tail_start(window, self.config.tail_turns)
         prefix, tail = window[:boundary], window[boundary:]

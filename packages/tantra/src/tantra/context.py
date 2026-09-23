@@ -60,6 +60,7 @@ class TurnContext:
     limits: ModelLimits | None = None
     provider: Provider | None = None
     tracer: Tracer = NULL_TRACER
+    sample_request: SampleRequest | None = None
 
 
 def _as_content(result: Any) -> str:

@@ -590,8 +590,6 @@ class TurnEngine:
         for sample_number in range(self.agent.max_steps):
             for hook in self.hooks:
                 await hook.before_sample(self.turn)
-            compacted = await self._compact()
-            sample_id = uuid4().hex
             prompt = await resolve_prompt(self.agent.prompt, self.turn)
             req = build_sample_request(
                 model=self.model,
@@ -601,6 +599,19 @@ class TurnEngine:
                 skills=self.skills_index,
                 child_lifecycle=self.terminal_tool == "finish",
             )
+            self.turn.sample_request = req
+            compacted = await self._compact()
+            if compacted:
+                req = build_sample_request(
+                    model=self.model,
+                    prompt=prompt,
+                    events=self.history,
+                    tools=self.schemas,
+                    skills=self.skills_index,
+                    child_lifecycle=self.terminal_tool == "finish",
+                )
+                self.turn.sample_request = req
+            sample_id = uuid4().hex
             await self._append([SampleStarted(turn_id=self.turn.turn_id, sample_id=sample_id, model=self.model)])
             end = await self._sample(req, sample_id, compacted)
             parts, calls, invalid = self._parts(sample_id, end)
@@ -659,7 +670,10 @@ class TurnEngine:
         )
         self.turn.history = self.history
         self.turn.model = self.model
-        self.turn.limits = self.provider.limits(self.model)
+        limits = self.provider.limits(self.model)
+        if inspect.isawaitable(limits):
+            limits = await limits
+        self.turn.limits = limits
         self.turn.provider = self.provider
         self.turn.tracer = self.tracer
         self.turn_span = self.tracer.start_turn(

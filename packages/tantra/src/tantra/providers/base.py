@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -114,7 +114,7 @@ class Provider(Protocol):
         is the raw JSON string exactly as the vendor sent it — callers parse it.
         """
 
-    def limits(self, model: str) -> ModelLimits:
+    def limits(self, model: str) -> ModelLimits | Awaitable[ModelLimits]:
         """Context window and max output for `model`. Unknown models get a conservative estimate."""
 
 

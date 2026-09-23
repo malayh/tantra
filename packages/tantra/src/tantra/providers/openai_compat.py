@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -54,6 +55,30 @@ def _usage_payload(raw: dict[str, Any]) -> Usage:
     )
 
 
+def _positive_int(*values: Any, fallback: int) -> int:
+    return next(
+        (value for value in values if isinstance(value, int) and not isinstance(value, bool) and value > 0),
+        fallback,
+    )
+
+
+def _metadata_limits(raw: dict[str, Any]) -> ModelLimits:
+    nested = raw.get("top_provider")
+    top_provider = nested if isinstance(nested, dict) else {}
+    return ModelLimits(
+        context_window=_positive_int(
+            raw.get("context_length"),
+            top_provider.get("context_length"),
+            fallback=FALLBACK_LIMITS.context_window,
+        ),
+        max_output=_positive_int(
+            raw.get("max_completion_tokens"),
+            top_provider.get("max_completion_tokens"),
+            fallback=FALLBACK_LIMITS.max_output,
+        ),
+    )
+
+
 class OpenAICompatible:
     provider_name = "openai"
 
@@ -76,9 +101,33 @@ class OpenAICompatible:
             timeout=timeout,
             max_retries=0,
         )
+        self._catalogue_loaded = False
+        self._catalogue_lock = asyncio.Lock()
+        self._discovered_limits: dict[str, ModelLimits] = {}
 
-    def limits(self, model: str) -> ModelLimits:
-        return self._limits.get(model, FALLBACK_LIMITS)
+    async def limits(self, model: str) -> ModelLimits:
+        configured = self._limits.get(model)
+        if configured is not None:
+            return configured
+        if not self._catalogue_loaded:
+            async with self._catalogue_lock:
+                if not self._catalogue_loaded:
+                    self._discovered_limits = await self._discover_limits()
+                    self._catalogue_loaded = True
+        return self._discovered_limits.get(model, FALLBACK_LIMITS)
+
+    async def _discover_limits(self) -> dict[str, ModelLimits]:
+        try:
+            catalogue = await self._client.models.list()
+            discovered = {}
+            for entry in catalogue.data:
+                raw = entry.model_dump()
+                model = raw.get("id")
+                if isinstance(model, str):
+                    discovered[model] = _metadata_limits(raw)
+            return discovered
+        except Exception:
+            return {}
 
     async def aclose(self) -> None:
         await self._client.close()

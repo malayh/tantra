@@ -31,6 +31,7 @@ from tantra.hooks import Hook
 from tantra.loop import RetryConfig, TurnEngine
 from tantra.providers.base import ModelLimits, ProviderEvent, SampleRequest, ToolCall, ToolResultMessage
 from tantra.providers.fake import FAKE_LIMITS, FakeProvider, Sample
+from tantra.skills import SkillInfo
 from tantra.stores.memory import MemoryStore
 from tantra.tools import tool
 from tantra.tracing import NULL_TRACER
@@ -520,3 +521,75 @@ async def test_tool_span_ends_once_when_turn_is_cancelled() -> None:
 
     assert len(tracer.started) == 1
     assert tracer.ended == [(tracer.started[0], "aborted")]
+
+
+class RequestCapturingCompactor:
+    def __init__(self) -> None:
+        self.prepared: SampleRequest | None = None
+
+    async def compact(self, turn: TurnContext) -> list[SessionEvent]:
+        self.prepared = turn.sample_request
+        return [
+            CompactionApplied(
+                strategy="test",
+                tokens_before=10,
+                tokens_after=3,
+                summary="summary",
+                floor_turn_id=turn.turn_id,
+            )
+        ]
+
+
+async def test_complete_request_is_prepared_and_rebuilt_without_changing_fixed_blocks() -> None:
+    @tool
+    async def search(query: str) -> str:
+        return query
+
+    class Bot(Agent):
+        prompt = "system prompt"
+        tools = [search]
+
+    provider = FakeProvider([Sample(text="done")])
+    compactor = RequestCapturingCompactor()
+    engine, _, queued = await build([], Bot, provider=provider, compactor=compactor)
+    engine.skills_index = [SkillInfo(name="investigate", description="Inspect production signals.")]
+
+    await engine.run(queued)
+
+    prepared = compactor.prepared
+    sampled = provider.requests[0]
+    assert prepared is not None
+    assert sampled is not prepared
+    assert [block.model_dump_json() for block in sampled.system] == [
+        block.model_dump_json() for block in prepared.system
+    ]
+    assert [schema.model_dump_json() for schema in sampled.tools] == [
+        schema.model_dump_json() for schema in prepared.tools
+    ]
+    assert len(sampled.system) == 2
+    assert [message.content for message in sampled.messages if hasattr(message, "content")] == ["summary", "go"]
+
+
+class AsyncLimitsProvider(FakeProvider):
+    async def limits(self, model: str) -> ModelLimits:
+        return ModelLimits(context_window=256_000, max_output=8_192)
+
+
+async def test_turn_engine_accepts_sync_and_async_provider_limits() -> None:
+    class Bot(Agent):
+        pass
+
+    sync_engine, _, sync_queued = await build([Sample(text="sync")], Bot)
+    await sync_engine.run(sync_queued)
+
+    async_engine, _, async_queued = await build(
+        [],
+        Bot,
+        provider=AsyncLimitsProvider([Sample(text="async")]),
+    )
+    await async_engine.run(async_queued)
+
+    assert sync_engine.turn is not None
+    assert sync_engine.turn.limits == FAKE_LIMITS
+    assert async_engine.turn is not None
+    assert async_engine.turn.limits == ModelLimits(context_window=256_000, max_output=8_192)

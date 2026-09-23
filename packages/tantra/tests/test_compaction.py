@@ -11,6 +11,7 @@ from tantra.compaction import (
     SUMMARIZE_INSTRUCTION,
     CompactionConfig,
     PruneThenSummarize,
+    estimate_request_tokens,
     estimate_tokens,
 )
 from tantra.context import TurnContext, assemble_messages, build_messages, compaction_window
@@ -34,8 +35,11 @@ from tantra.providers.base import (
     AssistantMessage,
     Message,
     ModelLimits,
+    SampleRequest,
+    SystemBlock,
     ToolCall,
     ToolResultMessage,
+    ToolSchema,
     UserMessage,
 )
 from tantra.providers.fake import FakeProvider, Sample
@@ -422,7 +426,7 @@ async def test_a_second_prune_never_restubs_a_call_whose_stub_sits_in_the_tail()
 
 
 async def test_a_prune_with_nothing_left_to_reclaim_summarizes_on_that_same_call() -> None:
-    history = session(result_chars=160_000, text_chars=45_000)
+    history = session(result_chars=160_000, text_chars=60_000)
     first = await PruneThenSummarize().compact(context_for(history, TinyProvider([])))
     assert sorted(event.call_id for event in stubs_in(first)) == ["c1", "c2", "c3", "c4", "c5"]
 
@@ -627,3 +631,120 @@ def test_cancellation_is_projected_without_orphaning_an_incomplete_tool_call() -
         for message in messages
     )
     assert pairs(messages) == ([], [])
+
+
+def test_compaction_config_defaults_and_budget_precedence() -> None:
+    config = CompactionConfig()
+
+    assert config.trigger_at == 0.80
+    assert config.recent_tokens == 20_000
+    assert config.summary_max_output == 4_096
+    assert config.buffer == 4_096
+    assert config.usable(ModelLimits(context_window=100_000, max_output=4_096)) == 80_000
+    assert config.usable(ModelLimits(context_window=100_000, max_output=30_000)) == 65_904
+
+
+def test_turn_context_preserves_the_positional_tracer_slot() -> None:
+    tracer: Any = object()
+    context = TurnContext(
+        "session",
+        "turn",
+        "agent",
+        0,
+        "input",
+        {},
+        None,
+        [],
+        MODEL,
+        TINY_LIMITS,
+        None,
+        tracer,
+    )
+
+    assert context.tracer is tracer
+    assert context.sample_request is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("trigger_at", 0),
+        ("trigger_at", 1.1),
+        ("summarize_at", 0),
+        ("summarize_at", 1),
+        ("recent_tokens", 0),
+        ("summary_max_output", 0),
+        ("buffer", -1),
+        ("prune_pool_min", -1),
+        ("prune_gain_min", -1),
+        ("tail_turns", -1),
+        ("trigger_at", True),
+        ("summarize_at", False),
+        ("recent_tokens", True),
+        ("summary_max_output", False),
+        ("buffer", True),
+        ("prune_pool_min", False),
+        ("prune_gain_min", True),
+        ("tail_turns", False),
+        ("tail_turns", 1.5),
+        ("recent_tokens", 1.5),
+    ],
+)
+def test_compaction_config_rejects_invalid_ratios_and_token_values(field: str, value: Any) -> None:
+    with pytest.raises(ValueError):
+        CompactionConfig(**{field: value})
+
+
+def test_complete_request_estimator_counts_system_tools_and_params() -> None:
+    plain = SampleRequest(model=MODEL)
+    system = SampleRequest(model=MODEL, system=[SystemBlock(text="s" * 400)])
+    tools = SampleRequest(
+        model=MODEL,
+        tools=[ToolSchema(name="search", description="d" * 400, parameters={"type": "object"})],
+    )
+    params = SampleRequest(model=MODEL, params={"routing": "p" * 400})
+
+    assert estimate_request_tokens(system) > estimate_request_tokens(plain)
+    assert estimate_request_tokens(tools) > estimate_request_tokens(plain)
+    assert estimate_request_tokens(params) > estimate_request_tokens(plain)
+
+
+def threshold_history(reported: int) -> list[SessionEvent]:
+    events: list[SessionEvent] = [SessionCreated(agent="analyst")]
+    events += chat_turn("old", input="old", text="short")
+    events += chat_turn(TAIL_TURN, input="recent", text="short")
+    events.append(SampleCompleted(sample_id="reported", usage=Usage(input_tokens=reported)))
+    return events
+
+
+async def test_compaction_starts_at_eighty_percent_not_below() -> None:
+    limits = ModelLimits(context_window=1_000, max_output=100)
+    below_provider = TinyProvider([Sample(text=BRIEF)])
+    below = context_for(threshold_history(799), below_provider)
+    below.limits = limits
+    below.sample_request = SampleRequest(model=MODEL)
+
+    assert await PruneThenSummarize(CompactionConfig(buffer=0, tail_turns=1)).compact(below) == []
+    assert below_provider.requests == []
+
+    trigger_provider = TinyProvider([Sample(text=BRIEF)])
+    trigger = context_for(threshold_history(800), trigger_provider)
+    trigger.limits = limits
+    trigger.sample_request = SampleRequest(model=MODEL)
+
+    compacted = await PruneThenSummarize(CompactionConfig(buffer=0, tail_turns=1)).compact(trigger)
+
+    assert len(applied_in(compacted)) == 1
+    assert len(trigger_provider.requests) == 1
+
+
+async def test_hard_ceiling_can_trigger_before_eighty_percent() -> None:
+    provider = TinyProvider([Sample(text=BRIEF)])
+    context = context_for(threshold_history(600), provider)
+    context.limits = ModelLimits(context_window=1_000, max_output=300)
+    context.sample_request = SampleRequest(model=MODEL)
+
+    compacted = await PruneThenSummarize(CompactionConfig(buffer=100, tail_turns=1)).compact(context)
+
+    assert len(applied_in(compacted)) == 1
+    assert len(provider.requests) == 1

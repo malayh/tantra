@@ -736,6 +736,7 @@ class Runtime:
             target = await self._header(target_id)
             if target.root_id != root_id or not (sender.parent_id == target_id or target.parent_id == sender.id):
                 raise TantraError("send is allowed only across a direct parent-child edge")
+            self._agent_for(target.agent)
             journal = await self._journal(target_id)
             existing = await self._tree_command(root_id, command.hex)
             if existing is not None:

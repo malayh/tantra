@@ -135,7 +135,7 @@ The targets guide effort rather than enforce quotas. Every level:
 
 ## Implementation phases
 
-### Phase 0 — Durable child names · deps: none · CODE DONE · VERIFICATION PENDING
+### Phase 0 — Durable child names · deps: none · ✅ DONE
 
 Deliverables:
 
@@ -155,14 +155,16 @@ Verify:
 
 Checklist:
 
-- [ ] Spawn contract
-- [ ] Durable name fields
-- [ ] Status exposure
-- [ ] Idempotency behavior
-- [ ] Store and Runtime tests
-- [ ] Reference documentation
+- [x] Spawn contract
+- [x] Durable name fields
+- [x] Status exposure
+- [x] Idempotency behavior
+- [x] Store and Runtime tests
+- [x] Reference documentation
 
-### Phase 1 — General Sarathi subagent and research skill · deps: P0 · —
+Verification exception: Phase 0 was marked complete at user direction without a real PostgreSQL run because Docker and `TANTRA_POSTGRES_DSN` were unavailable. Memory, filesystem, and SQLite conformance, the full available Tantra suite, Ruff, and `git diff --check` passed.
+
+### Phase 1 — General Sarathi subagent and research skill · deps: P0 · ✅ DONE
 
 Deliverables:
 
@@ -186,13 +188,13 @@ Verify:
 
 Checklist:
 
-- [ ] General Subagent
-- [ ] Shared tool wiring
-- [ ] Research skill
-- [ ] Delegation prompts
-- [ ] Actor-name API and UI
-- [ ] Legacy-history behavior
-- [ ] Automated and Brave verification
+- [x] General Subagent
+- [x] Shared tool wiring
+- [x] Research skill
+- [x] Delegation prompts
+- [x] Actor-name API and UI
+- [x] Legacy-history behavior
+- [x] Automated and Brave verification
 
 ### Phase 2 — Documentation and Tantra 1.1.0 · deps: P1, 008 P2 follow-up · —
 

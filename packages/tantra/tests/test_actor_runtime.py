@@ -283,8 +283,11 @@ async def test_spawn_schema_deduplicates_repeated_child_types() -> None:
 
 
 async def test_child_lifecycle_guidance_reaches_only_the_child_provider() -> None:
-    class Child(Agent):
+    class Grandchild(Agent):
         pass
+
+    class Child(Agent):
+        subagents = [Grandchild]
 
     class Root(Agent):
         subagents = [Child]
@@ -323,7 +326,11 @@ async def test_child_lifecycle_guidance_reaches_only_the_child_provider() -> Non
     child_request = next(
         request for request in provider.requests if any(tool.name == "finish" for tool in request.tools)
     )
-    root_request = next(request for request in provider.requests if any(tool.name == "spawn" for tool in request.tools))
+    root_request = next(
+        request
+        for request in provider.requests
+        if any(tool.name == "spawn" for tool in request.tools) and all(tool.name != "finish" for tool in request.tools)
+    )
     lifecycle = (
         "Child lifecycle\n\n"
         "Ordinary turn completion leaves the child reusable and sends a status-only notification to the parent. "
@@ -331,10 +338,16 @@ async def test_child_lifecycle_guidance_reaches_only_the_child_provider() -> Non
         "closes the child and delivers its result to the parent."
     )
     finish = next(tool for tool in child_request.tools if tool.name == "finish")
+    child_send = next(tool for tool in child_request.tools if tool.name == "send")
     spawn = next(tool for tool in root_request.tools if tool.name == "spawn")
+    root_send = next(tool for tool in root_request.tools if tool.name == "send")
 
     assert child_request.system[-1].text == "Execution environment\n\n" + lifecycle
     assert all(lifecycle not in block.text for block in root_request.system)
+    assert child_send.description == (
+        f"Queue a message for a direct parent or child agent. Your direct parent agent ID is {root_id}."
+    )
+    assert root_send.description == "Queue a message for a direct parent or child agent."
     assert spawn.parameters["properties"]["agent_name"]["enum"] == ["child"]
     assert finish.description == "Permanently close this child agent and deliver its result to its parent."
     await runtime.aclose()

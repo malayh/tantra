@@ -620,9 +620,12 @@ class Runtime:
                 description="Return durable status for one direct child agent. It returns no child output.",
             )
         if header.parent_id is not None or agent.subagents:
+            send_description = "Queue a message for a direct parent or child agent."
+            if header.parent_id is not None:
+                send_description += f" Your direct parent agent ID is {UUID(hex=header.parent_id)}."
             tools["send"] = Tool(
                 send,
-                description="Queue a message for a direct parent or child agent.",
+                description=send_description,
             )
         if header.parent_id is not None:
             tools["finish"] = Tool(

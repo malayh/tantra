@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -24,7 +25,13 @@ from tantra.providers.base import (
     UserMessage,
 )
 from tantra.providers.fake import Cassette, Interaction, cassette_transport
-from tantra.providers.openai_compat import FALLBACK_LIMITS, OpenAICompatible, OpenAICompatibleEmbedder
+from tantra.providers.openai_compat import (
+    CONTEXT_OVERFLOW_CODE,
+    FALLBACK_LIMITS,
+    OpenAICompatible,
+    OpenAICompatibleEmbedder,
+    _context_overflow,
+)
 
 CASSETTE = Path(__file__).parent / "cassettes" / "tool_call_split.json"
 REQ = SampleRequest(model="google/gemini-3-pro", messages=[UserMessage(content="request rate?")])
@@ -508,3 +515,135 @@ async def test_embedder_raises_on_error_status(embedder) -> None:
 
     with pytest.raises(ProviderError, match="429"):
         await api.embed(["a"])
+
+
+class StructuredError:
+    def __init__(self, body: Any, text: str = "fallback") -> None:
+        self.body = body
+        self.text = text
+
+    def __str__(self) -> str:
+        return self.text
+
+
+def test_context_overflow_accepts_only_confirmed_structured_fields() -> None:
+    bodies = (
+        {"error": {"code": CONTEXT_OVERFLOW_CODE}},
+        {"code": CONTEXT_OVERFLOW_CODE},
+        {"error": {"metadata": {"error_type": CONTEXT_OVERFLOW_CODE}}},
+        {
+            "error": {
+                "code": 400,
+                "metadata": {"provider_error_code": CONTEXT_OVERFLOW_CODE},
+            }
+        },
+        {
+            "code": 400,
+            "metadata": {"provider_error_code": CONTEXT_OVERFLOW_CODE},
+        },
+    )
+
+    assert all(_context_overflow(StructuredError(body)) for body in bodies)
+
+
+def test_context_overflow_rejects_speculative_and_arbitrary_structured_fields() -> None:
+    bodies = (
+        {"type": CONTEXT_OVERFLOW_CODE},
+        {"code": "input_too_long"},
+        {"code": "prompt_too_long"},
+        {"metadata": {"code": CONTEXT_OVERFLOW_CODE}},
+        {"details": {"code": CONTEXT_OVERFLOW_CODE}},
+        {"metadata": {"raw": json.dumps({"error": {"code": CONTEXT_OVERFLOW_CODE}})}},
+        {"metadata": {"message": "Maximum context length is 8192 tokens; requested 9000 tokens"}},
+    )
+
+    assert not any(_context_overflow(StructuredError(body)) for body in bodies)
+
+
+def test_context_overflow_uses_only_the_structured_message_when_present() -> None:
+    fallback = "Maximum context length is 8192 tokens; requested 9000 tokens"
+
+    assert _context_overflow(StructuredError({}, fallback)) is True
+    assert _context_overflow(StructuredError({"message": "invalid temperature"}, fallback)) is False
+
+
+async def test_openai_context_length_code_is_classified(tmp_path: Path, provider) -> None:
+    body = json.dumps({"error": {"message": "request rejected", "code": CONTEXT_OVERFLOW_CODE}})
+    api = provider(replay(tmp_path, [body], status=400))
+
+    with pytest.raises(ProviderError) as caught:
+        await collect(api.stream(REQ))
+
+    assert caught.value.context_overflow is True
+
+
+async def test_openrouter_context_overflow_message_is_classified(tmp_path: Path, provider) -> None:
+    body = json.dumps(
+        {
+            "error": {
+                "message": "This model's maximum context length is 8192 tokens. However, you requested 9000 tokens."
+            }
+        }
+    )
+    api = provider(replay(tmp_path, [body], status=400))
+
+    with pytest.raises(ProviderError) as caught:
+        await collect(api.stream(REQ))
+
+    assert caught.value.context_overflow is True
+
+
+async def test_unrelated_bad_request_is_not_context_overflow(tmp_path: Path, provider) -> None:
+    body = json.dumps({"error": {"message": "invalid temperature", "code": "invalid_request_error"}})
+    api = provider(replay(tmp_path, [body], status=400))
+
+    with pytest.raises(ProviderError) as caught:
+        await collect(api.stream(REQ))
+
+    assert caught.value.context_overflow is False
+    assert ProviderError("compatible").context_overflow is False
+
+
+async def test_token_field_character_limit_is_not_context_overflow(tmp_path: Path, provider) -> None:
+    body = json.dumps({"error": {"message": "Input must not exceed 64 characters for this token field"}})
+    api = provider(replay(tmp_path, [body], status=400))
+
+    with pytest.raises(ProviderError) as caught:
+        await collect(api.stream(REQ))
+
+    assert caught.value.context_overflow is False
+
+
+async def test_openrouter_http_200_sse_context_error_is_classified_before_output(tmp_path: Path, provider) -> None:
+    error = {
+        "error": {
+            "message": "Provider returned error",
+            "code": 400,
+            "metadata": {"provider_error_code": CONTEXT_OVERFLOW_CODE},
+        }
+    }
+    chunks = [f"data: {json.dumps(error)}\n\n", "data: [DONE]\n\n"]
+    api = provider(replay(tmp_path, chunks))
+
+    with pytest.raises(ProviderError) as caught:
+        await collect(api.stream(REQ))
+
+    assert caught.value.context_overflow is True
+    assert getattr(caught.value.__cause__, "body", None) == error["error"]
+
+
+async def test_openrouter_http_200_sse_context_error_after_output_still_raises(tmp_path: Path, provider) -> None:
+    error = {
+        "error": {
+            "message": "Provider returned error",
+            "metadata": {"error_type": CONTEXT_OVERFLOW_CODE},
+        }
+    }
+    chunks = [frame({"content": "starting"}), f"data: {json.dumps(error)}\n\n", "data: [DONE]\n\n"]
+    stream = provider(replay(tmp_path, chunks)).stream(REQ)
+
+    assert await anext(stream) == TextDelta(text="starting")
+    with pytest.raises(ProviderError) as caught:
+        await anext(stream)
+
+    assert caught.value.context_overflow is True

@@ -28,6 +28,7 @@ from tantra.providers.base import (
 
 FALLBACK_LIMITS = ModelLimits(context_window=128_000, max_output=4_096)
 RESERVED_KEYS = frozenset({"model", "messages", "stream", "stream_options", "tools"})
+CONTEXT_OVERFLOW_CODE = "context_length_exceeded"
 
 
 def _message_payload(message: Message) -> dict[str, Any]:
@@ -77,6 +78,27 @@ def _metadata_limits(raw: dict[str, Any]) -> ModelLimits:
             fallback=FALLBACK_LIMITS.max_output,
         ),
     )
+
+
+def _context_overflow(exc: openai.OpenAIError) -> bool:
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        body = body["error"]
+    structured = body if isinstance(body, dict) else {}
+    metadata = structured.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if any(
+        value == CONTEXT_OVERFLOW_CODE
+        for value in (structured.get("code"), metadata.get("error_type"), metadata.get("provider_error_code"))
+    ):
+        return True
+    message = structured.get("message")
+    text = message if isinstance(message, str) else str(exc)
+    text = text.lower()
+    has_context = "context length" in text or "context window" in text
+    has_tokens = "token" in text
+    has_overflow = any(phrase in text for phrase in ("exceed", "requested", "resulted", "too large", "too long"))
+    return has_context and has_tokens and has_overflow
 
 
 class OpenAICompatible:
@@ -199,6 +221,7 @@ class OpenAICompatible:
                 str(exc),
                 status_code=getattr(exc, "status_code", None),
                 retryable=True if isinstance(exc, openai.APIConnectionError) else None,
+                context_overflow=_context_overflow(exc),
             ) from exc
         except (TypeError, ValueError, AttributeError, KeyError, AssertionError) as exc:
             raise ProviderError(f"malformed stream from {self.base_url}: {exc!r}") from exc

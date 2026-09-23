@@ -1,6 +1,6 @@
 # 010 Adaptive Context Compaction
 
-Status: Phase 0 complete; Phases 1 and 2 not started.
+Status: Phases 0 and 1 complete; Phase 2 not started.
 
 ## Goal
 
@@ -104,7 +104,7 @@ Checklist:
 - [x] Focused and full verification.
 - [x] Phase 0 status updated after verification.
 
-### Phase 1 — Token-bounded durable compaction
+### Phase 1 — Token-bounded durable compaction ✅ DONE
 
 Dependencies: Phase 0.
 
@@ -130,12 +130,12 @@ Verify:
 
 Checklist:
 
-- [ ] Token-bounded recent history.
-- [ ] Summary output limit and summary folding.
-- [ ] Post-compaction fit check.
-- [ ] Overflow classification.
-- [ ] One-shot recovery retry.
-- [ ] Focused and full tests.
+- [x] Token-bounded recent history.
+- [x] Summary output limit and summary folding.
+- [x] Post-compaction fit check.
+- [x] Overflow classification.
+- [x] One-shot recovery retry.
+- [x] Focused and full tests.
 
 ### Phase 2 — Documentation and release integration
 

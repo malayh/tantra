@@ -70,6 +70,8 @@ DEFAULT_RETRY = RetryConfig()
 
 
 def is_retryable(exc: ProviderError) -> bool:
+    if exc.context_overflow:
+        return False
     if exc.retryable is True:
         return True
     status = exc.status_code
@@ -244,7 +246,13 @@ class TurnEngine:
             await hook.after_turn(self.turn, terminal)
         return terminal
 
-    async def _sample(self, req: SampleRequest, sample_id: str, compacted: bool) -> StreamEnd:
+    async def _sample(
+        self,
+        req: SampleRequest,
+        sample_id: str,
+        compacted: bool,
+        recover: Callable[[], Awaitable[SampleRequest | None]],
+    ) -> StreamEnd:
         span = self.tracer.start_sample(
             self.turn_span,
             req,
@@ -255,25 +263,38 @@ class TurnEngine:
         end: StreamEnd | None = None
         error: BaseException | None = None
         attempts = 0
+        failures = 0
+        recovered = False
+        persisted = False
         try:
-            for attempt in range(self.retry.max_attempts):
-                attempts = attempt + 1
+            while True:
+                attempts += 1
                 end = None
                 try:
                     async for event in self.provider.stream(req):
                         if isinstance(event, TextDelta | ReasoningDelta | ToolCallDelta):
                             await self._append([event])
+                            persisted = True
                         elif isinstance(event, StreamEnd):
                             end = event
                     if end is None:
                         raise ProviderError("provider stream ended without a StreamEnd")
                 except ProviderError as exc:
-                    if attempt + 1 >= self.retry.max_attempts or not is_retryable(exc):
+                    if exc.context_overflow:
+                        if persisted or recovered:
+                            raise
+                        replacement = await recover()
+                        if replacement is None:
+                            raise
+                        req = replacement
+                        recovered = True
+                        continue
+                    failures += 1
+                    if failures >= self.retry.max_attempts or not is_retryable(exc):
                         raise
-                    await asyncio.sleep(min(self.retry.base_delay * 2**attempt, self.retry.max_delay))
+                    await asyncio.sleep(min(self.retry.base_delay * 2 ** (failures - 1), self.retry.max_delay))
                     continue
                 return end
-            raise ProviderError("provider retry loop exhausted")
         except BaseException as exc:
             error = exc
             raise
@@ -563,7 +584,7 @@ class TurnEngine:
                 return finished
         return output
 
-    async def _compact(self) -> bool:
+    async def _compact(self, *, forced: bool = False) -> bool:
         if self.compactor is None:
             return False
         span = self.tracer.start_compaction(self.turn_span)
@@ -573,7 +594,11 @@ class TurnEngine:
         error: BaseException | None = None
         try:
             assert self.turn is not None
-            events = await self.compactor.compact(self.turn)
+            if forced:
+                force = getattr(self.compactor, "_force_compact", None)
+                events = await force(self.turn) if force is not None else await self.compactor.compact(self.turn)
+            else:
+                events = await self.compactor.compact(self.turn)
         except BaseException as exc:
             error = exc
             raise
@@ -583,6 +608,21 @@ class TurnEngine:
             self.tracer.end_compaction(span, applied=applied, error=error)
         await self._append(events)
         return bool(events)
+
+    async def _recover_overflow(self, prompt: str) -> SampleRequest | None:
+        compacted = await self._compact(forced=True)
+        if not compacted:
+            return None
+        req = build_sample_request(
+            model=self.model,
+            prompt=prompt,
+            events=self.history,
+            tools=self.schemas,
+            skills=self.skills_index,
+            child_lifecycle=self.terminal_tool == "finish",
+        )
+        self.turn.sample_request = req
+        return req
 
     async def _drive(self) -> TurnCompleted | TurnFailed:
         assert self.turn is not None
@@ -613,7 +653,12 @@ class TurnEngine:
                 self.turn.sample_request = req
             sample_id = uuid4().hex
             await self._append([SampleStarted(turn_id=self.turn.turn_id, sample_id=sample_id, model=self.model)])
-            end = await self._sample(req, sample_id, compacted)
+            end = await self._sample(
+                req,
+                sample_id,
+                compacted,
+                lambda prompt=prompt: self._recover_overflow(prompt),
+            )
             parts, calls, invalid = self._parts(sample_id, end)
             await self._append(parts)
             self.header.usage = accumulate(self.header.usage, end.usage)

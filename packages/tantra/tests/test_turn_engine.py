@@ -10,6 +10,7 @@ import pytest
 from pydantic import BaseModel
 
 from tantra.agent import Agent
+from tantra.compaction import PruneThenSummarize
 from tantra.context import TurnContext
 from tantra.errors import ProviderError
 from tantra.events import (
@@ -17,19 +18,22 @@ from tantra.events import (
     InputQueued,
     LoggedEvent,
     ReasoningDelta,
+    SampleStarted,
     SessionEvent,
     SessionHeader,
     Stamped,
     TextDelta,
+    TextPart,
     ToolCallCompleted,
     ToolCallRequested,
     TurnCompleted,
     TurnFailed,
+    TurnStarted,
     Usage,
 )
 from tantra.hooks import Hook
 from tantra.loop import RetryConfig, TurnEngine
-from tantra.providers.base import ModelLimits, ProviderEvent, SampleRequest, ToolCall, ToolResultMessage
+from tantra.providers.base import ModelLimits, ProviderEvent, SampleRequest, StreamEnd, ToolCall, ToolResultMessage
 from tantra.providers.fake import FAKE_LIMITS, FakeProvider, Sample
 from tantra.skills import SkillInfo
 from tantra.stores.memory import MemoryStore
@@ -593,3 +597,169 @@ async def test_turn_engine_accepts_sync_and_async_provider_limits() -> None:
     assert sync_engine.turn.limits == FAKE_LIMITS
     assert async_engine.turn is not None
     assert async_engine.turn.limits == ModelLimits(context_window=256_000, max_output=8_192)
+
+
+class OverflowProvider:
+    def __init__(self, *, partial: bool = False, always: bool = False) -> None:
+        self.partial = partial
+        self.always = always
+        self.requests: list[SampleRequest] = []
+
+    def limits(self, model: str) -> ModelLimits:
+        return FAKE_LIMITS
+
+    async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+        self.requests.append(req)
+        if self.partial:
+            yield TextDelta(text="partial")
+        if self.always or len(self.requests) == 1:
+            raise ProviderError("maximum context length exceeded", status_code=400, context_overflow=True)
+        yield StreamEnd(text="done")
+
+
+class RecoveryCompactor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def compact(self, turn: TurnContext) -> list[SessionEvent]:
+        self.calls += 1
+        if self.calls == 1:
+            return []
+        return [
+            CompactionApplied(
+                strategy="test",
+                tokens_before=10,
+                tokens_after=3,
+                summary="summary",
+                floor_turn_id=turn.turn_id,
+            )
+        ]
+
+
+class SampleCountingHook(Hook):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def before_sample(self, turn: TurnContext) -> None:
+        self.calls += 1
+
+
+class AttemptTracer(ToolTracer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts: list[int] = []
+
+    def end_sample(self, _span: Any, **kwargs: Any) -> None:
+        self.attempts.append(kwargs["attempts"])
+
+
+async def test_context_overflow_compacts_and_retries_the_same_logical_sample_once() -> None:
+    class Bot(Agent):
+        pass
+
+    provider = OverflowProvider()
+    compactor = RecoveryCompactor()
+    hook = SampleCountingHook()
+    tracer = AttemptTracer()
+    engine, store, queued = await build([], Bot, provider=provider, compactor=compactor, hooks=[hook], tracer=tracer)
+
+    terminal = await engine.run(queued)
+    journal = await events(store, engine.header.id)
+
+    assert isinstance(terminal, TurnCompleted)
+    assert len(provider.requests) == 2
+    assert compactor.calls == 2
+    assert hook.calls == 1
+    assert len([event for event in journal if isinstance(event, SampleStarted)]) == 1
+    assert tracer.attempts == [2]
+
+
+@pytest.mark.parametrize("partial", [True, False])
+async def test_partial_or_second_context_overflow_fails_without_another_retry(partial: bool) -> None:
+    class Bot(Agent):
+        pass
+
+    provider = OverflowProvider(partial=partial, always=True)
+    compactor = RecoveryCompactor()
+    engine, store, queued = await build([], Bot, provider=provider, compactor=compactor)
+
+    terminal = await engine.run(queued)
+    journal = await events(store, engine.header.id)
+
+    assert isinstance(terminal, TurnFailed)
+    assert len(provider.requests) == (1 if partial else 2)
+    assert compactor.calls == (1 if partial else 2)
+    assert len([event for event in journal if isinstance(event, SampleStarted)]) == 1
+    assert len([event for event in journal if isinstance(event, TextDelta)]) == (1 if partial else 0)
+
+
+async def test_builtin_compactor_forces_real_reclamation_after_overflow() -> None:
+    class Bot(Agent):
+        pass
+
+    provider = OverflowProvider()
+    tracer = AttemptTracer()
+    engine, store, queued = await build([], Bot, provider=provider, compactor=PruneThenSummarize(), tracer=tracer)
+    engine.history = [
+        TurnStarted(turn_id="old", input="old input"),
+        TextPart(sample_id="old-sample", text="old answer"),
+    ]
+
+    terminal = await engine.run(queued)
+    journal = await events(store, engine.header.id)
+
+    assert isinstance(terminal, TurnCompleted)
+    assert len(provider.requests) == 3
+    assert len([event for event in journal if isinstance(event, SampleStarted)]) == 1
+    assert len([event for event in journal if isinstance(event, CompactionApplied)]) == 1
+    assert tracer.attempts == [1, 2]
+
+
+async def test_builtin_overflow_recovery_fails_when_only_current_input_remains() -> None:
+    class Bot(Agent):
+        pass
+
+    provider = OverflowProvider(always=True)
+    engine, _, queued = await build([], Bot, provider=provider, compactor=PruneThenSummarize())
+
+    terminal = await engine.run(queued)
+
+    assert isinstance(terminal, TurnFailed)
+    assert "current input" in terminal.error
+    assert len(provider.requests) == 1
+
+
+class RetryThenOverflowProvider:
+    def __init__(self) -> None:
+        self.requests: list[SampleRequest] = []
+
+    def limits(self, model: str) -> ModelLimits:
+        return FAKE_LIMITS
+
+    async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+        self.requests.append(req)
+        if len(self.requests) == 1:
+            yield TextDelta(text="persisted")
+            raise ProviderError("retry", status_code=500)
+        raise ProviderError("maximum context length exceeded", status_code=400, context_overflow=True)
+
+
+async def test_persisted_delta_from_an_ordinary_retry_blocks_later_overflow_recovery() -> None:
+    class Bot(Agent):
+        pass
+
+    provider = RetryThenOverflowProvider()
+    compactor = RecoveryCompactor()
+    tracer = AttemptTracer()
+    engine, store, queued = await build([], Bot, provider=provider, compactor=compactor, tracer=tracer)
+    engine.retry = RetryConfig(max_attempts=2, base_delay=0)
+
+    terminal = await engine.run(queued)
+    journal = await events(store, engine.header.id)
+
+    assert isinstance(terminal, TurnFailed)
+    assert len(provider.requests) == 2
+    assert compactor.calls == 1
+    assert len([event for event in journal if isinstance(event, TextDelta)]) == 1
+    assert len([event for event in journal if isinstance(event, CompactionApplied)]) == 0
+    assert tracer.attempts == [2]

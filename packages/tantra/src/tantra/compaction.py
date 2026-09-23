@@ -133,11 +133,28 @@ def _stub(name: str, content: str) -> str:
     return f"[pruned: {name} output, {len(content)} chars omitted]"
 
 
-def _tail_start(events: Sequence[SessionEvent], tail_turns: int) -> int:
-    if tail_turns <= 0:
-        return len(events)
+def _projected(ctx: TurnContext, summary: str, events: Sequence[SessionEvent]) -> int:
+    if ctx.sample_request is None:
+        return _rough(events, summary)
+    request = ctx.sample_request.model_copy(update={"messages": assemble_messages(summary, events)})
+    return estimate_request_tokens(request)
+
+
+def _tail_start(events: Sequence[SessionEvent], budget: int, tail_turns: int) -> int:
     starts = [index for index, event in enumerate(events) if isinstance(event, TurnStarted)]
-    return starts[-tail_turns] if len(starts) > tail_turns else 0
+    if not starts:
+        return len(events)
+    preferred = min(max(tail_turns, 1), len(starts))
+    boundary = starts[-1]
+    for start in reversed(starts[-preferred:-1]):
+        if _rough(events[start:]) > budget:
+            return boundary
+        boundary = start
+    for start in reversed(starts[:-preferred]):
+        if _rough(events[start:]) > budget:
+            break
+        boundary = start
+    return boundary
 
 
 class PruneThenSummarize:
@@ -153,57 +170,88 @@ class PruneThenSummarize:
         self.instruction = instruction
 
     async def compact(self, ctx: TurnContext) -> list[SessionEvent]:
+        return await self._compact(ctx, forced=False)
+
+    async def _force_compact(self, ctx: TurnContext) -> list[SessionEvent]:
+        return await self._compact(ctx, forced=True)
+
+    async def _compact(self, ctx: TurnContext, *, forced: bool) -> list[SessionEvent]:
         trigger = self.config.usable(ctx.limits)
         summary, window = compaction_window(ctx.history)
-        before = estimate_tokens(window, summary)
-        if ctx.sample_request is not None:
-            before = max(before, estimate_request_tokens(ctx.sample_request))
-        if before < trigger:
+        reported = estimate_tokens(window, summary)
+        projected = _projected(ctx, summary, window)
+        before = max(reported, projected)
+        if not forced and before < trigger:
             return []
 
         target = int(trigger * self.config.summarize_at)
         names = {event.call_id: event.name for event in window if isinstance(event, ToolCallRequested)}
-        boundary = _tail_start(window, self.config.tail_turns)
-        prefix, tail = window[:boundary], window[boundary:]
-        stubs, gained = self._prune(window, prefix, names, before, target)
-
-        floor = next((event.turn_id for event in tail if isinstance(event, TurnStarted)), None)
-        if not prefix or floor is None or before - gained <= target:
+        stubs, _ = self._prune(window, names, before, target)
+        effective = [*window, *stubs]
+        fixed = _projected(ctx, "", [])
+        current_start = max(
+            (index for index, event in enumerate(window) if isinstance(event, TurnStarted)),
+            default=len(window),
+        )
+        irreducible = _projected(ctx, "", [*window[current_start:], *stubs])
+        if irreducible >= trigger:
+            raise ProviderError(
+                f"fixed payload or current input is {irreducible} tokens, at or above the {trigger}-token budget"
+            )
+        recent_budget = max(0, min(self.config.recent_tokens, target - fixed))
+        boundary = _tail_start(effective, recent_budget, self.config.tail_turns)
+        starts = [index for index, event in enumerate(window) if isinstance(event, TurnStarted)]
+        if (forced or reported > projected) and starts and boundary == starts[0] and len(starts) > 1:
+            boundary = starts[1]
+        prefix = window[:boundary]
+        tail = [*window[boundary:], *stubs]
+        floor = next((event.turn_id for event in window[boundary:] if isinstance(event, TurnStarted)), None)
+        after_prune = _projected(ctx, summary, effective)
+        if stubs and after_prune <= target:
             return stubs
+        if floor is None or not any(isinstance(event, TurnStarted) for event in prefix):
+            raise ProviderError(
+                f"request cannot fit the {trigger}-token compaction budget without changing the current input"
+            )
 
         text = await self._brief(ctx, summary, [*prefix, *stubs])
+        after = _projected(ctx, text, tail)
+        if after >= trigger:
+            raise ProviderError(f"compacted request is {after} tokens, at or above the {trigger}-token budget")
+        tail_calls = {event.call_id for event in window[boundary:] if isinstance(event, ToolCallRequested)}
+        durable_stubs = [event for event in stubs if event.call_id in tail_calls]
         return [
+            *durable_stubs,
             CompactionApplied(
                 strategy=STRATEGY,
                 tokens_before=before,
-                tokens_after=_rough(tail, text),
+                tokens_after=after,
                 summary=text,
                 floor_turn_id=floor,
-            )
+            ),
         ]
 
     def _prune(
         self,
         window: Sequence[SessionEvent],
-        prefix: Sequence[SessionEvent],
         names: dict[str, str],
         before: int,
         target: int,
-    ) -> tuple[list[SessionEvent], int]:
+    ) -> tuple[list[ToolCallCompleted], int]:
         latest: dict[str, ToolCallCompleted] = {}
         for event in window:
             if isinstance(event, ToolCallCompleted):
                 latest[event.call_id] = event
 
         candidates: list[tuple[ToolCallCompleted, str]] = []
-        for event in prefix:
+        for event in window:
             if not isinstance(event, ToolCallCompleted) or latest[event.call_id] is not event:
                 continue
             name = names.get(event.call_id)
             if name is None or name == SKILL_TOOL:
                 continue
             content = _as_content(event.result)
-            if len(content) >= MIN_RESULT_CHARS:
+            if len(content) >= MIN_RESULT_CHARS and not content.startswith("[pruned:"):
                 candidates.append((event, content))
 
         pool = sum(len(content) for _, content in candidates) // 4
@@ -211,7 +259,7 @@ class PruneThenSummarize:
         if pool < self.config.prune_pool_min or pool - stubbed < self.config.prune_gain_min:
             return [], 0
 
-        stubs: list[SessionEvent] = []
+        stubs: list[ToolCallCompleted] = []
         gained = 0
         for event, content in reversed(candidates):
             stub = _stub(names[event.call_id], content)
@@ -225,6 +273,7 @@ class PruneThenSummarize:
         req = SampleRequest(
             model=self.model or ctx.model,
             messages=[*assemble_messages(summary, prefix), UserMessage(content=self.instruction)],
+            params={"max_tokens": self.config.summary_max_output},
         )
         span = ctx.tracer.start_sample(current_span.get(), req, sample_id=None, provider=ctx.provider, compacted=False)
         end: StreamEnd | None = None

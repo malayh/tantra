@@ -11,12 +11,14 @@ import pytest
 from pydantic import BaseModel
 
 from tantra import Agent, FreeText, InvalidCommandReuse, MaxDepthExceeded, Runtime, TantraError, tool
+from tantra.context import TurnContext
 from tantra.errors import ProviderError
 from tantra.events import (
     AgentFinished,
     AskRaised,
     CancellationRequested,
     ChildCreated,
+    CompactionApplied,
     InputQueued,
     LoggedEvent,
     SessionCreated,
@@ -2164,3 +2166,54 @@ async def test_grandchild_lifecycle_notifies_only_its_direct_parent() -> None:
         json.loads(event.input.split("] ", 1)[1])["child_id"] == str(UUID(leaf_public)) for event in root_notices
     )
     await runtime.aclose()
+
+
+async def test_compaction_requests_are_isolated_per_actor_session() -> None:
+    class Root(Agent):
+        pass
+
+    class RecordingProvider(EchoProvider):
+        def __init__(self) -> None:
+            self.requests: list[SampleRequest] = []
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            self.requests.append(req)
+            yield StreamEnd(text="done")
+
+    class SessionCompactor:
+        async def compact(self, turn: TurnContext) -> list[SessionEvent]:
+            return [
+                CompactionApplied(
+                    strategy="test",
+                    tokens_before=10,
+                    tokens_after=3,
+                    summary=turn.session_id,
+                    floor_turn_id=turn.turn_id,
+                )
+            ]
+
+    provider = RecordingProvider()
+    runtime = Runtime(
+        provider,
+        MemoryStore(),
+        [Root],
+        default_model="root",
+        compactor=SessionCompactor(),
+    )
+    first = await runtime.create(Root)
+    second = await runtime.create(Root)
+    try:
+        async with runtime.connect(first, writable=True) as connection:
+            await connection.prompt("first input", command_id=uuid4())
+        async with runtime.connect(second, writable=True) as connection:
+            await connection.prompt("second input", command_id=uuid4())
+
+        contents = [
+            [getattr(message, "content", None) for message in request.messages] for request in provider.requests
+        ]
+        assert contents == [
+            [first.hex, "first input"],
+            [second.hex, "second input"],
+        ]
+    finally:
+        await runtime.aclose()

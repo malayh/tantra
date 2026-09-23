@@ -11,6 +11,8 @@ from tantra.compaction import (
     SUMMARIZE_INSTRUCTION,
     CompactionConfig,
     PruneThenSummarize,
+    _rough,
+    _tail_start,
     estimate_request_tokens,
     estimate_tokens,
 )
@@ -211,7 +213,13 @@ async def test_the_protected_tail_turns_are_byte_identical_before_and_after_comp
 
     after = dumps(build_messages(history + events))
     assert before[-len(expected) :] == expected
-    assert after[-len(expected) :] == expected
+    assert after[-1] == expected[-1]
+    assert any(
+        isinstance(message, ToolResultMessage)
+        and message.call_id == "c-tail"
+        and message.content.startswith("[pruned:")
+        for message in build_messages(history + events)
+    )
     assert len(after) < len(before)
 
 
@@ -256,7 +264,7 @@ async def test_pruning_alone_stubs_the_newest_results_and_emits_no_compaction_ev
     events = await PruneThenSummarize().compact(context_for(history, provider))
 
     assert applied_in(events) == []
-    assert [event.call_id for event in stubs_in(events)] == ["c5", "c4", "c3"]
+    assert [event.call_id for event in stubs_in(events)] == ["c-tail", "c5", "c4", "c3"]
     assert provider.requests == []
 
     messages = build_messages(history + events)
@@ -264,7 +272,7 @@ async def test_pruning_alone_stubs_the_newest_results_and_emits_no_compaction_ev
     assert contents["c3"] == f"[pruned: search output, {160_000} chars omitted]"
     assert contents["c5"] == f"[pruned: search output, {160_000} chars omitted]"
     assert contents["c2"] == "r" * 160_000
-    assert contents["c-tail"] == "s" * 400
+    assert contents["c-tail"] == "[pruned: search output, 400 chars omitted]"
     assert len(build_messages(history)) == len(messages)
 
 
@@ -300,8 +308,8 @@ async def test_results_inside_the_protected_tail_are_never_stubbed() -> None:
     events = await PruneThenSummarize().compact(context_for(history, TinyProvider([])))
 
     assert stubs_in(events) != []
-    assert "c-tail" not in [event.call_id for event in stubs_in(events)]
-    assert dumps(tail_messages(history + events)) == dumps(tail_messages(history))
+    assert "c-tail" in [event.call_id for event in stubs_in(events)]
+    assert dumps(tail_messages(history + events))[-1] == dumps(tail_messages(history))[-1]
 
 
 async def test_a_candidate_pool_below_prune_pool_min_leaves_every_result_intact() -> None:
@@ -402,7 +410,7 @@ async def test_a_prune_only_compaction_lowers_the_estimate_it_reports_on() -> No
 async def test_a_second_prune_never_restubs_a_call_whose_stub_sits_in_the_tail() -> None:
     history = session(result_chars=160_000, text_chars=4_000)
     first = await PruneThenSummarize().compact(context_for(history, TinyProvider([])))
-    assert [event.call_id for event in stubs_in(first)] == ["c5", "c4", "c3"]
+    assert [event.call_id for event in stubs_in(first)] == ["c-tail", "c5", "c4", "c3"]
 
     history += first
     history += [
@@ -418,7 +426,7 @@ async def test_a_second_prune_never_restubs_a_call_whose_stub_sits_in_the_tail()
     assert provider.requests == []
     assert [event.call_id for event in stubs_in(second)] == ["c2"]
     pruned = [event.call_id for event in stubs_in(history + second) if str(event.result).startswith("[pruned:")]
-    assert sorted(pruned) == ["c2", "c3", "c4", "c5"]
+    assert sorted(pruned) == ["c-tail", "c2", "c3", "c4", "c5"]
     messages = build_messages(history + second)
     contents = {message.call_id: message.content for message in messages if isinstance(message, ToolResultMessage)}
     assert contents["c1"] == "r" * 160_000
@@ -428,7 +436,7 @@ async def test_a_second_prune_never_restubs_a_call_whose_stub_sits_in_the_tail()
 async def test_a_prune_with_nothing_left_to_reclaim_summarizes_on_that_same_call() -> None:
     history = session(result_chars=160_000, text_chars=60_000)
     first = await PruneThenSummarize().compact(context_for(history, TinyProvider([])))
-    assert sorted(event.call_id for event in stubs_in(first)) == ["c1", "c2", "c3", "c4", "c5"]
+    assert sorted(event.call_id for event in stubs_in(first)) == ["c-tail", "c1", "c2", "c3", "c4", "c5"]
 
     history += first
     history += [
@@ -442,7 +450,7 @@ async def test_a_prune_with_nothing_left_to_reclaim_summarizes_on_that_same_call
 
     assert stubs_in(compacted) == []
     assert len(applied_in(compacted)) == 1
-    assert applied_in(compacted)[0].floor_turn_id == TAIL_TURN
+    assert applied_in(compacted)[0].floor_turn_id == "now"
     assert len(provider.requests) == 1
     summary, window = compaction_window(history + compacted)
     assert summary == BRIEF
@@ -472,7 +480,7 @@ async def test_a_second_compaction_carries_the_first_summary_into_the_new_brief(
     compacted = await PruneThenSummarize().compact(context_for(history, provider))
 
     assert applied_in(compacted)[0].summary == "the second brief"
-    assert applied_in(compacted)[0].floor_turn_id == "t7"
+    assert applied_in(compacted)[0].floor_turn_id == "later"
     assert provider.requests[0].messages[0].content == BRIEF
 
 
@@ -499,6 +507,7 @@ async def test_the_brief_request_carries_the_stubbed_prefix_and_no_tools() -> No
     assert request.model == MODEL
     assert request.tools == []
     assert request.messages[-1].content == SUMMARIZE_INSTRUCTION
+    assert request.params["max_tokens"] == CompactionConfig().summary_max_output
     assert not any("r" * 160_000 == getattr(message, "content", None) for message in request.messages)
     contents = [message.content for message in request.messages if isinstance(message, ToolResultMessage)]
     assert contents == [f"[pruned: search output, {160_000} chars omitted]"] * 5
@@ -583,6 +592,42 @@ async def test_the_estimate_falls_back_to_the_assembled_view_right_after_a_compa
 
     assert reported > 1_000
     assert estimate_tokens(window, summary) < 100
+
+
+async def test_a_huge_recent_turn_is_evicted_without_changing_current_input() -> None:
+    events: list[SessionEvent] = [SessionCreated(agent="analyst")]
+    events += chat_turn("old", input="old", text="o" * 300_000)
+    events += chat_turn("huge", input="huge", text="h" * 300_000)
+    events.append(TurnStarted(turn_id="now", input="exact current input"))
+    report_usage(events)
+    provider = TinyProvider([Sample(text=BRIEF)])
+    context = context_for(events, provider)
+    context.input = "exact current input"
+
+    compacted = await PruneThenSummarize().compact(context)
+    messages = build_messages(events + compacted)
+
+    assert applied_in(compacted)[0].floor_turn_id == "now"
+    assert messages[-1] == UserMessage(content="exact current input")
+
+
+async def test_oversized_fixed_payload_fails_clearly_before_summary() -> None:
+    events: list[SessionEvent] = [SessionCreated(agent="analyst")]
+    events += chat_turn("old", input="old", text="answer")
+    events.append(TurnStarted(turn_id="now", input="exact"))
+    provider = TinyProvider([])
+    context = context_for(events, provider)
+    context.limits = ModelLimits(context_window=1_000, max_output=100)
+    context.sample_request = SampleRequest(
+        model=MODEL,
+        system=[SystemBlock(text="s" * 5_000)],
+        messages=build_messages(events),
+    )
+
+    with pytest.raises(ProviderError, match="fixed payload or current input"):
+        await PruneThenSummarize(CompactionConfig(buffer=0)).compact(context)
+
+    assert provider.requests == []
 
 
 class Analyst(Agent):
@@ -748,3 +793,39 @@ async def test_hard_ceiling_can_trigger_before_eighty_percent() -> None:
 
     assert len(applied_in(compacted)) == 1
     assert len(provider.requests) == 1
+
+
+def test_tail_turn_preference_keeps_whole_turns_when_they_fit() -> None:
+    events = [
+        *chat_turn("first", input="first", text="a" * 400),
+        *chat_turn("second", input="second", text="b" * 400),
+        *chat_turn("third", input="third", text="c" * 400),
+    ]
+    starts = [index for index, event in enumerate(events) if isinstance(event, TurnStarted)]
+    budget = _rough(events[starts[1] :])
+
+    assert _tail_start(events, budget, tail_turns=2) == starts[1]
+
+
+def test_recent_token_cap_overrides_tail_turn_preference() -> None:
+    events = [
+        *chat_turn("first", input="first", text="a" * 400),
+        *chat_turn("second", input="second", text="b" * 400),
+        *chat_turn("third", input="third", text="c" * 400),
+    ]
+    starts = [index for index, event in enumerate(events) if isinstance(event, TurnStarted)]
+    budget = _rough(events[starts[-1] :])
+
+    assert _tail_start(events, budget, tail_turns=3) == starts[-1]
+
+
+async def test_request_exactly_at_trigger_is_not_an_acceptable_post_compaction_fit() -> None:
+    events: list[SessionEvent] = [TurnStarted(turn_id="now", input="exact")]
+    request = SampleRequest(model=MODEL, messages=build_messages(events))
+    tokens = estimate_request_tokens(request)
+    context = context_for(events, TinyProvider([]))
+    context.limits = ModelLimits(context_window=tokens, max_output=0)
+    context.sample_request = request
+
+    with pytest.raises(ProviderError, match="at or above"):
+        await PruneThenSummarize(CompactionConfig(buffer=0, trigger_at=1)).compact(context)

@@ -79,10 +79,11 @@ def test_web_fetch_is_wired_without_a_proxy_when_unset(monkeypatch: pytest.Monke
     assert "web_fetch" in _names(Subagent)
 
 
-def test_explicit_memory_request_survives_an_interrupted_attempt() -> None:
-    assert "always call memory_write" in Sarathi.prompt
-    assert "earlier attempt was interrupted" in Sarathi.prompt
-    assert "do not call memory_write again for that request" in Sarathi.prompt
+def test_memory_policy_is_not_duplicated_in_the_sarathi_prompt() -> None:
+    assert "memory_write" not in Sarathi.prompt
+    assert "memory_recall" not in Sarathi.prompt
+    assert "remember or save" not in Sarathi.prompt
+    assert "permission" not in Sarathi.prompt
 
 
 def test_memory_write_asks_before_it_runs() -> None:
@@ -93,5 +94,7 @@ def test_the_subagent_is_a_sarathi_subagent_with_a_delegate_description() -> Non
     assert Sarathi.subagents == [Subagent]
     assert Subagent.__doc__ is not None
     assert Subagent.__doc__.strip() == "Execute an independent task with non-interactive tools and on-demand skills."
-    assert "finish(result)" in Subagent.prompt
-    assert "spawn('subagent', task, name=...)" in Sarathi.prompt
+    assert "Deliver one final result to your parent" in Subagent.prompt
+    assert "finish(" not in Subagent.prompt
+    assert "When delegating, optionally use a short, descriptive display name" in Sarathi.prompt
+    assert "spawn" not in Sarathi.prompt.lower()

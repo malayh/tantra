@@ -287,6 +287,10 @@ def memory_tools(scope: MemoryScope | None = None) -> tuple[Tool, Tool]:
     ) -> str:
         """Save one durable memory and return its id.
 
+        Use this for durable facts, decisions or preferences that will be useful later. Always call it
+        when the user explicitly asks you to remember or save a fact, even if an earlier attempt was
+        interrupted. If permission is denied, do not call it again for the same request.
+
         Write a single self-contained fact, decision or preference per call: `title` is a one-line
         summary, `body` carries the detail worth re-reading months later. `kind` groups rows for
         filtered recall — pick a short lowercase label and reuse it ("preference", "decision", "fact").
@@ -316,6 +320,8 @@ def memory_tools(scope: MemoryScope | None = None) -> tuple[Tool, Tool]:
         entity: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search saved memories and return the best matches, highest score first.
+
+        Use saved facts when they could materially change the answer.
 
         Matching is keyword overlap against each memory's title, body, tags and entities, so query with
         the words you expect to find written there — a short phrase beats a single word. `kind`, `tags`

@@ -985,7 +985,18 @@ async def test_runtime_skills_are_disclosed_and_load_through_the_internal_tool()
     completed = [event for event in await history(store, sid) if isinstance(event, ToolCallCompleted)]
     assert result.text == "done"
     assert catalog.loaded == ["release"]
-    assert "release: Ship safely." in provider.requests[0].system[-1].text
+    assert provider.requests[0].system[-1].text == (
+        "Skills available via the skill(name) tool. Load a skill when its description matches the task or the user "
+        "explicitly requests it:\n"
+        "- release: Ship safely."
+    )
+    assert "Read the checklist." not in provider.requests[0].system[-1].text
+    skill_schema = next(tool for tool in provider.requests[0].tools if tool.name == "skill")
+    assert skill_schema.description == (
+        "Load one available skill by name and return its full instructions plus its bundled file list."
+    )
+    assert set(skill_schema.parameters["properties"]) == {"name"}
+    assert skill_schema.parameters["required"] == ["name"]
     assert completed[0].result == "Read the checklist.\n\n## Files\nguide.md"
     await runtime.aclose()
 
@@ -1021,7 +1032,17 @@ async def test_runtime_memory_tools_write_and_recall_without_a_coordinator() -> 
     completed = {
         event.call_id: event.result for event in await history(store, sid) if isinstance(event, ToolCallCompleted)
     }
+    schemas = {tool.name: tool for tool in provider.requests[0].tools}
+    write_description = " ".join(schemas["memory_write"].description.split())
+    recall_description = " ".join(schemas["memory_recall"].description.split())
+
     assert result.text == "remembered"
+    assert "durable facts, decisions or preferences that will be useful later" in write_description
+    assert "about themselves" not in write_description
+    assert "explicitly asks you to remember or save a fact" in write_description
+    assert "even if an earlier attempt was interrupted" in write_description
+    assert "If permission is denied, do not call it again for the same request" in write_description
+    assert "Use saved facts when they could materially change the answer" in recall_description
     assert isinstance(completed["w"], str)
     assert completed["r"][0]["title"] == "Failure modes first"
     await runtime.aclose()

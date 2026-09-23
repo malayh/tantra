@@ -86,7 +86,11 @@ def _skill_tool(skills: Skills, allowed: list[str] | None) -> Tool:
             return loaded.body
         return loaded.body + "\n\n## Files\n" + "\n".join(loaded.files)
 
-    return Tool(skill, permission="allow")
+    return Tool(
+        skill,
+        description="Load one available skill by name and return its full instructions plus its bundled file list.",
+        permission="allow",
+    )
 
 
 def _tool_table(agent: type[Agent]) -> dict[str, Tool]:
@@ -600,13 +604,17 @@ class Runtime:
             return await self._actor_finish(header, agent, ctx, result)
 
         if agent.subagents:
-            tools["spawn"] = Tool(
+            available = list(dict.fromkeys(agent_name(child) for child in agent.subagents))
+            spawn_tool = Tool(
                 spawn,
                 description=(
                     "Create a declared child agent, queue its input, and return its ID. "
-                    "Turn-ended messages contain status only; the child must call finish() to deliver a result."
+                    "Turn-ended messages contain status only. A finished child's result is delivered later as a new "
+                    f"parent input. Available agent types: {', '.join(available)}."
                 ),
             )
+            spawn_tool.schema.parameters["properties"]["agent_name"]["enum"] = available
+            tools["spawn"] = spawn_tool
             tools["status"] = Tool(
                 status,
                 description="Return durable status for one direct child agent. It returns no child output.",
@@ -619,7 +627,7 @@ class Runtime:
         if header.parent_id is not None:
             tools["finish"] = Tool(
                 finish,
-                description="Finish this agent and deliver its result to its parent.",
+                description="Permanently close this child agent and deliver its result to its parent.",
             )
         return tools
 

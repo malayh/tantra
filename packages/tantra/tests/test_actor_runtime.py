@@ -230,6 +230,115 @@ async def test_status_tool_reaches_the_provider_as_a_json_object() -> None:
     await runtime.aclose()
 
 
+async def test_spawn_tool_description_lists_registered_actor_types() -> None:
+    class ResearchWorker(Agent):
+        name = "research_worker"
+
+    class FactChecker(Agent):
+        pass
+
+    class Root(Agent):
+        subagents = [ResearchWorker, FactChecker]
+
+    runtime = Runtime(EchoProvider(), MemoryStore(), [Root], default_model="m")
+    root = SessionHeader(id="1" * 32, root_id="1" * 32, agent="root")
+    child = SessionHeader(
+        id="2" * 32,
+        root_id=root.id,
+        parent_id=root.id,
+        agent="research_worker",
+        depth=1,
+    )
+
+    spawn = runtime._framework_tools(root, Root)["spawn"]
+    finish = runtime._framework_tools(child, ResearchWorker)["finish"]
+
+    assert spawn.schema.description.endswith("Available agent types: research_worker, fact_checker.")
+    assert "finished child's result is delivered later as a new parent input" in spawn.schema.description
+    assert spawn.schema.parameters["properties"]["agent_name"] == {
+        "title": "Agent Name",
+        "type": "string",
+        "enum": ["research_worker", "fact_checker"],
+    }
+    assert finish.schema.description == "Permanently close this child agent and deliver its result to its parent."
+    await runtime.aclose()
+
+
+async def test_spawn_schema_deduplicates_repeated_child_types() -> None:
+    class Child(Agent):
+        pass
+
+    class Root(Agent):
+        subagents = [Child, Child]
+
+    runtime = Runtime(EchoProvider(), MemoryStore(), [Root], default_model="m")
+    root = SessionHeader(id="1" * 32, root_id="1" * 32, agent="root")
+
+    spawn = runtime._framework_tools(root, Root)["spawn"]
+    advertised = spawn.schema.description.rpartition("Available agent types: ")[2]
+
+    assert spawn.schema.parameters["properties"]["agent_name"]["enum"] == ["child"]
+    assert advertised == "child."
+    await runtime.aclose()
+
+
+async def test_child_lifecycle_guidance_reaches_only_the_child_provider() -> None:
+    class Child(Agent):
+        pass
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class RecordingProvider(EchoProvider):
+        def __init__(self) -> None:
+            self.requests: list[SampleRequest] = []
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            self.requests.append(req)
+            yield StreamEnd(text="done")
+
+    provider = RecordingProvider()
+    store = MemoryStore()
+    runtime = Runtime(provider, store, [Root], default_model="m")
+    root_id = await runtime.create(Root)
+    child_id = uuid4()
+    await store.create(
+        SessionHeader(
+            id=child_id.hex,
+            root_id=root_id.hex,
+            parent_id=root_id.hex,
+            agent="child",
+            depth=1,
+            model="m",
+        )
+    )
+
+    await store.enqueue(
+        child_id.hex,
+        InputQueued(command_id=uuid4().hex, input="complete the assignment"),
+    )
+    runtime._activate(child_id.hex, root_id.hex)
+    await wait_idle(runtime, child_id.hex, root_id.hex)
+
+    child_request = next(
+        request for request in provider.requests if any(tool.name == "finish" for tool in request.tools)
+    )
+    root_request = next(request for request in provider.requests if any(tool.name == "spawn" for tool in request.tools))
+    lifecycle = (
+        "Child lifecycle: normal turn completion leaves you reusable and sends status only to your parent. When the "
+        "assignment is complete and you have a final result to deliver, call finish(result) instead of ending "
+        "normally. This permanently closes you and delivers the result to your parent."
+    )
+    finish = next(tool for tool in child_request.tools if tool.name == "finish")
+    spawn = next(tool for tool in root_request.tools if tool.name == "spawn")
+
+    assert lifecycle in [block.text for block in child_request.system]
+    assert lifecycle not in [block.text for block in root_request.system]
+    assert spawn.parameters["properties"]["agent_name"]["enum"] == ["child"]
+    assert finish.description == "Permanently close this child agent and deliver its result to its parent."
+    await runtime.aclose()
+
+
 async def test_spawn_names_are_normalized_persisted_and_idempotent() -> None:
     class Worker(Agent):
         pass
@@ -1622,7 +1731,7 @@ async def test_child_lifecycle_notice_is_exact_status_only_and_reusable() -> Non
     assert provider.child_calls == 2
     tools = runtime._framework_tools(root, Root)
     assert "status only" in tools["spawn"].description
-    assert "finish()" in tools["spawn"].description
+    assert "delivered later as a new parent input" in tools["spawn"].description
     assert "returns no child output" in tools["status"].description
     await runtime.aclose()
 

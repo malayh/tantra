@@ -34,7 +34,10 @@ from tantra.providers.base import (
 from tantra.skills import SkillInfo
 from tantra.tracing import NULL_TRACER, Tracer
 
-SKILLS_PREAMBLE = "Skills available via the skill(name) tool:"
+SKILLS_PREAMBLE = (
+    "Skills available via the skill(name) tool. Load a skill when its description matches the task or the user "
+    "explicitly requests it:"
+)
 CANCELLATION_CONTEXT = "[runtime] The user cancelled the live root and descendant work."
 
 

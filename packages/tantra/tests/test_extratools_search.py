@@ -69,7 +69,11 @@ async def test_a_canned_brave_payload_becomes_title_url_snippet_dicts() -> None:
 
     results = await tool.invoke({"query": "brave"}, make_ctx())
 
+    description = " ".join(tool.schema.description.split())
+
     assert results == [{"title": "Brave Search", "url": "https://example.com/a", "snippet": "a ranked snippet"}]
+    assert "Fetch only an exact URL returned by `web_search` or explicitly supplied by the user" not in description
+    assert "Never construct, transform, or guess a URL" not in description
 
 
 async def test_a_hit_without_a_url_is_skipped() -> None:

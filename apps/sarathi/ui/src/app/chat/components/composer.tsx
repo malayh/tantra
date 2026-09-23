@@ -13,12 +13,11 @@ import { errorMessage } from "@/lib/errors";
 type ComposerProps = {
   disabled: boolean;
   running?: boolean;
-  askPending?: boolean;
   onSend: (text: string, attachments: Attachment[]) => void;
   onStop?: () => void;
 };
 
-export function Composer({ disabled, running = false, askPending = false, onSend, onStop }: ComposerProps) {
+export function Composer({ disabled, running = false, onSend, onStop }: ComposerProps) {
   const [text, setText] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -87,7 +86,7 @@ export function Composer({ disabled, running = false, askPending = false, onSend
         </Button>
         <Textarea
           value={text}
-          disabled={disabled}
+          disabled={blocked}
           placeholder="Send a message…"
           rows={1}
           className="max-h-48 min-h-9 resize-none border-0 bg-transparent focus-visible:ring-0 disabled:bg-transparent dark:bg-transparent dark:disabled:bg-transparent"
@@ -99,13 +98,12 @@ export function Composer({ disabled, running = false, askPending = false, onSend
             }
           }}
         />
-        {running && !askPending ? (
+        <Button size="icon" aria-label="Send" disabled={blocked || nothingToSend} onClick={submit}>
+          <Send />
+        </Button>
+        {running && (
           <Button variant="outline" size="icon" aria-label="Stop" onClick={onStop}>
             <Square />
-          </Button>
-        ) : (
-          <Button size="icon" aria-label="Send" disabled={blocked || nothingToSend} onClick={submit}>
-            <Send />
           </Button>
         )}
       </div>

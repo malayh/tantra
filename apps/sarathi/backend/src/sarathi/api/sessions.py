@@ -1,12 +1,12 @@
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException, status
 
 from sarathi.agent import ResourcesDep, Sarathi
 from sarathi.auth import CurrentUser
 from sarathi.config import get_settings
-from sarathi.schemas import CreateSessionRequest, PatchSessionRequest, SessionOut
-from tantra import SessionHeader
+from sarathi.schemas import ActorStatusOut, CreateSessionRequest, PatchSessionRequest, SessionOut, TurnSummaryOut
+from tantra import ActorStatus, SessionHeader
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -18,6 +18,31 @@ def _out(header: SessionHeader) -> SessionOut:
         status=header.status,
         model=header.model,
         updated_at=header.updated_at,
+    )
+
+
+def _actor_out(actor: ActorStatus) -> ActorStatusOut:
+    last_turn = actor.last_turn
+    return ActorStatusOut(
+        agent_id=actor.agent_id.hex,
+        root_id=actor.root_id.hex,
+        parent_id=actor.parent_id.hex if actor.parent_id is not None else None,
+        agent=actor.agent,
+        state=actor.state,
+        active=actor.active,
+        current_turn_id=actor.current_turn_id.hex if actor.current_turn_id is not None else None,
+        last_turn=(
+            TurnSummaryOut(
+                turn_id=last_turn.turn_id.hex,
+                outcome=last_turn.outcome,
+                stop_reason=last_turn.stop_reason,
+                error=last_turn.error,
+            )
+            if last_turn is not None
+            else None
+        ),
+        last_seq=actor.last_seq,
+        updated_at=actor.updated_at,
     )
 
 
@@ -44,6 +69,18 @@ async def create_session(body: CreateSessionRequest, user: CurrentUser, resource
     header = await resources.store.header(sid.hex)
     assert header is not None
     return _out(header)
+
+
+@router.get("/{root_id}/actors")
+async def list_actors(root_id: str, user: CurrentUser, resources: ResourcesDep) -> list[ActorStatusOut]:
+    try:
+        root = UUID(hex=root_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found") from None
+    header = await resources.store.header(root.hex)
+    if header is None or header.parent_id is not None or header.metadata.get("user") != str(user.id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    return [_actor_out(actor) for actor in await resources.runtime.tree_status(root)]
 
 
 @router.patch("/{session_id}")

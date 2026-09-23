@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Bot, ChevronRight, FileText, Globe, Loader2, Search, Wrench } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ChevronRight, FileText, Globe, Loader2, Search, Wrench } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useStore } from "zustand";
@@ -10,8 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
-import type { AskItem, Banner, ChatStore, SubagentItem, TextItem, ToolItem, TranscriptItem, Turn } from "../state";
-import { runningDescendants } from "../state";
+import type { AskItem, Banner, ChatStore, TextItem, ToolItem, TranscriptItem, Turn } from "../state";
 
 type AskResponder = (askId: string, response: string) => void;
 
@@ -28,7 +27,6 @@ const MARKDOWN_CLASS = [
 ].join(" ");
 
 const TOOL_ICONS = { web_search: Search, web_fetch: Globe, read_doc: FileText } as const;
-
 const RESULT_LIMIT = 4000;
 const SUMMARY_LIMIT = 80;
 
@@ -184,49 +182,6 @@ function AskCard({
   );
 }
 
-function SubagentBlock({
-  item,
-  banner,
-  onAskResponse,
-}: {
-  item: SubagentItem;
-  banner: Banner | null;
-  onAskResponse: AskResponder;
-}) {
-  const [open, setOpen] = useState(!item.final);
-
-  useEffect(() => {
-    setOpen(!item.final);
-  }, [item.final]);
-
-  const summary = summarizeArgs(item.args);
-
-  return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger
-        className={cn(
-          "text-muted-foreground hover:text-foreground flex w-full items-center gap-1.5 text-xs",
-          item.isError && "text-destructive",
-        )}
-      >
-        <ChevronRight className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")} />
-        <Bot className="size-3 shrink-0" />
-        <span className="font-medium">{item.agent}</span>
-        {summary.length > 0 && <span className="truncate">{summary}</span>}
-        {!item.final && <Loader2 className="size-3 shrink-0 animate-spin" />}
-      </CollapsibleTrigger>
-      <CollapsibleContent>
-        <div className="border-border mt-2 flex flex-col gap-3 border-l pl-3">
-          {item.items.map((nested, index) => (
-            <Item key={itemKey(nested, index)} item={nested} banner={banner} onAskResponse={onAskResponse} />
-          ))}
-          {item.isError && <p className="text-destructive text-xs">{formatResult(item.result)}</p>}
-        </div>
-      </CollapsibleContent>
-    </Collapsible>
-  );
-}
-
 function Item({
   item,
   banner,
@@ -234,7 +189,7 @@ function Item({
 }: {
   item: TranscriptItem;
   banner: Banner | null;
-  onAskResponse: AskResponder;
+  onAskResponse?: AskResponder;
 }) {
   switch (item.kind) {
     case "thinking":
@@ -243,10 +198,8 @@ function Item({
       return <TextBlock item={item} />;
     case "tool":
       return <ToolChip item={item} />;
-    case "subagent":
-      return <SubagentBlock item={item} banner={banner} onAskResponse={onAskResponse} />;
     case "ask":
-      return <AskCard item={item} banner={banner} onAskResponse={onAskResponse} />;
+      return onAskResponse ? <AskCard item={item} banner={banner} onAskResponse={onAskResponse} /> : null;
   }
 }
 
@@ -257,11 +210,9 @@ function TurnBlock({
 }: {
   turn: Turn;
   banner: Banner | null;
-  onAskResponse: AskResponder;
+  onAskResponse?: AskResponder;
 }) {
-  const empty = turn.items.every(
-    (item) => item.kind !== "tool" && item.kind !== "subagent" && item.kind !== "ask" && item.content.length === 0,
-  );
+  const empty = turn.items.every((item) => item.kind !== "tool" && item.kind !== "ask" && item.content.length === 0);
 
   return (
     <div className="flex flex-col gap-3">
@@ -304,41 +255,50 @@ function TurnBlock({
   );
 }
 
-export function Transcript({ store, onAskResponse }: { store: ChatStore; onAskResponse: AskResponder }) {
-  const turns = useStore(store, (state) => state.turns);
-  const active = useStore(store, (state) => state.active);
-  const banner = useStore(store, (state) => state.banner);
-  const ready = useStore(store, (state) => state.ready);
+export function JournalTranscript({
+  turns,
+  ready,
+  banner = null,
+  onAskResponse,
+  emptyText,
+}: {
+  turns: Turn[];
+  ready: boolean;
+  banner?: Banner | null;
+  onAskResponse?: AskResponder;
+  emptyText: string;
+}) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const running = useMemo(() => runningDescendants(turns, active), [turns, active]);
 
   useEffect(() => {
     const element = scrollRef.current;
     if (element) element.scrollTop = element.scrollHeight;
-  }, [turns, running]);
+  }, [turns]);
 
   return (
     <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-6 py-8">
-        {ready && turns.length === 0 && (
-          <p className="text-muted-foreground py-16 text-center text-sm">Send a message to get started</p>
-        )}
+        {ready && turns.length === 0 && <p className="text-muted-foreground py-16 text-center text-sm">{emptyText}</p>}
+        {!ready && <Loader2 className="text-muted-foreground mx-auto my-16 size-4 animate-spin" />}
         {turns.map((turn) => (
           <TurnBlock key={turn.id} turn={turn} banner={banner} onAskResponse={onAskResponse} />
         ))}
-        {running.length > 0 && (
-          <div className="border-border flex flex-col gap-2 border-t pt-4">
-            {running.map((agent) => (
-              <div key={agent.id} className="text-muted-foreground flex items-center gap-2 text-xs">
-                <Bot className="size-3" />
-                <span className="font-medium">{agent.agent}</span>
-                <span>Running</span>
-                <Loader2 className="size-3 animate-spin" />
-              </div>
-            ))}
-          </div>
-        )}
       </div>
     </div>
+  );
+}
+
+export function Transcript({ store, onAskResponse }: { store: ChatStore; onAskResponse: AskResponder }) {
+  const turns = useStore(store, (state) => state.turns);
+  const banner = useStore(store, (state) => state.banner);
+  const ready = useStore(store, (state) => state.ready);
+  return (
+    <JournalTranscript
+      turns={turns}
+      ready={ready}
+      banner={banner}
+      onAskResponse={onAskResponse}
+      emptyText="Send a message to get started"
+    />
   );
 }

@@ -1,6 +1,7 @@
 import { createStore } from "zustand/vanilla";
 
 import type {
+  ActorStatusOut,
   AskExpiredFrame,
   AskRaised,
   AskResponseFrame,
@@ -43,19 +44,6 @@ export type ToolItem = ItemBase & {
   progress: string[];
 };
 
-export type SubagentItem = ItemBase & {
-  kind: "subagent";
-  callId: string;
-  childSessionId: string;
-  agent: string;
-  args: Record<string, unknown>;
-  items: TranscriptItem[];
-  childSampleId: string | null;
-  result?: unknown;
-  isError: boolean;
-  finished: boolean;
-};
-
 export type AskItem = ItemBase & {
   kind: "ask";
   callId: string | null;
@@ -67,7 +55,7 @@ export type AskItem = ItemBase & {
   allow?: boolean;
 };
 
-export type TranscriptItem = TextItem | ToolItem | SubagentItem | AskItem;
+export type TranscriptItem = TextItem | ToolItem | AskItem;
 
 export type Turn = {
   id: string;
@@ -79,25 +67,29 @@ export type Turn = {
   error?: string;
 };
 
+export type JournalState = {
+  turns: Turn[];
+  sampleId: string | null;
+  ready: boolean;
+};
+
 export type Banner = { kind: "error" | "writer"; message: string };
 
 export type PendingMessage = { text: string; attachments: Attachment[] };
 
-export type ChatState = {
-  turns: Turn[];
-  ready: boolean;
+export type ChatState = JournalState & {
   banner: Banner | null;
-  sampleId: string | null;
   cursors: Record<string, number>;
-  active: Record<string, boolean>;
-  work: Record<string, string[]>;
-  finishedActors: Record<string, boolean>;
-  cancelling: boolean;
+  children: Record<string, JournalState>;
+  actors: ActorStatusOut[];
+  openChildId: string | null;
   dispatch: (frame: EventFrame) => void;
   subscriptionReady: (frame: SubscriptionReadyFrame) => void;
   expireAsk: (frame: AskExpiredFrame) => void;
   setReady: (ready: boolean) => void;
   setBanner: (banner: Banner | null) => void;
+  setActors: (actors: ActorStatusOut[]) => void;
+  setOpenChild: (agentId: string | null) => void;
 };
 
 export type ChatStore = ReturnType<typeof createChatStore>;
@@ -105,8 +97,8 @@ export type ChatStore = ReturnType<typeof createChatStore>;
 const ATTACHMENT_LINE = /^\[attachment: (.+)\]$/;
 const PATH_MARKER = " path=";
 const ACTOR_ID = "([0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})";
-const SYNTHETIC_INPUT = new RegExp(`^\\[agent ${ACTOR_ID}(?: finished)?\\]`);
-const FINISHED_INPUT = new RegExp(`^\\[agent ${ACTOR_ID} finished\\]`);
+const SYNTHETIC_INPUT = new RegExp(`^\\[agent ${ACTOR_ID}(?: finished| turn ended)?\\]`);
+const EMPTY_JOURNAL: JournalState = { turns: [], sampleId: null, ready: false };
 
 const parseInput = (input: string): { text: string; attachments: Attachment[] } => {
   const lines = input.split("\n");
@@ -127,82 +119,11 @@ const parseInput = (input: string): { text: string; attachments: Attachment[] } 
 const mapTurn = (turns: Turn[], turnId: string, update: (turn: Turn) => Turn): Turn[] =>
   turns.map((turn) => (turn.id === turnId ? update(turn) : turn));
 
-const childActors = (items: TranscriptItem[], actors: Set<string>) => {
-  for (const item of items) {
-    if (item.kind !== "subagent") continue;
-    actors.add(item.childSessionId);
-    childActors(item.items, actors);
-  }
-};
-
-export type RunningDescendant = { id: string; agent: string };
-
-const collectRunning = (items: TranscriptItem[], active: Record<string, boolean>, running: RunningDescendant[]) => {
-  for (const item of items) {
-    if (item.kind !== "subagent") continue;
-    if (active[item.childSessionId]) running.push({ id: item.childSessionId, agent: item.agent });
-    collectRunning(item.items, active, running);
-  }
-};
-
-export const runningDescendants = (turns: Turn[], active: Record<string, boolean>): RunningDescendant[] => {
-  const running: RunningDescendant[] = [];
-  for (const turn of turns) collectRunning(turn.items, active, running);
-  return running;
-};
-
-export const subscriptionFrames = (state: ChatState, rootId: string): SubscribeFrame[] => {
-  const actors = new Set([rootId]);
-  for (const turn of state.turns) childActors(turn.items, actors);
-  return [...actors].map((agentId) => ({
-    type: "subscribe",
-    agent_id: agentId,
-    after: state.cursors[agentId] ?? 0,
-    writable: agentId === rootId,
-  }));
-};
-
-const withWork = (
-  state: ChatState,
-  agentId: string,
-  event: SessionEvent,
-): { active: Record<string, boolean>; work: Record<string, string[]> } => {
-  const current = state.work[agentId] ?? [];
-  let next = current;
-  if (state.finishedActors[agentId] && (event.type === "input_queued" || event.type === "turn_started")) {
-    return { active: state.active, work: state.work };
-  }
-  if (event.type === "input_queued") {
-    next = current.includes(event.command_id) ? current : [...current, event.command_id];
-  } else if (event.type === "turn_started") {
-    next = current.includes(event.turn_id) ? current : [...current, event.turn_id];
-  } else if (
-    event.type === "turn_completed" ||
-    event.type === "turn_failed" ||
-    event.type === "turn_cancelled" ||
-    event.type === "turn_interrupted"
-  ) {
-    next = current.filter((turnId) => turnId !== event.turn_id);
-  } else if (event.type === "agent_finished") {
-    next = [];
-  } else {
-    return { active: state.active, work: state.work };
-  }
-  return {
-    active: { ...state.active, [agentId]: next.length > 0 },
-    work: { ...state.work, [agentId]: next },
-  };
-};
-
-const finalizeItems = (items: TranscriptItem[]): TranscriptItem[] =>
-  items.map((item) =>
-    item.kind === "subagent" ? { ...item, final: true, items: finalizeItems(item.items) } : { ...item, final: true },
-  );
+const finalizeItems = (items: TranscriptItem[]): TranscriptItem[] => items.map((item) => ({ ...item, final: true }));
 
 const appendDelta = (items: TranscriptItem[], kind: TextKind, sampleId: string, text: string): TranscriptItem[] => {
   const index = items.findIndex((item) => item.kind === kind && item.sampleId === sampleId && !item.final);
   if (index === -1) return [...items, { kind, sampleId, content: text, final: false }];
-
   const target = items[index] as TextItem;
   return items.map((item, position) => (position === index ? { ...target, content: target.content + text } : item));
 };
@@ -210,7 +131,6 @@ const appendDelta = (items: TranscriptItem[], kind: TextKind, sampleId: string, 
 const applyPart = (items: TranscriptItem[], kind: TextKind, sampleId: string, text: string): TranscriptItem[] => {
   const index = items.findIndex((item) => item.kind === kind && item.sampleId === sampleId);
   if (index === -1) return [...items, { kind, sampleId, content: text, final: true }];
-
   const target = items[index] as TextItem;
   return items.map((item, position) => (position === index ? { ...target, content: text, final: true } : item));
 };
@@ -220,7 +140,6 @@ const addProgress = (items: TranscriptItem[], callId: string, message: string): 
     (item) => item.kind === "tool" && item.callId === callId && !item.progress.includes(message),
   );
   if (index === -1) return items;
-
   const target = items[index] as ToolItem;
   return items.map((item, position) =>
     position === index ? { ...target, progress: [...target.progress, message] } : item,
@@ -228,9 +147,8 @@ const addProgress = (items: TranscriptItem[], callId: string, message: string): 
 };
 
 const completeCall = (items: TranscriptItem[], callId: string, result: unknown, isError: boolean): TranscriptItem[] => {
-  const index = items.findIndex((item) => (item.kind === "tool" || item.kind === "subagent") && item.callId === callId);
+  const index = items.findIndex((item) => item.kind === "tool" && item.callId === callId);
   if (index === -1) return items;
-
   return items.map((item, position) => (position === index ? { ...item, result, isError, final: true } : item));
 };
 
@@ -241,59 +159,36 @@ const askText = (request: AskRaised["request"]): { title: string; body: string }
   return { title: "", body: "" };
 };
 
-const findAsk = (items: TranscriptItem[], match: (item: AskItem) => boolean): AskItem | null => {
-  for (const item of items) {
-    if (item.kind === "ask" && match(item)) return item;
-    if (item.kind === "subagent") {
-      const nested = findAsk(item.items, match);
-      if (nested !== null) return nested;
-    }
-  }
-  return null;
-};
-
 const updateAsks = (
   items: TranscriptItem[],
   askId: string | null,
   status: AskItem["status"],
   allow?: boolean,
-): TranscriptItem[] => {
-  let changed = false;
-  const next = items.map((item): TranscriptItem => {
-    if (item.kind === "ask" && item.status === "pending" && (askId === null || item.askId === askId)) {
-      changed = true;
-      return { ...item, status, allow };
-    }
-    if (item.kind === "subagent") {
-      const nested = updateAsks(item.items, askId, status, allow);
-      if (nested !== item.items) {
-        changed = true;
-        return { ...item, items: nested };
-      }
-    }
-    return item;
-  });
-  return changed ? next : items;
-};
+): TranscriptItem[] =>
+  items.map((item) =>
+    item.kind === "ask" && item.status === "pending" && (askId === null || item.askId === askId)
+      ? { ...item, status, allow }
+      : item,
+  );
 
 export const pendingAsk = (turns: Turn[]): { askId: string } | null => {
-  for (let index = turns.length - 1; index >= 0; index -= 1) {
-    const found = findAsk(turns[index].items, (item) => item.status === "pending");
-    if (found !== null) return { askId: found.askId };
+  for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const found = turns[turnIndex].items.find((item) => item.kind === "ask" && item.status === "pending");
+    if (found?.kind === "ask") return { askId: found.askId };
   }
   return null;
 };
 
 type ItemScope = { items: TranscriptItem[]; sampleId: string | null };
 
-const reduceItems = (scope: ItemScope, event: SessionEvent): ItemScope => {
+const reduceItems = (scope: ItemScope, event: SessionEvent, allowAsk: boolean): ItemScope => {
   const openSample = scope.sampleId ?? "";
 
   switch (event.type) {
     case "sample_started":
       return {
         sampleId: event.sample_id,
-        items: scope.items.filter((item) => item.final || item.kind === "tool" || item.kind === "subagent"),
+        items: scope.items.filter((item) => item.final || item.kind === "tool"),
       };
     case "reasoning_delta":
       return { ...scope, items: appendDelta(scope.items, "thinking", openSample, event.text) };
@@ -336,7 +231,7 @@ const reduceItems = (scope: ItemScope, event: SessionEvent): ItemScope => {
     case "tool_call_completed":
       return { ...scope, items: completeCall(scope.items, event.call_id, event.result, event.is_error ?? false) };
     case "ask_raised": {
-      if (findAsk(scope.items, (item) => item.askId === event.ask_id) !== null) return scope;
+      if (!allowAsk || scope.items.some((item) => item.kind === "ask" && item.askId === event.ask_id)) return scope;
       const { title, body } = askText(event.request);
       return {
         ...scope,
@@ -361,297 +256,199 @@ const reduceItems = (scope: ItemScope, event: SessionEvent): ItemScope => {
       const allow = event.response.kind === "approval" ? event.response.allow : undefined;
       return { ...scope, items: updateAsks(scope.items, event.ask_id, "answered", allow) };
     }
-    case "child_created": {
-      const index = scope.items.findIndex((item) => item.kind === "tool" && item.callId === event.call_id);
-      const requested = index === -1 ? null : (scope.items[index] as ToolItem);
-      const spawned: SubagentItem = {
-        kind: "subagent",
-        callId: event.call_id,
-        childSessionId: event.child_id,
-        agent: event.agent,
-        args: requested?.args ?? {},
-        items: [],
-        childSampleId: null,
-        isError: false,
-        finished: false,
-        sampleId: requested?.sampleId ?? openSample,
-        content: "",
-        final: false,
-      };
-      return {
-        ...scope,
-        items:
-          index === -1
-            ? [...scope.items, spawned]
-            : scope.items.map((item, position) => (position === index ? spawned : item)),
-      };
-    }
     default:
       return scope;
   }
 };
 
-const routeChild = (items: TranscriptItem[], childId: string, event: SessionEvent): TranscriptItem[] => {
-  let changed = false;
-  const next = items.map((item): TranscriptItem => {
-    if (item.kind !== "subagent") return item;
-    if (item.childSessionId === childId) {
-      if (event.type === "agent_finished") {
-        changed = true;
-        return {
-          ...item,
-          result: event.result,
-          isError: false,
-          final: true,
-          finished: true,
-          items: finalizeItems(item.items),
-        };
-      }
-      if (!item.finished && (event.type === "input_queued" || event.type === "turn_started")) {
-        changed = true;
-        return {
-          ...item,
-          result: undefined,
-          isError: false,
-          final: false,
-          childSampleId: null,
-        };
-      }
-      if (event.type === "turn_failed" || event.type === "turn_interrupted" || event.type === "turn_cancelled") {
-        if (item.final) return item;
-        changed = true;
-        return {
-          ...item,
-          result: event.type === "turn_failed" ? event.error : event.reason,
-          isError: event.type !== "turn_cancelled",
-          final: true,
-          items: finalizeItems(updateAsks(item.items, null, "expired")),
-        };
-      }
-      const scope = reduceItems({ items: item.items, sampleId: item.childSampleId }, event);
-      if (scope.items === item.items && scope.sampleId === item.childSampleId) return item;
-      changed = true;
-      return { ...item, items: scope.items, childSampleId: scope.sampleId };
-    }
-    const nested = routeChild(item.items, childId, event);
-    if (nested === item.items) return item;
-    changed = true;
-    return { ...item, items: nested };
-  });
-  return changed ? next : items;
-};
-
-const interruptActor = (state: ChatState, agentId: string, rootId: string): Turn[] => {
-  if (agentId === rootId) {
-    return state.turns.map((turn) =>
-      turn.status === "queued" || turn.status === "running"
-        ? { ...turn, status: "interrupted", items: finalizeItems(updateAsks(turn.items, null, "expired")) }
-        : { ...turn, items: updateAsks(turn.items, null, "expired") },
-    );
-  }
-  return state.turns.map((turn) => ({
-    ...turn,
-    items: routeChild(turn.items, agentId, { type: "turn_interrupted", turn_id: "", reason: "interrupted" }),
-  }));
-};
-
-const stopLatestHumanTurn = (turns: Turn[]): Turn[] => {
-  const index = turns.findLastIndex((turn) => !turn.synthetic);
-  if (index === -1) return turns;
-  return turns.map((turn, position) =>
-    position === index
-      ? { ...turn, status: "cancelled", items: finalizeItems(updateAsks(turn.items, null, "expired")) }
+const interruptJournal = (journal: JournalState): JournalState => ({
+  ...journal,
+  turns: journal.turns.map((turn) =>
+    turn.status === "queued" || turn.status === "running"
+      ? { ...turn, status: "interrupted", items: finalizeItems(updateAsks(turn.items, null, "expired")) }
       : turn,
-  );
-};
+  ),
+});
 
-export const reduceEventFrame = (state: ChatState, frame: EventFrame, rootId: string): Partial<ChatState> => {
-  if (frame.seq <= (state.cursors[frame.agent_id] ?? 0)) return {};
-  const event = frame.event;
-  const lifecycle = withWork(state, frame.agent_id, event);
-  const finishedAgent = event.type === "input_queued" ? FINISHED_INPUT.exec(event.input)?.[1] : undefined;
-  const active = finishedAgent === undefined ? lifecycle.active : { ...lifecycle.active, [finishedAgent]: false };
-  const work = finishedAgent === undefined ? lifecycle.work : { ...lifecycle.work, [finishedAgent]: [] };
-  const requested =
-    frame.agent_id === rootId &&
-    event.type === "cancellation_requested" &&
-    Object.values(event.targets ?? {}).some((turns) => turns.length > 0);
-  const cancelling = state.cancelling || requested;
-  const cancellationComplete = cancelling && Object.values(active).every((value) => !value);
-  const turns = cancellationComplete ? stopLatestHumanTurn(state.turns) : state.turns;
-  const finishedActors =
-    event.type === "agent_finished"
-      ? { ...state.finishedActors, [frame.agent_id]: true }
-      : finishedAgent === undefined
-        ? state.finishedActors
-        : { ...state.finishedActors, [finishedAgent]: true };
-  const base = {
-    cursors: { ...state.cursors, [frame.agent_id]: frame.seq },
-    active,
-    work,
-    finishedActors,
-    cancelling: cancellationComplete ? false : cancelling,
-    turns,
-  };
-  if (frame.agent_id !== rootId) {
-    const ignoredRestart =
-      state.finishedActors[frame.agent_id] && (event.type === "input_queued" || event.type === "turn_started");
-    return {
-      ...base,
-      turns: ignoredRestart
-        ? turns
-        : turns.map((turn) => ({ ...turn, items: routeChild(turn.items, frame.agent_id, event) })),
-    };
-  }
-
+const reduceJournal = (
+  journal: JournalState,
+  event: SessionEvent,
+  syntheticInputs: boolean,
+  allowAsk: boolean,
+): JournalState => {
   switch (event.type) {
     case "input_queued": {
-      if (state.turns.some((turn) => turn.id === event.command_id)) return base;
+      if (journal.turns.some((turn) => turn.id === event.command_id)) return journal;
       const { text, attachments } = parseInput(event.input);
       return {
-        ...base,
+        ...journal,
         turns: [
-          ...state.turns,
+          ...journal.turns,
           {
             id: event.command_id,
             input: text,
             attachments,
             items: [],
             status: "queued",
-            synthetic: SYNTHETIC_INPUT.test(text),
+            synthetic: syntheticInputs && SYNTHETIC_INPUT.test(text),
           },
         ],
-        active: { ...active, [rootId]: true },
-        sampleId: state.turns.some((turn) => turn.status === "running") ? state.sampleId : null,
+        sampleId: journal.turns.some((turn) => turn.status === "running") ? journal.sampleId : null,
       };
     }
     case "turn_started": {
-      const found = state.turns.some((turn) => turn.id === event.turn_id);
       const parsed = parseInput(event.input);
+      const found = journal.turns.some((turn) => turn.id === event.turn_id);
       return {
-        ...base,
+        ...journal,
         turns: found
-          ? mapTurn(state.turns, event.turn_id, (turn) => ({ ...turn, status: "running" }))
+          ? mapTurn(journal.turns, event.turn_id, (turn) => ({ ...turn, status: "running" }))
           : [
-              ...state.turns,
+              ...journal.turns,
               {
                 id: event.turn_id,
                 input: parsed.text,
                 attachments: parsed.attachments,
                 items: [],
                 status: "running",
-                synthetic: SYNTHETIC_INPUT.test(parsed.text),
+                synthetic: syntheticInputs && SYNTHETIC_INPUT.test(parsed.text),
               },
             ],
-        active: { ...active, [rootId]: true },
         sampleId: null,
       };
     }
-    case "turn_completed": {
-      const turns = mapTurn(state.turns, event.turn_id, (turn) => ({
-        ...turn,
-        status: event.stop_reason === "cancelled" ? "cancelled" : "done",
-        items: finalizeItems(turn.items),
-      }));
+    case "turn_completed":
       return {
-        ...base,
-        turns,
-        active: {
-          ...active,
-          [rootId]: (work[rootId]?.length ?? 0) > 0,
-        },
+        ...journal,
+        turns: mapTurn(journal.turns, event.turn_id, (turn) => ({
+          ...turn,
+          status: event.stop_reason === "cancelled" ? "cancelled" : "done",
+          items: finalizeItems(turn.items),
+        })),
         sampleId: null,
       };
-    }
-    case "turn_failed": {
-      const turns = mapTurn(state.turns, event.turn_id, (turn) => ({
-        ...turn,
-        status: "failed",
-        error: event.error,
-        items: finalizeItems(updateAsks(turn.items, null, "expired")),
-      }));
+    case "turn_failed":
       return {
-        ...base,
-        turns,
-        active: {
-          ...active,
-          [rootId]: (work[rootId]?.length ?? 0) > 0,
-        },
+        ...journal,
+        turns: mapTurn(journal.turns, event.turn_id, (turn) => ({
+          ...turn,
+          status: "failed",
+          error: event.error,
+          items: finalizeItems(updateAsks(turn.items, null, "expired")),
+        })),
         sampleId: null,
       };
-    }
-    case "turn_cancelled": {
-      const turns = mapTurn(state.turns, event.turn_id, (turn) => ({
-        ...turn,
-        status: "cancelled",
-        error: event.reason,
-        items: finalizeItems(updateAsks(turn.items, null, "expired")),
-      }));
+    case "turn_cancelled":
       return {
-        ...base,
-        turns,
-        active: {
-          ...active,
-          [rootId]: (work[rootId]?.length ?? 0) > 0,
-        },
+        ...journal,
+        turns: mapTurn(journal.turns, event.turn_id, (turn) => ({
+          ...turn,
+          status: "cancelled",
+          error: event.reason,
+          items: finalizeItems(updateAsks(turn.items, null, "expired")),
+        })),
         sampleId: null,
       };
-    }
-    case "turn_interrupted": {
-      const turns = mapTurn(state.turns, event.turn_id, (turn) => ({
-        ...turn,
-        status: "interrupted",
-        error: event.reason,
-        items: finalizeItems(updateAsks(turn.items, null, "expired")),
-      }));
+    case "turn_interrupted":
       return {
-        ...base,
-        turns,
-        active: {
-          ...active,
-          [rootId]: (work[rootId]?.length ?? 0) > 0,
-        },
+        ...journal,
+        turns: mapTurn(journal.turns, event.turn_id, (turn) => ({
+          ...turn,
+          status: "interrupted",
+          error: event.reason,
+          items: finalizeItems(updateAsks(turn.items, null, "expired")),
+        })),
         sampleId: null,
       };
-    }
     default: {
-      const running = turns.findLastIndex((turn) => turn.status === "running");
-      const index = running === -1 ? turns.findLastIndex((turn) => turn.status === "queued") : running;
-      if (index === -1) return base;
-      const turn = turns[index];
-      const scope = reduceItems({ items: turn.items, sampleId: state.sampleId }, event);
-      if (scope.items === turn.items && scope.sampleId === state.sampleId) return base;
+      const running = journal.turns.findLastIndex((turn) => turn.status === "running");
+      const index = running === -1 ? journal.turns.findLastIndex((turn) => turn.status === "queued") : running;
+      if (index === -1) return journal;
+      const turn = journal.turns[index];
+      const scope = reduceItems({ items: turn.items, sampleId: journal.sampleId }, event, allowAsk);
+      if (scope.items === turn.items && scope.sampleId === journal.sampleId) return journal;
       return {
-        ...base,
-        turns: turns.map((item, position) => (position === index ? { ...item, items: scope.items } : item)),
+        ...journal,
+        turns: journal.turns.map((item, position) => (position === index ? { ...item, items: scope.items } : item)),
         sampleId: scope.sampleId,
       };
     }
   }
 };
 
+export const actorStatusLabel = (state: ActorStatusOut["state"]): string =>
+  ({
+    queued: "Queued",
+    running: "Running",
+    awaiting_input: "Awaiting input",
+    idle: "Idle — awaiting parent",
+    finished: "Finished",
+    failed: "Failed",
+    cancelled: "Cancelled",
+    interrupted: "Interrupted",
+  })[state];
+
+export const composerDisabled = (
+  ready: boolean,
+  connected: boolean,
+  writerLost: boolean,
+  askPending: boolean,
+): boolean => !ready || !connected || writerLost || askPending;
+
+export const treeRunning = (turns: Turn[], actors: ActorStatusOut[]): boolean =>
+  (pendingAsk(turns) === null && turns.some((turn) => turn.status === "queued" || turn.status === "running")) ||
+  actors.some((actor) => actor.parent_id !== null && (actor.state === "queued" || actor.state === "running"));
+
+export const subscriptionFrames = (state: ChatState, rootId: string): SubscribeFrame[] => {
+  const ids = state.openChildId === null ? [rootId] : [rootId, state.openChildId];
+  return ids.map((agentId) => ({
+    type: "subscribe",
+    agent_id: agentId,
+    after: state.cursors[agentId] ?? 0,
+    writable: agentId === rootId,
+  }));
+};
+
+export const reduceEventFrame = (state: ChatState, frame: EventFrame, rootId: string): Partial<ChatState> => {
+  if (frame.seq <= (state.cursors[frame.agent_id] ?? 0)) return {};
+  const cursors = { ...state.cursors, [frame.agent_id]: frame.seq };
+  if (frame.agent_id === rootId) {
+    const reduced = reduceJournal(state, frame.event, true, true);
+    return { ...reduced, cursors };
+  }
+  const current = state.children[frame.agent_id] ?? EMPTY_JOURNAL;
+  return {
+    cursors,
+    children: {
+      ...state.children,
+      [frame.agent_id]: reduceJournal(current, frame.event, false, false),
+    },
+  };
+};
+
 export const createChatStore = (sessionId: string) =>
   createStore<ChatState>((set) => ({
-    turns: [],
-    ready: false,
+    ...EMPTY_JOURNAL,
     banner: null,
-    sampleId: null,
     cursors: {},
-    active: {},
-    work: {},
-    finishedActors: {},
-    cancelling: false,
+    children: {},
+    actors: [],
+    openChildId: null,
     dispatch: (frame) => set((state) => reduceEventFrame(state, frame, sessionId)),
     subscriptionReady: (frame) =>
-      set((state) => ({
-        ready: frame.agent_id === sessionId ? true : state.ready,
-        active: {
-          ...state.active,
-          [frame.agent_id]: frame.active && !state.finishedActors[frame.agent_id],
-        },
-        work: frame.active ? state.work : { ...state.work, [frame.agent_id]: [] },
-        turns: frame.active ? state.turns : interruptActor(state, frame.agent_id, sessionId),
-      })),
+      set((state) => {
+        if (frame.agent_id === sessionId) {
+          const journal = frame.active ? state : interruptJournal(state);
+          return { ...journal, ready: true };
+        }
+        const journal = state.children[frame.agent_id] ?? EMPTY_JOURNAL;
+        return {
+          children: {
+            ...state.children,
+            [frame.agent_id]: { ...journal, ready: true },
+          },
+        };
+      }),
     expireAsk: (frame) =>
       set((state) => ({
         turns: state.turns.map((turn) => ({ ...turn, items: updateAsks(turn.items, frame.ask_id, "expired") })),
@@ -659,6 +456,8 @@ export const createChatStore = (sessionId: string) =>
       })),
     setReady: (ready) => set({ ready }),
     setBanner: (banner) => set({ banner }),
+    setActors: (actors) => set({ actors }),
+    setOpenChild: (openChildId) => set({ openChildId }),
   }));
 
 let pending: ({ sessionId: string } & PendingMessage) | null = null;

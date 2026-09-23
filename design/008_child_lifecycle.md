@@ -217,36 +217,39 @@ Checklist:
 
 Verification: Ruff check and format passed; 35 actor-runtime tests and 486 package tests passed with 16 Docker-backed PostgreSQL skips; pre-commit and post-commit delivery failures, multi-terminal cancellation, and shutdown reconciliation were verified; `git diff --check` passed.
 
-### Phase 2 — Sarathi lazy child observation · deps: P0, P1 · —
+### Phase 2 — Sarathi lazy child observation · deps: P0, P1 · ✅ DONE
 
 Deliverables:
 
 - Add the authorized tree-status endpoint and regenerate API models.
 - Replace automatic child subscriptions with two-second status polling.
-- Subscribe and unsubscribe child journals on expansion and collapse.
-- Drive cards, footer, spinner, and composer state from actor status.
+- Subscribe and unsubscribe one child journal when its right drawer opens and closes.
+- Drive compact child buttons, drawer status, spinner, and composer controls from actor status.
 - Remove descendant ask handling.
+- Keep the root composer writable during execution so new messages queue as later FIFO turns.
 
 Verify:
 
 - A collapsed running child transfers status but no journal events.
-- Expansion replays from the correct cursor and then tails live.
-- Collapse stops journal delivery without stopping execution.
+- Opening the drawer replays from the correct cursor and then tails live.
+- Closing the drawer stops journal delivery without stopping execution.
 - A `max_steps` or plain completion shows `Idle — awaiting parent`, and the parent receives its lifecycle input.
 - Refresh discovers unfinished descendants without streaming them.
-- Nested descendants load through their ancestor path.
+- Nested descendants open directly from tree status without loading ancestor journals.
 - Multiple viewers inspect independently without affecting execution.
-- Finished children disappear from the running footer.
+- Finished children remain available for later history inspection.
 
 Checklist:
 
-- [ ] Backend endpoint and authorization
-- [ ] Generated client types
-- [ ] Polling state
-- [ ] Lazy subscriptions
-- [ ] Compact status UI
-- [ ] Reducer and backend tests
-- [ ] Brave verification
+- [x] Backend endpoint and authorization
+- [x] Generated client types
+- [x] Polling state
+- [x] Lazy subscriptions
+- [x] Compact status UI
+- [x] Reducer and backend tests
+- [x] Brave verification
+
+Verification: Ruff check and format passed; 486 Tantra tests passed with 16 Docker-backed PostgreSQL skips; 71 Sarathi backend tests and 7 native UI reducer tests passed; UI lint and production build passed; OpenAPI matched the live schema; independent review was clean; the rebuilt Compose stack passed Brave verification for lazy observation, drawer replay, refresh, queued root input, lifecycle delivery, cancellation, and retained child history; `git diff --check` passed.
 
 ### Phase 3 — Documentation and Tantra 1.1.0 · deps: P0, P1, P2 · —
 

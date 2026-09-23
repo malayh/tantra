@@ -9,6 +9,7 @@ import { useStore } from "zustand";
 import { getListSessionsQueryKey } from "@/generated/api/sessions/sessions";
 import { getToken } from "@/lib/apiClient";
 import {
+  treeRunning,
   type ChatStore,
   type ClientFrame,
   pendingAsk,
@@ -24,13 +25,12 @@ const WRITER_REPLACED = 4009;
 
 export const commandId = () => crypto.randomUUID().replaceAll("-", "");
 
-const route = (store: ChatStore, data: string, onTitle: () => void, subscribe: (agentId: string) => void) => {
+const route = (store: ChatStore, data: string, onTitle: () => void) => {
   const frame = JSON.parse(data) as ServerFrame;
   const state = store.getState();
 
   if (frame.type === "event") {
     state.dispatch(frame);
-    if (frame.event.type === "child_created") subscribe(frame.event.child_id);
     return;
   }
   if (frame.type === "subscription_ready") {
@@ -91,24 +91,15 @@ export const useChatSocket = (sessionId: string, store: ChatStore) => {
         }
       },
       onMessage: (message) =>
-        route(
-          store,
-          message.data as string,
-          () => queryClient.invalidateQueries({ queryKey: getListSessionsQueryKey() }),
-          (agentId) =>
-            sendJsonMessage({
-              type: "subscribe",
-              agent_id: agentId,
-              after: store.getState().cursors[agentId] ?? 0,
-              writable: false,
-            }),
+        route(store, message.data as string, () =>
+          queryClient.invalidateQueries({ queryKey: getListSessionsQueryKey() }),
         ),
     },
     authorized,
   );
 
   const ready = useStore(store, (state) => state.ready);
-  const running = useStore(store, (state) => Object.values(state.active).some(Boolean));
+  const running = useStore(store, (state) => treeRunning(state.turns, state.actors));
   const askId = useStore(store, (state) => pendingAsk(state.turns)?.askId ?? null);
 
   const sendFrame = useCallback(
@@ -118,6 +109,34 @@ export const useChatSocket = (sessionId: string, store: ChatStore) => {
     },
     [sendJsonMessage, store],
   );
+
+  const openChild = useCallback(
+    (agentId: string) => {
+      const state = store.getState();
+      if (state.openChildId === agentId) return;
+      if (state.openChildId !== null && readyState === ReadyState.OPEN) {
+        sendJsonMessage({ type: "unsubscribe", agent_id: state.openChildId });
+      }
+      state.setOpenChild(agentId);
+      if (readyState === ReadyState.OPEN) {
+        sendJsonMessage({
+          type: "subscribe",
+          agent_id: agentId,
+          after: state.cursors[agentId] ?? 0,
+          writable: false,
+        });
+      }
+    },
+    [readyState, sendJsonMessage, store],
+  );
+
+  const closeChild = useCallback(() => {
+    const state = store.getState();
+    if (state.openChildId !== null && readyState === ReadyState.OPEN) {
+      sendJsonMessage({ type: "unsubscribe", agent_id: state.openChildId });
+    }
+    state.setOpenChild(null);
+  }, [readyState, sendJsonMessage, store]);
 
   useEffect(() => {
     if (!ready) return;
@@ -132,5 +151,13 @@ export const useChatSocket = (sessionId: string, store: ChatStore) => {
     }
   }, [ready, sessionId, sendFrame]);
 
-  return { sendFrame, connected: readyState === ReadyState.OPEN, ready, running, pendingAsk: askId };
+  return {
+    sendFrame,
+    openChild,
+    closeChild,
+    connected: readyState === ReadyState.OPEN,
+    ready,
+    running,
+    pendingAsk: askId,
+  };
 };

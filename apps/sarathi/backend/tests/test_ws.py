@@ -14,8 +14,8 @@ from httpx_ws import AsyncWebSocketSession, WebSocketDisconnect
 from sarathi.agent import Sarathi, deps_factory
 from sarathi.api.ws import SocketBridge
 from sarathi.schemas import ServerErrorFrame
-from tantra import Runtime, Sample, SessionHeader
-from tantra.events import AgentFinished, ChildCreated, InputQueued, SessionCreated, TurnStarted
+from tantra import Approval, Runtime, Sample, SessionHeader
+from tantra.events import AgentFinished, AskRaised, ChildCreated, InputQueued, SessionCreated, TurnStarted
 from tantra.providers.base import SampleRequest, ToolCall
 
 Signup = Callable[..., Awaitable[str]]
@@ -333,59 +333,61 @@ async def test_explicit_child_subscription_replays_completion_and_parent_synthes
     assert counts["child"] == 1
 
 
-async def test_descendant_live_ask_routes_through_the_root_writer(
+async def test_descendant_ask_is_observable_but_not_routed_through_the_root_writer(
     socket: Socket,
-    provider: SharedProvider,
+    resources: Any,
+    client: httpx.AsyncClient,
     signup: Signup,
     new_session: NewSession,
 ) -> None:
-    counts = {"root": 0, "child": 0}
+    token = await signup()
+    sid = await new_session(token)
+    child_id = uuid4().hex
+    ask_id = uuid4().hex
+    user_id = await _uid(client, token)
+    metadata = {"user": user_id, "kind": "root"}
+    await resources.store.create(
+        SessionHeader(
+            id=child_id,
+            root_id=sid,
+            parent_id=sid,
+            agent="researcher",
+            depth=1,
+            model="test-model",
+            metadata=metadata,
+        )
+    )
+    await resources.store.append(
+        child_id,
+        [
+            SessionCreated(
+                agent="researcher",
+                root_id=sid,
+                parent_id=sid,
+                depth=1,
+                model="test-model",
+                metadata=metadata,
+            ),
+            AskRaised(ask_id=ask_id, call_id="call", request=Approval(title="Confirm")),
+        ],
+    )
 
-    def route(request: SampleRequest) -> Sample:
-        prompt = request.system[0].text
-        if "title generator" in prompt:
-            return Sample(text="Ask title")
-        if "research subagent" in prompt:
-            counts["child"] += 1
-            if counts["child"] == 1:
-                return Sample(tool_calls=[ToolCall(id="w", name="web_fetch", args='{"url":"https://example.com"}')])
-            return Sample(tool_calls=[ToolCall(id="f", name="finish", args='{"result":"denied"}')])
-        counts["root"] += 1
-        if counts["root"] == 1:
-            return Sample(
-                tool_calls=[ToolCall(id="s", name="spawn", args='{"agent_name":"researcher","input":"look"}')]
-            )
-        return Sample(text="root")
+    async with socket(sid, token) as ws:
+        await _subscribe(ws, sid, writable=True)
+        child_frames = await _subscribe(ws, child_id)
+        assert "ask_raised" in [_kind(frame) for frame in child_frames]
+        await _send(
+            ws,
+            {
+                "type": "ask_response",
+                "command_id": uuid4().hex,
+                "ask_id": ask_id,
+                "response": "deny",
+            },
+        )
+        expired = (await _until(ws, "ask_expired"))[-1]
 
-    provider.route = route
-    from sarathi.agent import Researcher
-
-    old_permissions = Researcher.permissions
-    Researcher.permissions = {"web_fetch": "ask"}
-    try:
-        token = await signup()
-        sid = await new_session(token)
-        async with socket(sid, token) as ws:
-            await _subscribe(ws, sid, writable=True)
-            await _send(ws, _message("research"))
-            created = (await _until(ws, "child_created"))[-1]["event"]
-            child_id = created["child_id"]
-            child_frames = await _subscribe(ws, child_id)
-            while "ask_raised" not in [_kind(frame) for frame in child_frames]:
-                child_frames.append(await _receive(ws))
-            ask = next(frame for frame in child_frames if _kind(frame) == "ask_raised")["event"]
-            await _send(
-                ws,
-                {
-                    "type": "ask_response",
-                    "command_id": uuid4().hex,
-                    "ask_id": ask["ask_id"],
-                    "response": "deny",
-                },
-            )
-            await _until(ws, "ask_answered")
-    finally:
-        Researcher.permissions = old_permissions
+    assert expired["agent_id"] == sid
 
 
 async def test_expired_ask_returns_typed_frame(

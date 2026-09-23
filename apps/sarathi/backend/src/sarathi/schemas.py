@@ -58,6 +58,35 @@ class Attachment(BaseModel):
 WireId = Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
 
 
+class TurnSummaryOut(BaseModel):
+    turn_id: WireId
+    outcome: Literal["completed", "failed", "cancelled", "interrupted"]
+    stop_reason: str | None
+    error: str | None
+
+
+class ActorStatusOut(BaseModel):
+    agent_id: WireId
+    root_id: WireId
+    parent_id: WireId | None
+    agent: str
+    state: Literal[
+        "queued",
+        "running",
+        "awaiting_input",
+        "idle",
+        "finished",
+        "failed",
+        "cancelled",
+        "interrupted",
+    ]
+    active: bool
+    current_turn_id: WireId | None
+    last_turn: TurnSummaryOut | None
+    last_seq: int
+    updated_at: datetime
+
+
 class SubscribeFrame(BaseModel):
     type: Literal["subscribe"] = "subscribe"
     agent_id: WireId

@@ -83,7 +83,7 @@ class SocketBridge:
         self.user_id = user_id
         self.send_lock = asyncio.Lock()
         self.subscriptions: dict[str, Subscription] = {}
-        self.asks: dict[str, tuple[str, str]] = {}
+        self.asks: dict[str, str] = {}
 
     async def send(self, frame: BaseModel) -> None:
         async with self.send_lock:
@@ -91,9 +91,9 @@ class SocketBridge:
 
     def track(self, item: LoggedEvent) -> None:
         event = item.event
-        if isinstance(event, AskRaised):
-            self.asks[event.ask_id] = (item.agent_id.hex, event.request.kind)
-        elif isinstance(event, AskAnswered):
+        if isinstance(event, AskRaised) and item.agent_id.hex == self.root_id:
+            self.asks[event.ask_id] = event.request.kind
+        elif isinstance(event, AskAnswered) and item.agent_id.hex == self.root_id:
             self.asks.pop(event.ask_id, None)
 
     async def owns(self, agent_id: str) -> bool:
@@ -195,7 +195,7 @@ class SocketBridge:
 
     async def ask_response(self, frame: AskResponseFrame) -> None:
         connection = await self.writable()
-        agent_id, kind = self.asks.get(frame.ask_id, (self.root_id, "approval"))
+        kind = self.asks.get(frame.ask_id, "approval")
         try:
             await connection.answer(
                 _uuid(frame.ask_id),
@@ -203,7 +203,7 @@ class SocketBridge:
                 command_id=_uuid(frame.command_id),
             )
         except AskExpired as exc:
-            await self.send(AskExpiredFrame(agent_id=agent_id, ask_id=frame.ask_id, message=str(exc)))
+            await self.send(AskExpiredFrame(agent_id=self.root_id, ask_id=frame.ask_id, message=str(exc)))
 
     async def cancel(self, frame: CancelFrame) -> None:
         connection = await self.writable()

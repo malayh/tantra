@@ -24,6 +24,7 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  ActorStatusOut,
   CreateSessionRequest,
   HTTPValidationError,
   PatchSessionRequest,
@@ -210,6 +211,98 @@ export const useCreateSession = <TError = ErrorType<HTTPValidationError>,
       return useMutation(getCreateSessionMutationOptions(options), queryClient);
     }
     /**
+ * @summary List Actors
+ */
+export const listActors = (
+    rootId: string,
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<ActorStatusOut[]>(
+      {url: `/api/sessions/${rootId}/actors`, method: 'GET', signal
+    },
+      options);
+    }
+
+
+
+
+export const getListActorsQueryKey = (rootId: string,) => {
+    return [
+    `/api/sessions/${rootId}/actors`
+    ] as const;
+    }
+
+
+export const getListActorsQueryOptions = <TData = Awaited<ReturnType<typeof listActors>>, TError = ErrorType<HTTPValidationError>>(rootId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listActors>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListActorsQueryKey(rootId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listActors>>> = ({ signal }) => listActors(rootId, requestOptions, signal);
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: rootId !== null && rootId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listActors>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
+}
+
+export type ListActorsQueryResult = NonNullable<Awaited<ReturnType<typeof listActors>>>
+export type ListActorsQueryError = ErrorType<HTTPValidationError>
+
+
+export function useListActors<TData = Awaited<ReturnType<typeof listActors>>, TError = ErrorType<HTTPValidationError>>(
+ rootId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof listActors>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listActors>>,
+          TError,
+          Awaited<ReturnType<typeof listActors>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListActors<TData = Awaited<ReturnType<typeof listActors>>, TError = ErrorType<HTTPValidationError>>(
+ rootId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listActors>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listActors>>,
+          TError,
+          Awaited<ReturnType<typeof listActors>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+export function useListActors<TData = Awaited<ReturnType<typeof listActors>>, TError = ErrorType<HTTPValidationError>>(
+ rootId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listActors>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
+/**
+ * @summary List Actors
+ */
+
+export function useListActors<TData = Awaited<ReturnType<typeof listActors>>, TError = ErrorType<HTTPValidationError>>(
+ rootId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listActors>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
+
+  const queryOptions = getListActorsQueryOptions(rootId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+/**
  * @summary Patch Session
  */
 export const patchSession = (

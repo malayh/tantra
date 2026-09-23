@@ -212,6 +212,57 @@
         ]
       }
     },
+    "/api/sessions/{root_id}/actors": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "List Actors",
+        "operationId": "list_actors",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "root_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Root Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ActorStatusOut"
+                  },
+                  "title": "Response List Actors"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/sessions/{session_id}": {
       "patch": {
         "tags": [
@@ -503,6 +554,99 @@
   },
   "components": {
     "schemas": {
+      "ActorStatusOut": {
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Agent Id"
+          },
+          "root_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Root Id"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "agent": {
+            "type": "string",
+            "title": "Agent"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "awaiting_input",
+              "idle",
+              "finished",
+              "failed",
+              "cancelled",
+              "interrupted"
+            ],
+            "title": "State"
+          },
+          "active": {
+            "type": "boolean",
+            "title": "Active"
+          },
+          "current_turn_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Turn Id"
+          },
+          "last_turn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnSummaryOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_seq": {
+            "type": "integer",
+            "title": "Last Seq"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "agent_id",
+          "root_id",
+          "parent_id",
+          "agent",
+          "state",
+          "active",
+          "current_turn_id",
+          "last_turn",
+          "last_seq",
+          "updated_at"
+        ],
+        "title": "ActorStatusOut"
+      },
       "AgentFinished": {
         "properties": {
           "version": {
@@ -2077,6 +2221,55 @@
           "input"
         ],
         "title": "TurnStarted"
+      },
+      "TurnSummaryOut": {
+        "properties": {
+          "turn_id": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+            "title": "Turn Id"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "failed",
+              "cancelled",
+              "interrupted"
+            ],
+            "title": "Outcome"
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Reason"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "turn_id",
+          "outcome",
+          "stop_reason",
+          "error"
+        ],
+        "title": "TurnSummaryOut"
       },
       "UnsubscribeFrame": {
         "properties": {

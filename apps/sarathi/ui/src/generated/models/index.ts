@@ -5,6 +5,8 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './actorStatusOut';
+export * from './actorStatusOutState';
 export * from './agentFinished';
 export * from './approval';
 export * from './approvalExtra';
@@ -60,6 +62,8 @@ export * from './turnCompleted';
 export * from './turnFailed';
 export * from './turnInterrupted';
 export * from './turnStarted';
+export * from './turnSummaryOut';
+export * from './turnSummaryOutOutcome';
 export * from './unsubscribeFrame';
 export * from './usage';
 export * from './userMessageFrame';

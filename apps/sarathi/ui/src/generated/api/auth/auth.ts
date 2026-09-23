@@ -74,11 +74,13 @@ export const signup = (
 
 
 
-export const getSignupMutationOptions = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof signup>>, TError,{data: BodyType<SignupRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof signup>>, TError,{data: BodyType<SignupRequest>}, TContext> => {
+export const getSignupMutationKey = () => ['signup'] as const;
 
-const mutationKey = ['signup'];
+export const getSignupMutationOptions = <TError = ErrorType<HTTPValidationError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof signup>>, TError,SignupMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof signup>>, TError,SignupMutationVariables, TContext> => {
+
+const mutationKey = getSignupMutationKey();
 const {mutation: mutationOptions, request: requestOptions} = options ?
       options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
       options
@@ -88,7 +90,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof signup>>, {data: BodyType<SignupRequest>}> = (props) => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof signup>>, SignupMutationVariables> = (props) => {
           const {data} = props ?? {};
 
           return  signup(data,requestOptions)
@@ -104,16 +106,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type SignupMutationResult = NonNullable<Awaited<ReturnType<typeof signup>>>
     export type SignupMutationBody = BodyType<SignupRequest>
     export type SignupMutationError = ErrorType<HTTPValidationError>
+    export type SignupMutationVariables = {data: BodyType<SignupRequest>}
 
     /**
  * @summary Signup
  */
 export const useSignup = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof signup>>, TError,{data: BodyType<SignupRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof signup>>, TError,SignupMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof signup>>,
         TError,
-        {data: BodyType<SignupRequest>},
+        SignupMutationVariables,
         TContext
       > => {
       return useMutation(getSignupMutationOptions(options), queryClient);
@@ -138,11 +141,13 @@ export const login = (
 
 
 
-export const getLoginMutationOptions = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof login>>, TError,{data: BodyType<LoginRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof login>>, TError,{data: BodyType<LoginRequest>}, TContext> => {
+export const getLoginMutationKey = () => ['login'] as const;
 
-const mutationKey = ['login'];
+export const getLoginMutationOptions = <TError = ErrorType<HTTPValidationError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof login>>, TError,LoginMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof login>>, TError,LoginMutationVariables, TContext> => {
+
+const mutationKey = getLoginMutationKey();
 const {mutation: mutationOptions, request: requestOptions} = options ?
       options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
       options
@@ -152,7 +157,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof login>>, {data: BodyType<LoginRequest>}> = (props) => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof login>>, LoginMutationVariables> = (props) => {
           const {data} = props ?? {};
 
           return  login(data,requestOptions)
@@ -168,16 +173,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type LoginMutationResult = NonNullable<Awaited<ReturnType<typeof login>>>
     export type LoginMutationBody = BodyType<LoginRequest>
     export type LoginMutationError = ErrorType<HTTPValidationError>
+    export type LoginMutationVariables = {data: BodyType<LoginRequest>}
 
     /**
  * @summary Login
  */
 export const useLogin = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof login>>, TError,{data: BodyType<LoginRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof login>>, TError,LoginMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof login>>,
         TError,
-        {data: BodyType<LoginRequest>},
+        LoginMutationVariables,
         TContext
       > => {
       return useMutation(getLoginMutationOptions(options), queryClient);

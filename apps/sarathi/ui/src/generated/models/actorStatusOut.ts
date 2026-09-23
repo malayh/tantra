@@ -14,6 +14,7 @@ export interface ActorStatusOut {
   root_id: string;
   parent_id: string | null;
   agent: string;
+  name: string;
   state: ActorStatusOutState;
   active: boolean;
   current_turn_id: string | null;

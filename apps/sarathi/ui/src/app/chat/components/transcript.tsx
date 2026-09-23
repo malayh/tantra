@@ -108,7 +108,7 @@ function ChildButton({ actor, onOpen }: { actor: ActorStatusOut; onOpen: (agentI
   return (
     <Button variant="outline" size="sm" className="max-w-full" onClick={() => onOpen(actor.agent_id)}>
       <Bot />
-      <span className="truncate">{actor.agent}</span>
+      <span className="truncate">{actor.name}</span>
       <span className="text-muted-foreground truncate font-normal">{actorStatusLabel(actor.state)}</span>
       {running && <Loader2 className="animate-spin" />}
     </Button>

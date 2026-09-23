@@ -11,10 +11,10 @@ import pytest
 from conftest import SharedProvider
 from httpx_ws import AsyncWebSocketSession, WebSocketDisconnect
 
-from sarathi.agent import Sarathi, deps_factory
+from sarathi.agent import SKILLS_DIR, Sarathi, deps_factory
 from sarathi.api.ws import SocketBridge
 from sarathi.schemas import ServerErrorFrame
-from tantra import Approval, Runtime, Sample, SessionHeader
+from tantra import Approval, FileSystemSkills, Runtime, Sample, SessionHeader
 from tantra.events import AgentFinished, AskRaised, ChildCreated, InputQueued, SessionCreated, TurnStarted
 from tantra.providers.base import SampleRequest, ToolCall
 
@@ -282,14 +282,12 @@ async def test_explicit_child_subscription_replays_completion_and_parent_synthes
         prompt = request.system[0].text
         if "title generator" in prompt:
             return Sample(text="Research title")
-        if "research subagent" in prompt:
+        if "general-purpose subagent" in prompt:
             counts["child"] += 1
             return Sample(tool_calls=[ToolCall(id="f", name="finish", args='{"result":"findings"}')])
         counts["root"] += 1
         if counts["root"] == 1:
-            return Sample(
-                tool_calls=[ToolCall(id="s", name="spawn", args='{"agent_name":"researcher","input":"look"}')]
-            )
+            return Sample(tool_calls=[ToolCall(id="s", name="spawn", args='{"agent_name":"subagent","input":"look"}')])
         if counts["root"] == 2:
             return Sample(text="research started")
         return Sample(text="synthesized findings")
@@ -327,7 +325,7 @@ async def test_explicit_child_subscription_replays_completion_and_parent_synthes
                 break
             frames.append(await _receive(ws))
 
-    assert created["agent"] == "researcher"
+    assert created["agent"] == "subagent"
     assert any(frame.get("agent_id") == child_id and _kind(frame) == "agent_finished" for frame in frames)
     assert synthesis_id is not None
     assert counts["child"] == 1
@@ -351,7 +349,7 @@ async def test_descendant_ask_is_observable_but_not_routed_through_the_root_writ
             id=child_id,
             root_id=sid,
             parent_id=sid,
-            agent="researcher",
+            agent="subagent",
             depth=1,
             model="test-model",
             metadata=metadata,
@@ -361,7 +359,7 @@ async def test_descendant_ask_is_observable_but_not_routed_through_the_root_writ
         child_id,
         [
             SessionCreated(
-                agent="researcher",
+                agent="subagent",
                 root_id=sid,
                 parent_id=sid,
                 depth=1,
@@ -462,6 +460,7 @@ async def test_fresh_process_replays_stopped_work_and_only_recovers_after_send(
         [Sarathi],
         default_model="test-model",
         deps_factory=deps_factory,
+        skills=FileSystemSkills(SKILLS_DIR),
         memory=resources.memory,
     )
     resources.runtime = fresh
@@ -499,7 +498,7 @@ async def test_child_and_grandchild_subscriptions_replay_independent_journals(
             id=child_id,
             root_id=sid,
             parent_id=sid,
-            agent="researcher",
+            agent="subagent",
             depth=1,
             model="test-model",
             metadata=metadata,
@@ -510,7 +509,7 @@ async def test_child_and_grandchild_subscriptions_replay_independent_journals(
             id=grandchild_id,
             root_id=sid,
             parent_id=child_id,
-            agent="researcher",
+            agent="subagent",
             depth=2,
             model="test-model",
             metadata=metadata,
@@ -520,7 +519,7 @@ async def test_child_and_grandchild_subscriptions_replay_independent_journals(
         child_id,
         [
             SessionCreated(
-                agent="researcher",
+                agent="subagent",
                 root_id=sid,
                 parent_id=sid,
                 depth=1,
@@ -529,7 +528,7 @@ async def test_child_and_grandchild_subscriptions_replay_independent_journals(
             ),
             ChildCreated(
                 child_id=grandchild_id,
-                agent="researcher",
+                agent="subagent",
                 turn_id=uuid4().hex,
                 call_id="spawn-grandchild",
             ),
@@ -540,7 +539,7 @@ async def test_child_and_grandchild_subscriptions_replay_independent_journals(
         grandchild_id,
         [
             SessionCreated(
-                agent="researcher",
+                agent="subagent",
                 root_id=sid,
                 parent_id=child_id,
                 depth=2,

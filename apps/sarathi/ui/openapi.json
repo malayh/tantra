@@ -582,6 +582,10 @@
             "type": "string",
             "title": "Agent"
           },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
           "state": {
             "type": "string",
             "enum": [
@@ -638,6 +642,7 @@
           "root_id",
           "parent_id",
           "agent",
+          "name",
           "state",
           "active",
           "current_turn_id",
@@ -1016,6 +1021,17 @@
           "agent": {
             "type": "string",
             "title": "Agent"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
           },
           "turn_id": {
             "type": "string",
@@ -1624,6 +1640,17 @@
           "agent": {
             "type": "string",
             "title": "Agent"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
           },
           "root_id": {
             "anyOf": [

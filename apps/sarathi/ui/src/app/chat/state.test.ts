@@ -32,7 +32,8 @@ const actor = (agentId: string, state: ActorStatusOut["state"], parentId: string
   agent_id: agentId,
   root_id: root,
   parent_id: parentId,
-  agent: parentId === null ? "sarathi" : "researcher",
+  agent: parentId === null ? "sarathi" : "subagent",
+  name: parentId === null ? "sarathi" : "Research scout",
   state,
   active: state === "running",
   current_turn_id: state === "running" ? command : null,
@@ -55,14 +56,14 @@ test("root is the only default subscription and spawn remains an ordinary tool",
       sample_id: "sample",
       call_id: "spawn",
       name: "spawn",
-      args: { agent_name: "researcher", input: "look" },
+      args: { agent_name: "subagent", input: "look" },
     }),
   );
   dispatch(
     event(root, 5, {
       type: "child_created",
       child_id: child,
-      agent: "researcher",
+      agent: "subagent",
       turn_id: command,
       call_id: "spawn",
     }),
@@ -86,7 +87,7 @@ test("root is the only default subscription and spawn remains an ordinary tool",
   assert.equal(item.final, true);
   if (item.kind === "tool") {
     assert.equal(item.name, "spawn");
-    assert.deepEqual(item.child, { agent_id: child, agent: "researcher" });
+    assert.deepEqual(item.child, { agent_id: child, agent: "subagent" });
   }
 });
 

@@ -3,7 +3,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from sarathi.agent import Researcher, Sarathi, _wire_tools
+from sarathi.agent import Sarathi, Subagent, _wire_tools
 from sarathi.config import get_settings
 from sarathi.telemetry import get_telemetry, shutdown_telemetry
 from tantra import FakeProvider, MemoryStore, Runtime
@@ -18,7 +18,7 @@ def unwired() -> Iterator[None]:
     if get_telemetry.cache_info().currsize:
         shutdown_telemetry()
     Sarathi.tools = []
-    Researcher.tools = []
+    Subagent.tools = []
     _wire_tools.cache_clear()
     get_telemetry.cache_clear()
     get_settings.cache_clear()

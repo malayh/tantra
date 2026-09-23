@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass, field
 from functools import cache
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends
@@ -11,6 +12,7 @@ from sarathi.telemetry import get_telemetry
 from tantra import (
     Agent,
     BuiltinMemory,
+    FileSystemSkills,
     ModelLimits,
     OpenAICompatible,
     OpenAICompatibleEmbedder,
@@ -24,21 +26,23 @@ from tantra.extratools.doc import read_doc
 from tantra.extratools.web import web_fetch, web_search
 
 MAX_OUTPUT = 8192
+SKILLS_DIR = Path(__file__).parent / "skills"
 
 memory_write, memory_recall = memory_tools(lambda ctx: {"user": ctx.deps["user_id"]})
 
 
-class Researcher(Agent):
-    """Research the web and return sourced findings."""
+class Subagent(Agent):
+    """Execute an independent task with non-interactive tools and on-demand skills."""
 
     prompt = (
-        "You are a research subagent. Work the task with web_search and web_fetch: search, judge the hits, "
-        "read the most promising pages, and follow up when a source is thin. "
-        "Only fetch a URL that came from a web_search result or from the task itself. "
-        "When the research is complete, call finish(result) with concrete findings, the URLs you read, "
-        "and anything you could not confirm."
+        "You are a general-purpose subagent. Execute the assigned task with ordinary tools and load an on-demand "
+        "skill when it applies. Never ask a human for input or approval. For current, sourced, or comparative "
+        "investigation, load the research skill and preserve the research level named in the task; an omitted level "
+        "means normal. Call finish(result) exactly once with your findings or a clear blocked or incomplete result. "
+        "A turn-ended message is only status and does not deliver your result."
     )
     tools = []
+    skills = ["research"]
 
 
 class Sarathi(Agent):
@@ -53,11 +57,17 @@ class Sarathi(Agent):
         "If the user explicitly asks you to remember or save a fact, always call memory_write, even if an "
         "earlier attempt was interrupted. "
         "If the user denies permission for memory_write, do not call memory_write again for that request. "
-        "For deep or wide research, call spawn('researcher', task). The child works independently. "
-        "When you receive an [agent ... finished] message, synthesize its result into an explicit answer for the user."
+        "Work inline by default. Spawn a subagent only when the user explicitly requests one or independent or "
+        "parallel work would materially help. Research can be done inline: load the research skill when the task "
+        "requires current, sourced, or comparative investigation. Preserve any requested shallow, normal, or deep "
+        "research level whether working inline or delegating. Include the level in a delegated task, omitting it only "
+        "when normal is intended. Delegate with spawn('subagent', task, name=...) and optionally use a short, "
+        "descriptive display name. When you receive an [agent ... finished] message, synthesize its result and "
+        "explicitly answer the user."
     )
     tools = []
-    subagents = [Researcher]
+    skills = ["research"]
+    subagents = [Subagent]
     permissions = {"memory_write": "ask"}
 
 
@@ -65,8 +75,9 @@ class Sarathi(Agent):
 def _wire_tools() -> None:
     settings = get_settings()
     search = [web_search(settings.BRAVE_API_KEY)] if settings.BRAVE_API_KEY else []
-    Sarathi.tools = [*search, web_fetch(proxy=settings.WEB_PROXY), read_doc(), memory_write, memory_recall]
-    Researcher.tools = [*search, web_fetch(proxy=settings.WEB_PROXY)]
+    non_interactive = [*search, web_fetch(proxy=settings.WEB_PROXY), read_doc(), memory_recall]
+    Sarathi.tools = [*non_interactive, memory_write]
+    Subagent.tools = non_interactive
 
 
 def deps_factory(header: SessionHeader) -> dict[str, Any]:
@@ -110,6 +121,7 @@ async def make_resources() -> RuntimeResources:
         [Sarathi],
         default_model=settings.default_model,
         deps_factory=deps_factory,
+        skills=FileSystemSkills(SKILLS_DIR),
         memory=memory,
         compactor=PruneThenSummarize(),
         telemetry=get_telemetry(),

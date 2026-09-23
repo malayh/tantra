@@ -50,11 +50,13 @@ formData.append(`file`, bodyCreateUpload.file);
 
 
 
-export const getCreateUploadMutationOptions = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createUpload>>, TError,{data: BodyType<BodyCreateUpload>}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof createUpload>>, TError,{data: BodyType<BodyCreateUpload>}, TContext> => {
+export const getCreateUploadMutationKey = () => ['createUpload'] as const;
 
-const mutationKey = ['createUpload'];
+export const getCreateUploadMutationOptions = <TError = ErrorType<HTTPValidationError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createUpload>>, TError,CreateUploadMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof createUpload>>, TError,CreateUploadMutationVariables, TContext> => {
+
+const mutationKey = getCreateUploadMutationKey();
 const {mutation: mutationOptions, request: requestOptions} = options ?
       options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
       options
@@ -64,7 +66,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createUpload>>, {data: BodyType<BodyCreateUpload>}> = (props) => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createUpload>>, CreateUploadMutationVariables> = (props) => {
           const {data} = props ?? {};
 
           return  createUpload(data,requestOptions)
@@ -80,16 +82,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type CreateUploadMutationResult = NonNullable<Awaited<ReturnType<typeof createUpload>>>
     export type CreateUploadMutationBody = BodyType<BodyCreateUpload>
     export type CreateUploadMutationError = ErrorType<HTTPValidationError>
+    export type CreateUploadMutationVariables = {data: BodyType<BodyCreateUpload>}
 
     /**
  * @summary Create Upload
  */
 export const useCreateUpload = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createUpload>>, TError,{data: BodyType<BodyCreateUpload>}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createUpload>>, TError,CreateUploadMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof createUpload>>,
         TError,
-        {data: BodyType<BodyCreateUpload>},
+        CreateUploadMutationVariables,
         TContext
       > => {
       return useMutation(getCreateUploadMutationOptions(options), queryClient);

@@ -9,7 +9,7 @@ A deep-search chat system in the style of Perplexity — ask anything, watch it 
 ## What it demonstrates
 
 - **Streaming turns with visible thinking** — reasoning deltas render live, collapse when done.
-- **Deep search** — a `researcher` subagent runs `web_search` / `web_fetch` loops; nested activity streams inside the chat; answers cite sources.
+- **Skill-based research** — Sarathi researches inline by default and can delegate independent work to a named general-purpose `subagent`; both load the same `research` skill.
 - **Stop that works** — one click sends a durable cancellation command for the whole actor tree, and the thread stays usable.
 - **Human-in-the-loop** — memory writes suspend the live actor behind an approval card; after a process restart the replayed ask is shown as expired.
 - **Durability** — each actor has an independent journal, including streaming deltas; reconnect replays after that actor's browser cursor while execution stays in the process-scoped Runtime.

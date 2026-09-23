@@ -10,6 +10,7 @@ export interface ChildCreated {
   type?: 'child_created';
   child_id: string;
   agent: string;
+  name?: string | null;
   turn_id: string;
   call_id: string;
   [key: string]: unknown;

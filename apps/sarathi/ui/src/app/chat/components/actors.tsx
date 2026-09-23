@@ -27,7 +27,7 @@ function ActorButton({
       onClick={() => onOpen(actor.agent_id)}
     >
       <Bot />
-      <span className="truncate">{actor.agent}</span>
+      <span className="truncate">{actor.name}</span>
       <span className="text-muted-foreground truncate font-normal">{actorStatusLabel(actor.state)}</span>
       {isRunning(actor) && <Loader2 className="animate-spin" />}
     </Button>
@@ -77,7 +77,7 @@ export function ChildDrawer({
           <>
             <DialogHeader className="border-border gap-3 border-b p-4 pr-12">
               <div>
-                <DialogTitle>{actor.agent}</DialogTitle>
+                <DialogTitle>{actor.name}</DialogTitle>
                 <DialogDescription>{actorStatusLabel(actor.state)}</DialogDescription>
               </div>
               {descendants.length > 1 && (

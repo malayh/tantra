@@ -70,6 +70,7 @@ class ActorStatusOut(BaseModel):
     root_id: WireId
     parent_id: WireId | None
     agent: str
+    name: str
     state: Literal[
         "queued",
         "running",

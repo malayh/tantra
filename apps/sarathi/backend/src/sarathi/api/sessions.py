@@ -28,6 +28,7 @@ def _actor_out(actor: ActorStatus) -> ActorStatusOut:
         root_id=actor.root_id.hex,
         parent_id=actor.parent_id.hex if actor.parent_id is not None else None,
         agent=actor.agent,
+        name=actor.name,
         state=actor.state,
         active=actor.active,
         current_turn_id=actor.current_turn_id.hex if actor.current_turn_id is not None else None,

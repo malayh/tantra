@@ -12,11 +12,11 @@ from httpx_ws.transport import ASGIWebSocketTransport
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from sarathi.agent import RuntimeResources, Sarathi, _wire_tools, deps_factory
+from sarathi.agent import SKILLS_DIR, RuntimeResources, Sarathi, _wire_tools, deps_factory
 from sarathi.config import get_settings
 from sarathi.db import get_db
 from sarathi.models import Base
-from tantra import BuiltinMemory, FakeProvider, MemoryStore, Runtime, Sample
+from tantra import BuiltinMemory, FakeProvider, FileSystemSkills, MemoryStore, Runtime, Sample
 from tantra.providers.base import ProviderEvent, SampleRequest, TextDelta
 
 PASSWORD = "hunter2hunter2"
@@ -93,6 +93,7 @@ async def resources(store: SharedStore, provider: SharedProvider) -> AsyncIterat
         [Sarathi],
         default_model="test-model",
         deps_factory=deps_factory,
+        skills=FileSystemSkills(SKILLS_DIR),
         memory=memory,
     )
     resources = RuntimeResources(

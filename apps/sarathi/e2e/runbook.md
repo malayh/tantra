@@ -34,7 +34,7 @@ Manual-but-agent-driven end-to-end pass over the compose stack. Executed by Clau
 - Sidebar: `New chat`, session list (title + relative time), footer = email · brain icon (Memory) · sun/moon (`Toggle theme`) · log out.
 - Header: session title · model `Select` (`aria-label="Model"`) · connection dot (green = WS open).
 - Composer: paperclip (`Attach file`, accepts `.pdf`/`.docx`) · textarea (Enter sends, Shift+Enter newline) · `Send` / `Stop` button (swaps while a turn runs).
-- Transcript items: `Thinking` collapsible (open while streaming, auto-collapses when the sample finishes) · markdown text with a streaming cursor · tool chips (`web_search`, `web_fetch`, `read_doc`, `memory_write`, `memory_recall`, spinner while in flight, click to expand the result) · subagent block badged **`researcher`** (lowercase — the badge is the agent name, not the class name; bot icon, nested items inside) · approval card titled `Run memory_write?` with `Approve` / `Deny`.
+- Transcript items: `Thinking` collapsible (open while streaming, auto-collapses when the sample finishes) · markdown text with a streaming cursor · tool chips (`web_search`, `web_fetch`, `read_doc`, `memory_write`, `memory_recall`, spinner while in flight, click to expand the result) · subagent block badged with its effective display name (or `subagent` when unnamed; bot icon, nested items inside) · approval card titled `Run memory_write?` with `Approve` / `Deny`.
 
 ---
 
@@ -80,7 +80,7 @@ Manual-but-agent-driven end-to-end pass over the compose stack. Executed by Clau
 
 **Steps**
 
-1. `New chat`. Send a question that cannot be answered from parametric memory, e.g. `Search the web: what happened in the news this week about the European Space Agency? Cite your sources.`
+1. `New chat`. Send a question that cannot be answered from parametric memory, e.g. `Research this inline at shallow level: what happened in the news this week about the European Space Agency? Cite your sources.`
 2. Watch the tool chips as they appear.
 3. Expand one completed chip.
 
@@ -90,6 +90,7 @@ Manual-but-agent-driven end-to-end pass over the compose stack. Executed by Clau
 - Usually one or more `web_fetch` chips follow (model's choice — not required to pass; `web_search` alone with a cited answer is a PASS).
 - Expanding a completed chip shows a JSON result block with real result data.
 - The final answer references sources (URLs / named outlets) that match the chips' arguments — not invented links.
+- No subagent block appears; Sarathi performs this research inline.
 - If `BRAVE_API_KEY` is empty, no `web_search` chip can exist → SKIP with that reason.
 
 ---
@@ -127,15 +128,16 @@ Per-page distinctive facts:
 
 **Steps**
 
-1. `New chat`. Send: `Research the current state of WebAssembly component model adoption in depth — use the researcher subagent, then synthesise what it finds.`
+1. `New chat`. Send: `Research the current state of WebAssembly component model adoption at deep level — use a subagent named Wasm scout, then synthesise what it finds.`
 2. Watch the transcript while it runs. Do not expand anything until the block stops spinning.
-3. Expand the `researcher` block.
+3. Open the `Wasm scout` block and inspect its drawer.
 
 **Expect**
 
-- A block badged `researcher` (lowercase, bot icon) appears with a spinner, showing the delegated task as its summary. It renders **in place of** the delegate tool chip — there must not be both.
+- A block badged `Wasm scout` (bot icon) appears with a spinner, showing the delegated task as its summary. It renders **in place of** the delegate tool chip — there must not be both.
 - While the subagent runs the block is open and shows **nested** activity inside its left rule: `web_search` / `web_fetch` chips and the subagent's own text.
 - When the subagent finishes, its spinner clears and the block collapses.
+- No approval or human-input card appears in the child drawer. Refresh the page and confirm the child is still named `Wasm scout` and its journal remains inspectable.
 - After the block completes, the root agent streams a **synthesis** answer below it (text outside the block).
 - The composer stays disabled until the *root* turn completes (a subagent turn emits two `turn_completed`s; the composer must not unlock early).
 
@@ -186,8 +188,8 @@ Per-page distinctive facts:
 
 **Steps**
 
-1. `New chat`. Send a prompt that fans out: `Research in depth how three different Rust async runtimes compare on scheduler design — delegate to the researcher and be thorough.`
-2. Wait until the `researcher` block is visibly spinning **with at least one tool chip inside it**.
+1. `New chat`. Send a prompt that fans out: `Research at deep level how three different Rust async runtimes compare on scheduler design — delegate to a subagent named Runtime scout.`
+2. Wait until the `Runtime scout` block is visibly spinning **with at least one tool chip inside it**.
 3. Click `Stop`. Start a timer.
 4. Wait up to ~30s.
 
@@ -294,7 +296,7 @@ Copy into `e2e/reports/<YYYY-MM-DD>.md` and fill.
 - **Notes:**
 
 ### 5 — Subagent · PASS/FAIL/SKIP
-- **Evidence:** `researcher` block, nested chips, synthesis after
+- **Evidence:** `Wasm scout` block, nested chips, explicit finish delivery, refresh persistence, synthesis after
 - **Notes:**
 
 ### 6 — Memory HITL + durability + scoping · PASS/FAIL/SKIP

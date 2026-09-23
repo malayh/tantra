@@ -166,11 +166,13 @@ export const createSession = (
 
 
 
-export const getCreateSessionMutationOptions = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createSession>>, TError,{data: BodyType<CreateSessionRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof createSession>>, TError,{data: BodyType<CreateSessionRequest>}, TContext> => {
+export const getCreateSessionMutationKey = () => ['createSession'] as const;
 
-const mutationKey = ['createSession'];
+export const getCreateSessionMutationOptions = <TError = ErrorType<HTTPValidationError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createSession>>, TError,CreateSessionMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof createSession>>, TError,CreateSessionMutationVariables, TContext> => {
+
+const mutationKey = getCreateSessionMutationKey();
 const {mutation: mutationOptions, request: requestOptions} = options ?
       options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
       options
@@ -180,7 +182,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createSession>>, {data: BodyType<CreateSessionRequest>}> = (props) => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createSession>>, CreateSessionMutationVariables> = (props) => {
           const {data} = props ?? {};
 
           return  createSession(data,requestOptions)
@@ -196,16 +198,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type CreateSessionMutationResult = NonNullable<Awaited<ReturnType<typeof createSession>>>
     export type CreateSessionMutationBody = BodyType<CreateSessionRequest>
     export type CreateSessionMutationError = ErrorType<HTTPValidationError>
+    export type CreateSessionMutationVariables = {data: BodyType<CreateSessionRequest>}
 
     /**
  * @summary Create Session
  */
 export const useCreateSession = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createSession>>, TError,{data: BodyType<CreateSessionRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createSession>>, TError,CreateSessionMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof createSession>>,
         TError,
-        {data: BodyType<CreateSessionRequest>},
+        CreateSessionMutationVariables,
         TContext
       > => {
       return useMutation(getCreateSessionMutationOptions(options), queryClient);
@@ -323,11 +326,13 @@ export const patchSession = (
 
 
 
-export const getPatchSessionMutationOptions = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof patchSession>>, TError,{sessionId: string;data: BodyType<PatchSessionRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof patchSession>>, TError,{sessionId: string;data: BodyType<PatchSessionRequest>}, TContext> => {
+export const getPatchSessionMutationKey = () => ['patchSession'] as const;
 
-const mutationKey = ['patchSession'];
+export const getPatchSessionMutationOptions = <TError = ErrorType<HTTPValidationError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof patchSession>>, TError,PatchSessionMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof patchSession>>, TError,PatchSessionMutationVariables, TContext> => {
+
+const mutationKey = getPatchSessionMutationKey();
 const {mutation: mutationOptions, request: requestOptions} = options ?
       options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
       options
@@ -337,7 +342,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof patchSession>>, {sessionId: string;data: BodyType<PatchSessionRequest>}> = (props) => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof patchSession>>, PatchSessionMutationVariables> = (props) => {
           const {sessionId,data} = props ?? {};
 
           return  patchSession(sessionId,data,requestOptions)
@@ -353,16 +358,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type PatchSessionMutationResult = NonNullable<Awaited<ReturnType<typeof patchSession>>>
     export type PatchSessionMutationBody = BodyType<PatchSessionRequest>
     export type PatchSessionMutationError = ErrorType<HTTPValidationError>
+    export type PatchSessionMutationVariables = {sessionId: string;data: BodyType<PatchSessionRequest>}
 
     /**
  * @summary Patch Session
  */
 export const usePatchSession = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof patchSession>>, TError,{sessionId: string;data: BodyType<PatchSessionRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof patchSession>>, TError,PatchSessionMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof patchSession>>,
         TError,
-        {sessionId: string;data: BodyType<PatchSessionRequest>},
+        PatchSessionMutationVariables,
         TContext
       > => {
       return useMutation(getPatchSessionMutationOptions(options), queryClient);

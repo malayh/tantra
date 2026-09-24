@@ -10,10 +10,8 @@ from stress.driver import Policy, PolicyState, SyntheticProvider, by_model, last
 from stress.invariants import check_log, check_pairs, log, picks
 from tantra import (
     Agent,
-    ApprovalResponse,
     Context,
     FreeText,
-    FreeTextResponse,
     Runtime,
     Sample,
     SampleRequest,
@@ -85,7 +83,7 @@ async def wait_idle(runtime: Runtime) -> None:
         raise AssertionError("runtime did not become idle") from exc
 
 
-async def test_deep_tree_uses_live_answers_and_explicit_finish(store: Store) -> None:
+async def test_deep_tree_rejects_child_asks_and_uses_explicit_finish(store: Store) -> None:
     def root_policy(req: SampleRequest, state: PolicyState) -> Sample:
         if last_user(req) == "go":
             step = turn_step(req)
@@ -124,14 +122,11 @@ async def test_deep_tree_uses_live_answers_and_explicit_finish(store: Store) -> 
         mid_id = picks(await log(store, root_id.hex), "child_created")[0].child_id
         leaf_created = await wait_for(store, mid_id, "child_created")
         leaf_id = leaf_created.child_id
-        first = await wait_for(store, leaf_id, "ask_raised")
-        await connection.answer(UUID(hex=first.ask_id), FreeTextResponse(text="yes-one"), command_id=uuid4())
-        second = await wait_for(store, leaf_id, "ask_raised", 2)
-        await connection.answer(UUID(hex=second.ask_id), FreeTextResponse(text="yes-two"), command_id=uuid4())
         await wait_for(store, leaf_id, "agent_finished")
         await wait_for(store, mid_id, "agent_finished")
         await wait_for(store, root_id.hex, "turn_completed", 2)
 
+    await wait_idle(runtime)
     root_log = await log(store, root_id.hex)
     mid_log = await log(store, mid_id)
     leaf_results = [str(event.result) for event in picks(await log(store, leaf_id), "tool_call_completed")]
@@ -142,7 +137,9 @@ async def test_deep_tree_uses_live_answers_and_explicit_finish(store: Store) -> 
     assert root_ping in [event.input for event in picks(mid_log, "turn_started")]
     assert mid_pong in [event.input for event in picks(root_log, "input_queued")]
     assert mid_pong in [event.input for event in picks(root_log, "turn_started")]
-    assert "ship:yes-one/yes-two" in leaf_results
+    assert "child agents cannot ask humans; use send() to message the parent" in leaf_results
+    assert picks(await log(store, leaf_id), "ask_raised") == []
+    assert picks(await log(store, leaf_id), "agent_finished")[0].result == "leaf done"
     assert len(await store.list(parent_id=root_id.hex)) == 1
     assert len(await store.list(parent_id=mid_id)) == 1
     assert len(picks(await log(store, root_id.hex), "child_created")) == 1
@@ -281,7 +278,7 @@ async def test_permissions_apply_at_depth(store: Store) -> None:
     class Kid(Agent):
         model = MODEL_LEAF
         tools = [probe, forbidden_write]
-        permissions = {"probe": "ask", "forbidden_write": "deny", "finish": "allow"}
+        permissions = {"probe": "allow", "forbidden_write": "deny", "send": "allow", "finish": "allow"}
 
     class Parent(Agent):
         model = MODEL_ROOT
@@ -317,15 +314,13 @@ async def test_permissions_apply_at_depth(store: Store) -> None:
     async with runtime.connect(root_id, writable=True) as connection:
         opening = await connection.prompt("go", command_id=uuid4())
         kid_id = picks(await log(store, root_id.hex), "child_created")[0].child_id
-        raised = await wait_for(store, kid_id, "ask_raised")
-        assert raised.request.extra["permission"] == "probe"
-        await connection.answer(UUID(hex=raised.ask_id), ApprovalResponse(allow=True), command_id=uuid4())
         await wait_for(store, kid_id, "agent_finished")
 
     kid_log = await log(store, kid_id)
     denied = [event for event in picks(kid_log, "tool_call_completed") if event.is_error]
     assert opening.text == "parent waiting"
     assert probed == ["metrics"]
+    assert picks(kid_log, "ask_raised") == []
     assert written == []
     assert len(denied) == 1
     assert "denied by permissions: forbidden_write" in str(denied[0].result)

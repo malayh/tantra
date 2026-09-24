@@ -59,9 +59,11 @@ asyncio.run(main())
 
 `Connection.prompt()` accepts a durable command and waits for its terminal result. For streaming, call `send()` and iterate the connection. Reconnect with the last scalar `seq` as `after`; use `Runtime.events()` for a child journal. Command IDs are UUIDs and make acceptance idempotent.
 
-Subagents are independent actors. Models use the injected `spawn`, `send`, and `finish` tools; no parent stream merges child events. A live typed ask suspends only its actor turn and must be answered through the current writable root connection.
+Subagents are independent actors. Models use the injected `spawn`, `status`, `send`, and `finish` tools; no parent stream merges child events. Plain completion leaves a child reusable and notifies its parent with status only, while `finish` delivers the final result. Human asks and approval-gated tools are root-only.
 
-See the [documentation](https://malayh.github.io/tantra/docs/) and the [1.0 migration guide](https://malayh.github.io/tantra/docs/guides/migration-1.0/).
+Compaction is opt-in with `Runtime(compactor=PruneThenSummarize())`. Configured runtimes budget the complete provider request, preserve system and tool definitions, and compact each actor independently.
+
+See the [documentation](https://malayh.github.io/tantra/docs/) and the [1.1 migration guide](https://malayh.github.io/tantra/docs/guides/migration-1.1/).
 
 ## Reference app
 

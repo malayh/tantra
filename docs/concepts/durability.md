@@ -12,11 +12,17 @@ Journal sequence numbers start at 1. Cursor 0 means replay from the beginning. R
 
 A writable connection can call `send()` and disconnect immediately. The process-owned actor continues. Event readers replay from storage and then wait on a process-local notification; they do not buffer or throttle execution.
 
-## Typed asks are live
+## Typed asks are live and root-only
 
-`ctx.ask(...)` writes `AskRaised` and waits on an in-memory future. The current writable root connection may answer an ask raised by the root or any descendant. Ordinary input never answers an ask.
+Root `ctx.ask(...)` writes `AskRaised` and waits on an in-memory future. The current writable root connection may answer it. Ordinary input never answers an ask. A child cannot raise a human ask; it must use `send()` to ask its direct parent for help.
 
 If the Runtime closes or the process dies, the future is gone. The unfinished turn is later marked `interrupted`; the old ask has expired. Send a new root command to continue the conversation.
+
+## Child status and lifecycle delivery
+
+Session headers retain the latest actor state, current turn, last terminal summary, and sequence. `status()` and `tree_status()` read these snapshots without activating actors or replaying journals. Existing headers load with defaults; historical state is not backfilled.
+
+After a child turn ends without `finish()`, Tantra durably queues one deterministic status-only input for the direct parent. Activation-time reconciliation repairs a stop between recording the child terminal and enqueueing the parent input. Successful `finish()` uses its result-delivery input instead. Both paths preserve FIFO ordering, and child assistant text remains only in the child journal.
 
 ## Crash contract
 

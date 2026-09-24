@@ -6,15 +6,15 @@ Disconnecting a reader or cancelling a local `prompt()` wait does not cancel acc
 
 ## Asks do not survive process loss
 
-Only a live writable root connection can answer a current ask. After interruption, send a new root input; do not reuse the expired ask ID.
+Only a root actor can raise an ask, and only a live writable root connection can answer it. Children must message their parent. After interruption, send a new root input; do not reuse the expired ask ID.
 
 ## One tree, one process
 
 Writer replacement is process-local. Never drive the same root tree from multiple Runtime processes, even when they share a store.
 
-## Actor streams are separate
+## Actor streams are separate and lazy
 
-A root cursor says nothing about a child cursor. Subscribe to every discovered child independently and persist each last sequence.
+A root cursor says nothing about a child cursor. Poll `tree_status()` for lightweight tree state. Subscribe to a child only when its detailed events are needed, and persist that actor's last sequence independently.
 
 ## Sync tool effects may outlive cancellation
 

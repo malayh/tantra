@@ -196,7 +196,7 @@ Checklist:
 - [x] Legacy-history behavior
 - [x] Automated and Brave verification
 
-### Phase 2 — Documentation and Tantra 1.1.0 · deps: P1, 008 P2 follow-up · —
+### Phase 2 — Documentation and Tantra 1.1.0 · deps: P1, 008 P2 follow-up · ✅ DONE
 
 Deliverables:
 
@@ -220,12 +220,14 @@ Verify:
 
 Checklist:
 
-- [ ] Public and migration documentation
-- [ ] Combined 1.1 changelog
-- [ ] Version and lockfile
-- [ ] Full automated verification
-- [ ] PostgreSQL verification
-- [ ] Live Brave verification
+- [x] Public and migration documentation
+- [x] Combined 1.1 changelog
+- [x] Version and lockfile
+- [x] Full automated verification
+- [x] PostgreSQL verification
+- [x] Live Brave verification
+
+Verification: Independent review was clean after documenting the lifecycle payload and restoring meaningful stress coverage. Brave verified named delegation, isolated child journals, parent-child messaging, explicit finish, status polling, shallow delegated research, normal and deep inline research, root-only approval, refresh, cancellation, and the absence of child asks.
 
 ### Conventions (all phases)
 

@@ -146,13 +146,6 @@ def blocks(request: SampleRequest) -> list[list[dict[str, Any]]]:
     return grouped
 
 
-def first_compacted(provider: SyntheticProvider) -> int:
-    for index, request in enumerate(provider.requests):
-        if request.messages and str(getattr(request.messages[0], "content", "")).startswith("## Goal"):
-            return index
-    raise AssertionError("no request was ever assembled over a compaction summary")
-
-
 async def test_marathon_many_turns(store: Store) -> None:
     runtime, provider = build(store, jittered())
     sid = (await runtime.create(Marathoner)).hex
@@ -167,8 +160,12 @@ async def test_marathon_many_turns(store: Store) -> None:
     assert len(picks(events, "turn_completed")) == TURNS
     assert len(applied) >= 3
     assert stubs(events)
+    retained: set[str] = set()
     for event in applied:
-        assert all(marker in event.summary for marker in MARKERS)
+        current = {marker for marker in MARKERS if marker in event.summary}
+        assert retained <= current
+        retained = current
+    assert retained == set(MARKERS)
 
     check_pairs(provider.requests)
     check_window(provider.requests, LIMITS, CONFIG)
@@ -232,17 +229,18 @@ async def test_tail_turns_intact(store: Store) -> None:
     await execute(runtime, sid, BIG_TURN)
 
     events = await log(store, sid)
-    assert len(picks(events, "compaction_applied")) == 1
+    assert picks(events, "compaction_applied") == []
+    assert stubs(events)
 
-    index = first_compacted(provider)
-    assert is_summarize(provider.requests[index - 1])
-    pre, post = blocks(provider.requests[index - 2]), blocks(provider.requests[index])
-
-    assert post[0][0]["content"].startswith("## Goal")
-    assert post[1][0]["content"] == "warmup 3"
-    assert post[1] in pre
-    assert post[-1][0]["content"] == BIG_TURN
+    before, after = blocks(provider.requests[-2]), blocks(provider.requests[-1])
+    assert after[-2] == before[-2]
+    assert after[-2][0]["content"] == "warmup 3"
+    assert [message["role"] for message in after[-2]] == ["user", "assistant", "tool", "tool", "assistant"]
+    assert after[-1][0]["content"] == BIG_TURN
+    assert [message["role"] for message in after[-1]] == ["user", "assistant", "tool"]
+    assert after[-1][-1]["content"].startswith("[pruned:")
     check_pairs(provider.requests)
+    check_window(provider.requests, LIMITS, CONFIG)
     await check_log(store, sid)
 
 
@@ -273,7 +271,8 @@ async def test_live_ask_after_compaction(store: Store) -> None:
         raised = await wait_for(store, sid, "ask_raised")
         events = await log(store, sid)
         kinds = [event_type(event) for event in events]
-        assert kinds.index("compaction_applied") < kinds.index("ask_raised")
+        assert stubs(events)
+        assert events.index(stubs(events)[-1]) < kinds.index("ask_raised")
         await connection.answer(
             UUID(hex=raised.ask_id),
             ApprovalResponse(allow=True),
@@ -285,7 +284,7 @@ async def test_live_ask_after_compaction(store: Store) -> None:
     assert result.outcome == "completed"
     assert "noted after the brief" in [str(event.result) for event in picks(events, "tool_call_completed")]
     check_pairs(provider.requests)
-    assert any(request.messages[0].content.startswith("## Goal") for request in provider.requests if request.messages)
+    assert any(last_user(request) == BIG_TURN for request in provider.requests)
     await check_log(store, sid)
 
 
@@ -303,10 +302,10 @@ async def test_monster_turn_prune_only(store: Store) -> None:
     sid = (await runtime.create(Marathoner)).hex
 
     await execute(runtime, sid, MONSTER_TURN)
-    assert stubs(await log(store, sid)) == []
+    assert stubs(await log(store, sid))
 
     await execute(runtime, sid, "small one")
-    assert stubs(await log(store, sid)) == []
+    assert stubs(await log(store, sid))
 
     await execute(runtime, sid, "small two")
 
@@ -332,8 +331,12 @@ async def test_compaction_survives_writer_replacement(store: Store) -> None:
     stamped = await stamped_log(store, sid)
     applied = [event for _, event in stamped if event_type(event) == "compaction_applied"]
     assert applied
+    retained: set[str] = set()
     for event in applied:
-        assert all(marker in event.summary for marker in MARKERS)
+        current = {marker for marker in MARKERS if marker in event.summary}
+        assert retained <= current
+        retained = current
+    assert retained == set(MARKERS)
 
     events = [event for _, event in stamped]
     assert len(picks(events, "turn_completed")) == 20

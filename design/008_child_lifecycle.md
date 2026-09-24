@@ -259,7 +259,7 @@ Verification: Ruff check and format passed; 486 Tantra tests passed with 16 Dock
 
 Verification: Independent review was clean; Ruff check and format passed; 486 Tantra tests passed with 16 Docker-backed PostgreSQL skips; 71 Sarathi backend tests and 9 native UI reducer tests passed; UI lint and production build passed; the rebuilt Compose stack passed live browser verification for active-only placement, inline inactive history, drawer access, replay hydration, stable upward scrolling, resumed bottom-following, and a clean browser console; `git diff --check` passed.
 
-### Phase 3 — Documentation and Tantra 1.1.0 · deps: P0, P1, P2 · —
+### Phase 3 — Documentation and Tantra 1.1.0 · deps: P0, P1, P2 · ✅ DONE
 
 Deliverables:
 
@@ -282,11 +282,13 @@ Verify:
 
 Checklist:
 
-- [ ] Public documentation
-- [ ] Migration guide
-- [ ] Release metadata
-- [ ] Full automated verification
-- [ ] Live browser verification
+- [x] Public documentation
+- [x] Migration guide
+- [x] Release metadata
+- [x] Full automated verification
+- [x] Live browser verification
+
+Verification: All four store contracts and the 84-case stress matrix passed against real PostgreSQL; Tantra, Sarathi backend, native UI, lint, strict docs, lock, package, and Docker builds passed. Brave verified collapsed status polling, on-demand child replay, refresh discovery, lifecycle and finish delivery, tree cancellation, retained child history, root-only approval, and no browser errors.
 
 ### Conventions (all phases)
 

@@ -61,6 +61,7 @@ nav:
       - Skills: guides/skills.md
       - Memory: guides/memory.md
       - Actor subagents: guides/subagents.md
+      - Migrate to 1.1: guides/migration-1.1.md
       - Migrate to 1.0: guides/migration-1.0.md
       - Storage backends: guides/storage.md
       - Providers: guides/providers.md

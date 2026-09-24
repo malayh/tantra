@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.1.0
+
+Breaking:
+
+- Human asks and approval-gated tools are root-only. Child `ctx.ask()` calls now return an ordered tool error, static child `ask` permissions fail Runtime construction, and dynamic child escalations fail without emitting `AskRaised`.
+- Plain child turn completion no longer implies result delivery. It leaves the actor reusable and queues a status-only lifecycle input for the direct parent; children must call `finish(result)` to close and deliver a final result.
+
+Added:
+
+- Durable `TurnSummary` and `ActorStatus` snapshots, including queued and active turn state, plus `Runtime.status()`, breadth-first `Runtime.tree_status()`, and the direct-child `status` framework tool.
+- Deterministic parent notification and activation-time reconciliation for completed, failed, cancelled, and interrupted child turns that do not call `finish()`.
+- Optional durable child display names on `spawn`, session headers, actor events, status responses, and Sarathi UI surfaces. Actor type and UUID semantics are unchanged.
+- Lazy, cached `OpenAICompatible` model-limit discovery with explicit configuration precedence, OpenRouter-style metadata support, and per-field fallback to a 128k context window and 4,096-token output limit. `Provider.limits()` may now be synchronous or awaitable.
+- Complete-request compaction budgeting across prompts, execution-environment blocks, history, tools, and parameters; bounded recent history; chained durable summaries; one-shot recovery from confirmed pre-output context overflow; and explicit irreducible-payload failures.
+- A standardized execution-environment system block for capability guidance, keeping skill bodies on demand.
+- Sarathi actor-status polling and lazy child-journal subscriptions, including drawer replay, retained cursors, inactive child placement, replay hydration, and stable manual scrolling.
+- Sarathi general-purpose named `subagent` actors and a packaged `research` skill with `shallow`, `normal`, and `deep` effort levels.
+
+Changed:
+
+- `PruneThenSummarize` remains opt-in and now defaults to an 80% trigger, a 4,096-token buffer, a 20,000-token recent window, and a 4,096-token summary-output cap. It preserves application and framework system blocks and tool schemas byte-for-byte.
+- Parent-child `send` accepts only a direct edge and activates the target with the root tree identity.
+- Sarathi works inline by default, delegates only when requested or independently useful, keeps approval-gated memory writes on the root, and exposes only non-interactive capabilities to subagents.
+
+Compatibility:
+
+- Existing 1.0 headers, events, and stores load without migration or historical status and name backfill. Legacy Sarathi `researcher` history remains readable but cannot resume or accept new work.
+
+
 ## 1.0.0
 
 Breaking:

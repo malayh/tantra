@@ -1,6 +1,6 @@
 # 010 Adaptive Context Compaction
 
-Status: Phases 0 and 1 complete; Phase 2 not started.
+Status: Complete.
 
 ## Goal
 
@@ -137,7 +137,7 @@ Checklist:
 - [x] One-shot recovery retry.
 - [x] Focused and full tests.
 
-### Phase 2 — Documentation and release integration
+### Phase 2 — Documentation and release integration ✅ DONE
 
 Dependencies: Phases 0 and 1.
 
@@ -157,11 +157,13 @@ Verify:
 
 Checklist:
 
-- [ ] User and reference documentation.
-- [ ] Migration and compatibility notes.
-- [ ] Full repository verification.
-- [ ] Sarathi verification.
-- [ ] Tantra 1.1 integration.
+- [x] User and reference documentation.
+- [x] Migration and compatibility notes.
+- [x] Full repository verification.
+- [x] Sarathi verification.
+- [x] Tantra 1.1 integration.
+
+Verification: Explicit, discovered, and fallback limits passed focused Sarathi tests. Proactive full-Sarathi compaction reduced an estimated 13,061-token request to 8,065 tokens; a real OpenRouter `openai/gpt-3.5-turbo` overflow forced one compaction from 18,575 to 10,658 estimated tokens and the retry completed. Lock, package, strict docs, Docker, full automated, and live Sarathi checks passed.
 
 ## Rejected approaches
 

@@ -14,6 +14,6 @@
 | `max_steps` | implementation default | Sample limit per turn |
 | `output_schema` | `None` | Pydantic terminal-output schema |
 
-`build_name_table(agents)` walks subagents transitively and rejects duplicate names. Runtime uses that durable registry to resolve actor headers.
+`build_name_table(agents)` walks subagents transitively and rejects duplicate actor types. Runtime uses that durable registry to resolve actor headers. A child display name supplied to `spawn` is stored separately and does not change registry resolution.
 
 Model precedence is agent override, root session model, then Runtime default.

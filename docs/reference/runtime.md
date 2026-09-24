@@ -29,7 +29,7 @@ Runtime(
 
 `status(agent_id) -> ActorStatus` reads one actor's durable header. `tree_status(root_id) -> list[ActorStatus]` reads the root and descendants breadth-first without activating actors or reading journals.
 
-`ActorStatus.name` is the header's durable display name when present and otherwise the registered `agent` type.
+`ActorStatus.name` is the header's durable display name when present and otherwise the registered `agent` type. `state` is `queued`, `running`, `awaiting_input`, `idle`, `finished`, `failed`, `cancelled`, or `interrupted`. `active` reports only whether this Runtime process owns a live task. `current_turn_id`, `last_turn`, `last_seq`, and `updated_at` support polling without consuming actor journals.
 
 `aclose()` stops new work, interrupts known active turns, releases writer authority, and leaves application-owned providers and stores open.
 
@@ -39,7 +39,7 @@ Enter a connection with `async with`. Read-only connections iterate events. A wr
 
 - `send(input, *, command_id) -> CommandReceipt` accepts a durable root input.
 - `prompt(input, *, command_id) -> TurnResult` accepts the same input and waits for its terminal event.
-- `answer(ask_id, response, *, command_id) -> CommandReceipt` resolves a live root or descendant ask.
+- `answer(ask_id, response, *, command_id) -> CommandReceipt` resolves a live root ask.
 - `cancel(*, command_id) -> CommandReceipt` cancels active and queued work in the live tree.
 
 Cancelling the local wait for `prompt` does not cancel the accepted turn.

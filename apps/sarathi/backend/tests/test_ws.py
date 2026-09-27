@@ -3,7 +3,9 @@ import json
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import httpx
@@ -12,19 +14,20 @@ from conftest import SharedProvider
 from httpx_ws import AsyncWebSocketSession, WebSocketDisconnect
 
 from sarathi.agent import SKILLS_DIR, Sarathi, deps_factory
-from sarathi.api.ws import SocketBridge
-from sarathi.schemas import ServerErrorFrame
-from tantra import Approval, FileSystemSkills, Runtime, Sample, SessionHeader
+from sarathi.api.ws import SocketBridge, Subscription
+from sarathi.schemas import CancelFrame, ServerErrorFrame
+from tantra import Approval, CoordinatorUnavailable, FileSystemSkills, Runtime, Sample, SessionHeader
 from tantra.events import AgentFinished, AskRaised, ChildCreated, InputQueued, SessionCreated, TurnStarted
 from tantra.providers.base import SampleRequest, ToolCall
 
 Signup = Callable[..., Awaitable[str]]
 NewSession = Callable[..., Awaitable[str]]
-Socket = Callable[[str, str], AbstractAsyncContextManager[AsyncWebSocketSession]]
+Socket = Callable[..., AbstractAsyncContextManager[AsyncWebSocketSession]]
 
 RECEIVE_TIMEOUT = 5.0
 SILENCE_TIMEOUT = 0.2
 WRITER_REPLACED = 4009
+TRY_AGAIN_LATER = 1013
 
 
 def _kind(frame: dict[str, Any]) -> str:
@@ -192,6 +195,143 @@ async def test_read_only_root_and_child_writable_subscription_cannot_mutate(
         await _send(ws, _message("no"))
         error = (await _until(ws, "server_error"))[-1]
     assert "writable=true" in error["message"]
+
+
+async def test_readonly_view_never_claims_or_replaces_the_writer(
+    socket: Socket,
+    provider: SharedProvider,
+    signup: Signup,
+    new_session: NewSession,
+) -> None:
+    provider.samples.extend([Sample(text="writer remains"), Sample(text="title")])
+    token = await signup()
+    sid = await new_session(token)
+
+    async with socket(sid, token) as writer:
+        await _subscribe(writer, sid, writable=True)
+        async with socket(sid, token, "readonly") as reader:
+            replay = await _subscribe(reader, sid)
+            assert replay[-1]["active"] is False
+            await _send(reader, {"type": "subscribe", "agent_id": sid, "after": 0, "writable": True})
+            denied = (await _until(reader, "server_error"))[-1]
+            assert denied == {
+                "type": "server_error",
+                "code": "readonly",
+                "message": "read-only views cannot become writers",
+                "command_id": None,
+                "retryable": False,
+            }
+        await _send(writer, _message("still mine"))
+        await _until(writer, "turn_completed")
+
+
+async def test_command_error_carries_stable_code_uuid_and_retryability(resources: Any) -> None:
+    class RecordingSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_text(self, payload: str) -> None:
+            self.sent.append(json.loads(payload))
+
+    command_id = uuid4().hex
+    socket = RecordingSocket()
+    bridge = SocketBridge(socket, resources, uuid4().hex, "user")
+    await bridge.send_exception(
+        CoordinatorUnavailable("coordinator unavailable"),
+        CancelFrame(command_id=command_id),
+    )
+    assert socket.sent == [
+        {
+            "type": "server_error",
+            "code": "coordinator_unavailable",
+            "message": "coordinator unavailable",
+            "command_id": command_id,
+            "retryable": True,
+        }
+    ]
+
+
+async def test_subscription_readiness_uses_distributed_status_and_preserves_uncertainty(resources: Any) -> None:
+    class RecordingSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_text(self, payload: str) -> None:
+            self.sent.append(json.loads(payload))
+
+    agent_id = uuid4().hex
+    socket = RecordingSocket()
+    bridge = SocketBridge(socket, resources, agent_id, "user")
+    resources.runtime.status = AsyncMock(return_value=SimpleNamespace(active=True))
+    resources.runtime.active.clear()
+
+    await bridge.send_ready(agent_id, 4)
+
+    resources.runtime.status.assert_awaited_once()
+    assert socket.sent == [{"type": "subscription_ready", "agent_id": agent_id, "seq": 4, "active": True}]
+
+    resources.runtime.status = AsyncMock(side_effect=CoordinatorUnavailable("database uncertain"))
+    with pytest.raises(CoordinatorUnavailable, match="database uncertain"):
+        await bridge.send_ready(agent_id, 5)
+    assert len(socket.sent) == 1
+
+
+async def test_subscription_uncertainty_closes_for_reconnect_without_false_ready(resources: Any) -> None:
+    class RecordingSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+            self.closed: list[tuple[int, str]] = []
+
+        async def send_text(self, payload: str) -> None:
+            self.sent.append(json.loads(payload))
+
+        async def close(self, code: int, reason: str) -> None:
+            self.closed.append((code, reason))
+
+    root_id = (await resources.runtime.create(Sarathi)).hex
+    resources.runtime.status = AsyncMock(side_effect=CoordinatorUnavailable("database uncertain"))
+    socket = RecordingSocket()
+    subscription = Subscription()
+    bridge = SocketBridge(socket, resources, root_id, "user")
+
+    await bridge.stream(root_id, 1, False, subscription)
+
+    assert socket.sent == []
+    assert socket.closed == [(TRY_AGAIN_LATER, "coordinator_unavailable")]
+    assert subscription.entered.is_set()
+
+
+async def test_header_notice_refreshes_title_and_model(resources: Any) -> None:
+    class RecordingSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, Any]] = []
+
+        async def send_text(self, payload: str) -> None:
+            self.sent.append(json.loads(payload))
+
+    class HeaderCoordinator:
+        async def watch(self, root_id: str) -> Any:
+            yield SimpleNamespace(kind="header", actor_id=root_id)
+
+    root_id = uuid4().hex
+    coordinator = resources.runtime.coordinator
+    header = resources.store.header
+    resources.runtime.coordinator = HeaderCoordinator()
+    resources.store.header = AsyncMock(
+        side_effect=[
+            SimpleNamespace(title="Old", model="old-model"),
+            SimpleNamespace(title="New", model="new-model"),
+        ]
+    )
+    socket = RecordingSocket()
+
+    try:
+        await SocketBridge(socket, resources, root_id, "user").watch_headers()
+    finally:
+        resources.runtime.coordinator = coordinator
+        resources.store.header = header
+
+    assert socket.sent == [{"type": "header_updated", "title": "New", "model": "new-model"}]
 
 
 async def test_unsubscribe_stops_delivery_and_replacing_subscription_uses_cursor(

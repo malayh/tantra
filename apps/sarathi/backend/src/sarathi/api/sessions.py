@@ -6,7 +6,7 @@ from sarathi.agent import ResourcesDep, Sarathi
 from sarathi.auth import CurrentUser
 from sarathi.config import get_settings
 from sarathi.schemas import ActorStatusOut, CreateSessionRequest, PatchSessionRequest, SessionOut, TurnSummaryOut
-from tantra import ActorStatus, SessionHeader
+from tantra import ActorStatus, ModelChangeBusy, SessionHeader
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -94,5 +94,8 @@ async def patch_session(
     header = await resources.store.header(session_id)
     if header is None or header.metadata.get("user") != str(user.id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
-    patched = await resources.store.patch_header(session_id, model=_resolve_model(body.model))
+    try:
+        patched = await resources.store.patch_header(session_id, model=_resolve_model(body.model))
+    except ModelChangeBusy as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return _out(patched)

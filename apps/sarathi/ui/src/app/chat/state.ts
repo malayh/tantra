@@ -8,6 +8,7 @@ import type {
   Attachment,
   CancelFrame,
   EventFrame,
+  HeaderUpdatedFrame,
   ServerErrorFrame,
   SubscribeFrame,
   SubscriptionReadyFrame,
@@ -16,9 +17,11 @@ import type {
   UserMessageFrame,
 } from "@/generated/models";
 
-export type ServerFrame = EventFrame | SubscriptionReadyFrame | AskExpiredFrame | TitleUpdatedFrame | ServerErrorFrame;
+export type ServerFrame =
+  EventFrame | SubscriptionReadyFrame | AskExpiredFrame | TitleUpdatedFrame | HeaderUpdatedFrame | ServerErrorFrame;
 
 export type ClientFrame = SubscribeFrame | UnsubscribeFrame | UserMessageFrame | AskResponseFrame | CancelFrame;
+export type CommandFrame = UserMessageFrame | AskResponseFrame | CancelFrame;
 
 export type SessionEvent = EventFrame["event"];
 
@@ -74,7 +77,13 @@ export type JournalState = {
   ready: boolean;
 };
 
-export type Banner = { kind: "error" | "writer"; message: string };
+export type Banner = { kind: "error" | "writer" | "retry"; message: string; commandId?: string };
+
+export type OutboxEntry = {
+  frame: CommandFrame;
+  attempts: number;
+  status: "pending" | "manual";
+};
 
 export type PendingMessage = { text: string; attachments: Attachment[] };
 
@@ -84,6 +93,8 @@ export type ChatState = JournalState & {
   children: Record<string, JournalState>;
   actors: ActorStatusOut[];
   openChildId: string | null;
+  outbox: OutboxEntry[];
+  writerLost: boolean;
   dispatch: (frame: EventFrame) => void;
   subscriptionReady: (frame: SubscriptionReadyFrame) => void;
   expireAsk: (frame: AskExpiredFrame) => void;
@@ -91,6 +102,12 @@ export type ChatState = JournalState & {
   setBanner: (banner: Banner | null) => void;
   setActors: (actors: ActorStatusOut[]) => void;
   setOpenChild: (agentId: string | null) => void;
+  enqueueCommand: (frame: CommandFrame) => void;
+  markCommandSent: (commandId: string) => void;
+  requireRetry: (commandId: string) => void;
+  retryCommand: (commandId: string) => void;
+  failCommand: (commandId: string, message: string) => void;
+  loseWriter: () => void;
 };
 
 export type ChatStore = ReturnType<typeof createChatStore>;
@@ -414,31 +431,47 @@ export const composerDisabled = (
   connected: boolean,
   writerLost: boolean,
   askPending: boolean,
-): boolean => !ready || !connected || writerLost || askPending;
+  readonly = false,
+): boolean => !ready || !connected || writerLost || askPending || readonly;
 
 export const treeRunning = (turns: Turn[], actors: ActorStatusOut[]): boolean =>
   (pendingAsk(turns) === null && turns.some((turn) => turn.status === "queued" || turn.status === "running")) ||
   actors.some((actor) => actor.parent_id !== null && (actor.state === "queued" || actor.state === "running"));
 
-export const subscriptionFrames = (state: ChatState, rootId: string): SubscribeFrame[] => {
+export const subscriptionFrames = (state: ChatState, rootId: string, writable = true): SubscribeFrame[] => {
   const ids = state.openChildId === null ? [rootId] : [rootId, state.openChildId];
   return ids.map((agentId) => ({
     type: "subscribe",
     agent_id: agentId,
     after: state.cursors[agentId] ?? 0,
-    writable: agentId === rootId,
+    writable: writable && agentId === rootId,
   }));
 };
 
+export const acknowledgedCommandId = (event: SessionEvent): string | null => {
+  if (event.type === "input_queued" || event.type === "cancellation_requested") return event.command_id;
+  if (event.type === "ask_answered") return event.command_id ?? null;
+  return null;
+};
+
 export const reduceEventFrame = (state: ChatState, frame: EventFrame, rootId: string): Partial<ChatState> => {
-  if (frame.seq <= (state.cursors[frame.agent_id] ?? 0)) return {};
+  const commandId = acknowledgedCommandId(frame.event);
+  const acknowledged =
+    commandId === null
+      ? {}
+      : {
+          outbox: state.outbox.filter((entry) => entry.frame.command_id !== commandId),
+          banner: state.banner?.commandId === commandId ? null : state.banner,
+        };
+  if (frame.seq <= (state.cursors[frame.agent_id] ?? 0)) return acknowledged;
   const cursors = { ...state.cursors, [frame.agent_id]: frame.seq };
   if (frame.agent_id === rootId) {
     const reduced = reduceJournal(state, frame.event, true, true);
-    return { ...reduced, cursors };
+    return { ...reduced, ...acknowledged, cursors };
   }
   const current = state.children[frame.agent_id] ?? EMPTY_JOURNAL;
   return {
+    ...acknowledged,
     cursors,
     children: {
       ...state.children,
@@ -466,6 +499,8 @@ export const createChatStore = (sessionId: string) => {
     children: {},
     actors: [],
     openChildId: null,
+    outbox: [],
+    writerLost: false,
     dispatch: (frame) => {
       const state = get();
       if (!subscribed(state, frame.agent_id, sessionId)) return;
@@ -529,6 +564,49 @@ export const createChatStore = (sessionId: string) => {
             : { ...state.children, [openChildId]: { ...(state.children[openChildId] ?? EMPTY_JOURNAL), ready: false } },
       }));
     },
+    enqueueCommand: (frame) =>
+      set((state) =>
+        state.outbox.some((entry) => entry.frame.command_id === frame.command_id)
+          ? state
+          : { outbox: [...state.outbox, { frame, attempts: 0, status: "pending" }] },
+      ),
+    markCommandSent: (commandId) =>
+      set((state) => ({
+        outbox: state.outbox.map((entry) =>
+          entry.frame.command_id === commandId ? { ...entry, attempts: entry.attempts + 1 } : entry,
+        ),
+      })),
+    requireRetry: (commandId) =>
+      set((state) => ({
+        outbox: state.outbox.map((entry) =>
+          entry.frame.command_id === commandId ? { ...entry, status: "manual" } : entry,
+        ),
+        banner: {
+          kind: "retry",
+          message: "The command was not acknowledged. Retry with the same command ID?",
+          commandId,
+        },
+      })),
+    retryCommand: (commandId) =>
+      set((state) => ({
+        outbox: state.outbox.map((entry) =>
+          entry.frame.command_id === commandId ? { ...entry, attempts: 0, status: "pending" } : entry,
+        ),
+        banner: state.banner?.commandId === commandId ? null : state.banner,
+      })),
+    failCommand: (commandId, message) =>
+      set((state) => ({
+        outbox: state.outbox.filter((entry) => entry.frame.command_id !== commandId),
+        banner: { kind: "error", message, commandId },
+      })),
+    loseWriter: () =>
+      set({
+        writerLost: true,
+        banner: {
+          kind: "writer",
+          message: "This chat is open for writing in another tab. Reload to reclaim control.",
+        },
+      }),
   }));
 };
 

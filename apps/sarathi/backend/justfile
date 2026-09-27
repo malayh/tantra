@@ -2,7 +2,7 @@ default:
     @just --list
 
 runserver:
-    uv run uvicorn sarathi.main:app --reload --port 8000
+    uv run uvicorn sarathi.main:app --reload --port 8000 --no-access-log --log-level warning
 
 test *args:
     uv run pytest {{args}}

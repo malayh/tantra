@@ -7,5 +7,8 @@
 
 export interface ServerErrorFrame {
   type?: 'server_error';
+  code?: string;
   message: string;
+  command_id?: string | null;
+  retryable?: boolean;
 }

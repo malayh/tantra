@@ -500,6 +500,9 @@
                       "$ref": "#/components/schemas/TitleUpdatedFrame"
                     },
                     {
+                      "$ref": "#/components/schemas/HeaderUpdatedFrame"
+                    },
+                    {
                       "$ref": "#/components/schemas/ServerErrorFrame"
                     }
                   ],
@@ -810,6 +813,18 @@
             "type": "string",
             "pattern": "^[0-9a-f]{32}$",
             "title": "Ask Id"
+          },
+          "command_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command Id"
           },
           "message": {
             "type": "string",
@@ -1363,6 +1378,40 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "HeaderUpdatedFrame": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "header_updated",
+            "title": "Type",
+            "default": "header_updated"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          }
+        },
+        "type": "object",
+        "title": "HeaderUpdatedFrame"
+      },
       "InputQueued": {
         "properties": {
           "version": {
@@ -1613,9 +1662,31 @@
             "title": "Type",
             "default": "server_error"
           },
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "default": "internal_error"
+          },
           "message": {
             "type": "string",
             "title": "Message"
+          },
+          "command_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command Id"
+          },
+          "retryable": {
+            "type": "boolean",
+            "title": "Retryable",
+            "default": false
           }
         },
         "type": "object",

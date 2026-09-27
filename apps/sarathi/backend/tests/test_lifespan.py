@@ -2,10 +2,12 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from fastapi import FastAPI
 
 from sarathi.agent import RuntimeResources, close_resources
 from sarathi.main import lifespan
+from tantra import CoordinatorUnavailable
 
 
 class AsyncCloser:
@@ -68,3 +70,18 @@ async def test_lifespan_installs_resources_and_cleans_up(monkeypatch: Any) -> No
         assert calls == ["make"]
 
     assert calls == ["make", "close", "telemetry"]
+
+
+async def test_lifespan_fails_startup_when_the_coordinator_is_unavailable(monkeypatch: Any) -> None:
+    async def make() -> Any:
+        raise CoordinatorUnavailable("database unavailable")
+
+    monkeypatch.setattr("sarathi.main.make_resources", make)
+    monkeypatch.setattr("sarathi.main.get_settings", lambda: SimpleNamespace(UPLOAD_DIR="/tmp/sarathi-test-uploads"))
+    application = FastAPI()
+
+    with pytest.raises(CoordinatorUnavailable, match="database unavailable"):
+        async with lifespan(application):
+            raise AssertionError("startup unexpectedly succeeded")
+
+    assert not hasattr(application.state, "resources")

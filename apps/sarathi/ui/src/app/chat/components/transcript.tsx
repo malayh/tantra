@@ -174,7 +174,7 @@ function AskCard({
 }: {
   item: AskItem;
   banner: Banner | null;
-  onAskResponse: AskResponder;
+  onAskResponse?: AskResponder;
 }) {
   const [sent, setSent] = useState(false);
 
@@ -183,6 +183,7 @@ function AskCard({
   }, [banner]);
 
   const respond = (response: string) => {
+    if (!onAskResponse) return;
     setSent(true);
     onAskResponse(item.askId, response);
   };
@@ -200,7 +201,7 @@ function AskCard({
         </CardContent>
       )}
       <CardFooter className="gap-2">
-        {item.status === "pending" ? (
+        {item.status === "pending" && onAskResponse ? (
           <>
             <Button size="sm" disabled={sent} onClick={() => respond("allow")}>
               Approve
@@ -211,7 +212,13 @@ function AskCard({
           </>
         ) : (
           <p className="text-muted-foreground text-xs">
-            {item.status === "expired" ? "Expired" : item.allow === false ? "Denied" : "Approved"}
+            {item.status === "pending"
+              ? "Awaiting response"
+              : item.status === "expired"
+                ? "Expired"
+                : item.allow === false
+                  ? "Denied"
+                  : "Approved"}
           </p>
         )}
       </CardFooter>
@@ -246,7 +253,7 @@ function Item({
         />
       );
     case "ask":
-      return onAskResponse ? <AskCard item={item} banner={banner} onAskResponse={onAskResponse} /> : null;
+      return <AskCard item={item} banner={banner} onAskResponse={onAskResponse} />;
   }
 }
 
@@ -364,7 +371,7 @@ export function Transcript({
   onOpen,
 }: {
   store: ChatStore;
-  onAskResponse: AskResponder;
+  onAskResponse?: AskResponder;
   onOpen: (agentId: string) => void;
 }) {
   const turns = useStore(store, (state) => state.turns);

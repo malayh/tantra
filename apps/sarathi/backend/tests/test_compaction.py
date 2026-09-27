@@ -22,6 +22,7 @@ def resources_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SARATHI_MODELS", "test-model,other-model")
     monkeypatch.setenv("EMBEDDING_MODEL", "")
     monkeypatch.setattr("sarathi.agent.make_store", MemoryStore)
+    monkeypatch.setattr("sarathi.agent.PostgresCoordinator", lambda store: None)
     monkeypatch.setattr("sarathi.agent.get_telemetry", lambda: None)
     get_settings.cache_clear()
     _wire_tools.cache_clear()

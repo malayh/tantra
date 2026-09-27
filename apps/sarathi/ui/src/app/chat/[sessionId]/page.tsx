@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import { useStore } from "zustand";
 
 import { useListActors, useListSessions } from "@/generated/api/sessions/sessions";
@@ -16,15 +16,17 @@ import { composerDisabled, createChatStore } from "../state";
 
 export default function SessionPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
+  const readonly = useSearchParams().get("view") === "readonly";
   const store = useMemo(() => createChatStore(sessionId), [sessionId]);
-  const { sendFrame, openChild, closeChild, connected, ready, running, pendingAsk } = useChatSocket(sessionId, store);
+  const { sendFrame, openChild, closeChild, connected, ready, running, pendingAsk, retryCommand, writerLost } =
+    useChatSocket(sessionId, store, readonly);
   const banner = useStore(store, (state) => state.banner);
   const actors = useStore(store, (state) => state.actors);
   const openChildId = useStore(store, (state) => state.openChildId);
   const childJournal = useStore(store, (state) =>
     state.openChildId === null ? undefined : state.children[state.openChildId],
   );
-  const { data: sessions } = useListSessions();
+  const { data: sessions } = useListSessions({ query: { refetchInterval: 2000 } });
   const { data: polledActors } = useListActors(sessionId, { query: { refetchInterval: 2000 } });
   const current = sessions?.find((item) => item.id === sessionId);
   const openActor = actors.find((actor) => actor.agent_id === openChildId);
@@ -42,8 +44,9 @@ export default function SessionPage() {
           <ModelPicker
             sessionId={sessionId}
             model={current?.model}
-            disabled={!ready || running || pendingAsk !== null}
+            disabled={readonly || !ready || running || pendingAsk !== null}
           />
+          {readonly && <span className="text-muted-foreground text-xs">Read-only</span>}
           <span
             title={connected ? "Connected" : "Disconnected"}
             className={cn("ml-auto size-2 rounded-full", connected ? "bg-green-500" : "bg-muted-foreground")}
@@ -52,8 +55,11 @@ export default function SessionPage() {
 
         <Transcript
           store={store}
-          onAskResponse={(askId, response) =>
-            sendFrame({ type: "ask_response", command_id: commandId(), ask_id: askId, response })
+          onAskResponse={
+            readonly
+              ? undefined
+              : (askId, response) =>
+                  sendFrame({ type: "ask_response", command_id: commandId(), ask_id: askId, response })
           }
           onOpen={openChild}
         />
@@ -66,6 +72,11 @@ export default function SessionPage() {
                 Reload
               </button>
             )}
+            {banner.kind === "retry" && banner.commandId && (
+              <button type="button" className="ml-auto underline" onClick={() => retryCommand(banner.commandId!)}>
+                Retry
+              </button>
+            )}
           </div>
         )}
 
@@ -73,8 +84,8 @@ export default function SessionPage() {
           <ActorStrip actors={actors} selected={openChildId} onOpen={openChild} />
           <Composer
             key={sessionId}
-            disabled={composerDisabled(ready, connected, banner?.kind === "writer", pendingAsk !== null)}
-            running={running}
+            disabled={composerDisabled(ready, connected, writerLost, pendingAsk !== null, readonly)}
+            running={running && !readonly}
             onSend={(text, attachments) =>
               sendFrame({ type: "user_message", command_id: commandId(), text, attachments })
             }

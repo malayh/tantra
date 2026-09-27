@@ -2,10 +2,11 @@ import os
 from collections.abc import Iterator
 
 import pytest
+from opentelemetry.util.http import parse_excluded_urls
 
 from sarathi.agent import Sarathi, Subagent, _wire_tools
 from sarathi.config import get_settings
-from sarathi.telemetry import get_telemetry, shutdown_telemetry
+from sarathi.telemetry import _INSTRUMENTATION_EXCLUDED_URLS, get_telemetry, shutdown_telemetry
 from tantra import FakeProvider, MemoryStore, Runtime
 from tantra.telemetry import Telemetry
 
@@ -38,6 +39,14 @@ def test_telemetry_is_off_without_an_endpoint(monkeypatch: pytest.MonkeyPatch, u
 
     assert get_telemetry() is None
     shutdown_telemetry()
+
+
+def test_http_instrumentation_excludes_websocket_query_strings() -> None:
+    excluded = parse_excluded_urls(_INSTRUMENTATION_EXCLUDED_URLS)
+
+    assert excluded.url_disabled("ws://localhost/api/ws/sessions/root?token=redacted")
+    assert excluded.url_disabled("http://localhost/api/health")
+    assert not excluded.url_disabled("http://localhost/api/sessions")
 
 
 def test_an_endpoint_wires_an_env_configured_tracer_onto_the_runtime(

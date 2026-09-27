@@ -244,6 +244,113 @@ test("actor statuses drive running controls and complete labels", () => {
   ]);
   assert.equal(composerDisabled(true, true, false, false), false);
   assert.equal(composerDisabled(true, true, false, true), true);
+  assert.equal(composerDisabled(true, true, false, false, true), true);
+});
+
+test("read-only subscriptions never claim the writer", () => {
+  const store = createChatStore(root);
+  assert.deepEqual(subscriptionFrames(store.getState(), root, false), [
+    { type: "subscribe", agent_id: root, after: 0, writable: false },
+  ]);
+});
+
+test("outbox preserves order and removes commands only after durable journal acknowledgement", () => {
+  const store = createChatStore(root);
+  const answer = "55555555555555555555555555555555";
+  const cancel = "66666666666666666666666666666666";
+  store.getState().enqueueCommand({ type: "user_message", command_id: command, text: "one", attachments: [] });
+  store.getState().enqueueCommand({ type: "ask_response", command_id: answer, ask_id: child, response: "allow" });
+  store.getState().enqueueCommand({ type: "cancel", command_id: cancel });
+  store.getState().markCommandSent(command);
+
+  assert.deepEqual(
+    store.getState().outbox.map((entry) => [entry.frame.command_id, entry.attempts]),
+    [
+      [command, 1],
+      [answer, 0],
+      [cancel, 0],
+    ],
+  );
+
+  store.getState().dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "one" }));
+  ready(store);
+  assert.deepEqual(
+    store.getState().outbox.map((entry) => entry.frame.command_id),
+    [answer, cancel],
+  );
+  store.getState().dispatch(
+    event(root, 2, {
+      type: "ask_answered",
+      ask_id: child,
+      response: { kind: "approval", allow: true },
+      command_id: answer,
+    }),
+  );
+  store.getState().dispatch(event(root, 3, { type: "cancellation_requested", command_id: cancel, targets: {} }));
+  assert.deepEqual(store.getState().outbox, []);
+});
+
+test("bounded automatic retries pause for explicit same-UUID retry", () => {
+  const store = createChatStore(root);
+  store.getState().enqueueCommand({ type: "cancel", command_id: command });
+  store.getState().markCommandSent(command);
+  store.getState().markCommandSent(command);
+  store.getState().markCommandSent(command);
+  store.getState().requireRetry(command);
+  assert.equal(store.getState().outbox[0].status, "manual");
+  assert.deepEqual(store.getState().banner, {
+    kind: "retry",
+    message: "The command was not acknowledged. Retry with the same command ID?",
+    commandId: command,
+  });
+
+  store.getState().retryCommand(command);
+  assert.deepEqual(
+    { attempts: store.getState().outbox[0].attempts, status: store.getState().outbox[0].status },
+    { attempts: 0, status: "pending" },
+  );
+  assert.equal(store.getState().banner, null);
+});
+
+test("definitive failure removes the head so the next command can advance", () => {
+  const store = createChatStore(root);
+  const next = "55555555555555555555555555555555";
+  store.getState().enqueueCommand({ type: "cancel", command_id: command });
+  store.getState().enqueueCommand({ type: "user_message", command_id: next, text: "next", attachments: [] });
+
+  store.getState().failCommand(command, "rejected");
+
+  assert.equal(store.getState().outbox[0].frame.command_id, next);
+  assert.deepEqual(store.getState().banner, { kind: "error", message: "rejected", commandId: command });
+});
+
+test("disconnect preserves transcript, cursors, outbox, and pending asks", () => {
+  const store = createChatStore(root);
+  const askId = "55555555555555555555555555555555";
+  const retainedCommand = "66666666666666666666666666666666";
+  ready(store);
+  store.getState().enqueueCommand({ type: "cancel", command_id: retainedCommand });
+  store.getState().dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "queued" }));
+  store.getState().dispatch(event(root, 2, { type: "turn_started", turn_id: command, input: "queued" }));
+  store
+    .getState()
+    .dispatch(event(root, 3, { type: "sample_started", turn_id: command, sample_id: "sample", model: "m" }));
+  store.getState().dispatch(
+    event(root, 4, {
+      type: "ask_raised",
+      ask_id: askId,
+      call_id: "call",
+      request: { kind: "approval", title: "Approve", body: "root" },
+    }),
+  );
+
+  store.getState().setReady(false);
+
+  assert.equal(store.getState().ready, false);
+  assert.equal(store.getState().cursors[root], 4);
+  assert.equal(store.getState().turns[0].input, "queued");
+  assert.equal(store.getState().outbox[0].frame.command_id, retainedCommand);
+  assert.deepEqual(pendingAsk(store.getState().turns), { askId });
 });
 
 test("root journal drives busy state immediately and clears before the next poll", () => {

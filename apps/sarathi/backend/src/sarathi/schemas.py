@@ -143,6 +143,7 @@ class AskExpiredFrame(BaseModel):
     type: Literal["ask_expired"] = "ask_expired"
     agent_id: WireId
     ask_id: WireId
+    command_id: WireId | None = None
     message: str
 
 
@@ -151,9 +152,20 @@ class TitleUpdatedFrame(BaseModel):
     title: str
 
 
+class HeaderUpdatedFrame(BaseModel):
+    type: Literal["header_updated"] = "header_updated"
+    title: str | None = None
+    model: str | None = None
+
+
 class ServerErrorFrame(BaseModel):
     type: Literal["server_error"] = "server_error"
+    code: str = "internal_error"
     message: str
+    command_id: WireId | None = None
+    retryable: bool = False
 
 
-ServerFrame = EventFrame | SubscriptionReadyFrame | AskExpiredFrame | TitleUpdatedFrame | ServerErrorFrame
+ServerFrame = (
+    EventFrame | SubscriptionReadyFrame | AskExpiredFrame | TitleUpdatedFrame | HeaderUpdatedFrame | ServerErrorFrame
+)

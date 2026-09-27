@@ -14,6 +14,7 @@ _OTEL_VARS = (
     "OTEL_RESOURCE_ATTRIBUTES",
     "OTEL_SERVICE_NAME",
 )
+_INSTRUMENTATION_EXCLUDED_URLS = "api/health,api/ws"
 
 _logger_provider: Any = None
 
@@ -53,7 +54,7 @@ def setup_instrumentation(app: FastAPI) -> None:
     root.setLevel(logging.INFO)
     for name in ("uvicorn", "uvicorn.access"):
         logging.getLogger(name).addHandler(handler)
-    FastAPIInstrumentor.instrument_app(app, excluded_urls="api/health")
+    FastAPIInstrumentor.instrument_app(app, excluded_urls=_INSTRUMENTATION_EXCLUDED_URLS)
     SQLAlchemyInstrumentor().instrument(engine=get_engine().sync_engine)
 
 

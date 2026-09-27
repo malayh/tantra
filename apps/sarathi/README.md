@@ -14,14 +14,14 @@ A deep-search chat system in the style of Perplexity — ask anything, watch it 
 - **Adaptive compaction** — each actor keeps an independent durable summary and bounded recent tail using configured, discovered, or conservative model limits.
 - **Stop that works** — one click sends a durable cancellation command for the whole actor tree, and the thread stays usable.
 - **Human-in-the-loop** — root memory writes suspend behind an approval card; subagents have no approval-gated tools or human asks.
-- **Durability** — each actor has an independent journal, including streaming deltas; reconnect replays after that actor's browser cursor while execution stays in the process-scoped Runtime.
+- **Durability** — each actor has an independent journal, including streaming deltas; reconnect through either backend replays after that actor's browser cursor while PostgreSQL coordinates the single execution owner.
 - **Per-user memory** — `memory_tools(scope=...)` stamps every row with the tenant; recall and the memory panel never cross users.
 - **Document grounding** — upload a PDF, the agent reads it with `read_doc` and answers from it.
 - **Model switching** — per-session model updates are atomic and apply to the next turn.
 
 ## Stack
 
-- `backend/` — FastAPI + tantra, Postgres (pgvector) event-sourced store, WebSocket per session.
+- `backend/` — two FastAPI + tantra processes, a PostgreSQL coordinator and event-sourced store, and WebSockets served through Nginx.
 - `ui/` — Next.js 15, React 19, Tailwind v4, shadcn/ui; API client generated from OpenAPI (Orval).
 
 ## Run it
@@ -49,11 +49,13 @@ Set in `.env`:
 docker compose up --build -d
 ```
 
-Open http://localhost:3000, sign up, chat.
+Open http://localhost:3001, sign up, chat. Nginx serves the API and WebSockets on http://localhost:8001 and round-robins both backends without affinity.
 
-Run exactly one backend process. Runtime writer ownership and actor wakeups are process-local; a shared database does not coordinate multiple workers. Storage created by Tantra 1.0 upgrades to 1.1 without a migration. Pre-1.0 storage still requires a fresh database. Legacy `researcher` history remains readable but cannot resume; new work uses `subagent`.
+Both backends use the same image, configuration, database, and uploads volume. PostgreSQL leases one Runtime as the execution owner for each root while writer claims, commands, journal readers, and recovery work across either backend. Add `?view=readonly` to a chat URL for an observing tab that never claims the writer. Storage created by Tantra 1.0 upgrades to 1.1 without a destructive migration. Pre-1.0 storage still requires a fresh database. Legacy `researcher` history remains readable but cannot resume; new work uses `subagent`.
 
-A backend restart interrupts crash-time work on the next accepted human message. Replayed asks are not answerable because asks are live-only. `docker compose restart` does not re-read `.env` — after editing it, recreate with `docker compose up -d backend`.
+After an owner loss, the next writable reconnect or mutation recovers the whole root after lease expiry, interrupts abandoned started turns, expires asks, and drains accepted unstarted inputs. `docker compose restart` does not re-read `.env` — after editing it, recreate with `docker compose up -d backend_a backend_b ui`.
+
+For deterministic coordinator tests, start the isolated E2E project with `docker compose -p tantra011e2e -f docker-compose.yaml -f docker-compose.e2e.yaml up --build -d`. Its separate volumes and network use disposable Nginx/API and UI ports `127.0.0.1:18000` and `127.0.0.1:13001`; backend A uses `127.0.0.1:18001`, backend B uses `127.0.0.1:18002`, and the loopback-only provider/tool gate uses `127.0.0.1:18090`. The override defaults `E2E_OPENAI_BASE_URL` to that gate and shortens only the disposable stack's lease. Each port and the lease have environment variable overrides, so this stack can run beside the default deployment.
 
 ## Development
 
@@ -64,3 +66,5 @@ UI (from `ui/`): `yarn install`, then `just runserver`; `yarn typegen` regenerat
 ## E2E
 
 `e2e/runbook.md` — scenarios driven live through a browser agent, reports land in `e2e/reports/`.
+
+`e2e/coordinator.md` — disposable two-backend failure matrix, deterministic gate controls, evidence queries, and recovery notes.

@@ -29,6 +29,7 @@ import type {
   CancelFrame,
   EventFrame,
   HTTPValidationError,
+  HeaderUpdatedFrame,
   Health200,
   ServerErrorFrame,
   SubscribeFrame,
@@ -162,7 +163,7 @@ export const wsTypes = (
 ) => {
 
 
-      return customInstance<EventFrame | SubscriptionReadyFrame | AskExpiredFrame | TitleUpdatedFrame | ServerErrorFrame>(
+      return customInstance<EventFrame | SubscriptionReadyFrame | AskExpiredFrame | TitleUpdatedFrame | HeaderUpdatedFrame | ServerErrorFrame>(
       {url: `/api/meta/ws-types`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
       data: subscribeFrameUnsubscribeFrameUserMessageFrameAskResponseFrameCancelFrame, signal

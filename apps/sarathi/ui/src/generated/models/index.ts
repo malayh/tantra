@@ -30,6 +30,7 @@ export * from './eventFrame';
 export * from './freeText';
 export * from './freeTextExtra';
 export * from './freeTextResponse';
+export * from './headerUpdatedFrame';
 export * from './health200';
 export * from './hTTPValidationError';
 export * from './inputQueued';

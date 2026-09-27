@@ -44,6 +44,18 @@ def test_tools_include_web_search_when_a_brave_key_is_set(monkeypatch: pytest.Mo
     assert _names(Subagent) == ["web_search", "web_fetch", "read_doc", "memory_recall"]
 
 
+def test_e2e_gate_is_only_wired_when_its_url_is_set(monkeypatch: pytest.MonkeyPatch, unwired: None) -> None:
+    monkeypatch.setenv("BRAVE_API_KEY", "")
+    monkeypatch.setenv("E2E_GATE_URL", "http://gate:8090")
+    get_settings.cache_clear()
+    _wire_tools.cache_clear()
+
+    _wire_tools()
+
+    assert _names(Sarathi) == ["e2e_gate", "web_fetch", "read_doc", "memory_recall", "memory_write"]
+    assert _names(Subagent) == ["e2e_gate", "web_fetch", "read_doc", "memory_recall"]
+
+
 def _record_web_fetch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
 

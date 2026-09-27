@@ -1,3 +1,27 @@
+x-backend: &backend
+  image: ${SARATHI_BACKEND_IMAGE:-sarathi-backend:local}
+  build:
+    context: ../..
+    dockerfile: apps/sarathi/backend/Dockerfile
+  env_file: .env
+  volumes:
+    - uploads:${UPLOAD_DIR:-/data/uploads}
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  healthcheck:
+    test:
+      [
+        "CMD",
+        "python",
+        "-c",
+        "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')",
+      ]
+    interval: 10s
+    timeout: 5s
+    retries: 10
+    start_period: 10s
+
 services:
   db:
     image: pgvector/pgvector:pg17
@@ -14,6 +38,7 @@ services:
       retries: 20
 
   migrate:
+    image: ${SARATHI_BACKEND_IMAGE:-sarathi-backend:local}
     build:
       context: ../..
       dockerfile: apps/sarathi/backend/Dockerfile
@@ -25,30 +50,29 @@ services:
         condition: service_healthy
     restart: "no"
 
-  backend:
-    build:
-      context: ../..
-      dockerfile: apps/sarathi/backend/Dockerfile
-    env_file: .env
+  backend_a:
+    <<: *backend
+
+  backend_b:
+    <<: *backend
+
+  nginx:
+    image: nginx:1.27.5-alpine
     ports:
-      - "8001:8000"
+      - "${SARATHI_API_PORT:-8001}:8000"
     volumes:
-      - uploads:${UPLOAD_DIR:-/data/uploads}
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      backend_a:
+        condition: service_healthy
+      backend_b:
+        condition: service_healthy
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')",
-        ]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/api/health"]
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 10s
+      start_period: 5s
 
   ui:
     build:
@@ -57,11 +81,11 @@ services:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8001}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?NEXTAUTH_SECRET is required}
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3001}
-      API_URL_INTERNAL: ${API_URL_INTERNAL:-http://backend:8001}
+      API_URL_INTERNAL: http://nginx:8000
     ports:
-      - "3001:3000"
+      - "${SARATHI_UI_PORT:-3001}:3000"
     depends_on:
-      backend:
+      nginx:
         condition: service_healthy
     healthcheck:
       test:
@@ -69,7 +93,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://localhost:3001').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+          "fetch('http://localhost:3000').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
         ]
       interval: 10s
       timeout: 5s

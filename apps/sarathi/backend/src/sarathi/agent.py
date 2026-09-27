@@ -8,6 +8,7 @@ from fastapi import Depends
 from starlette.requests import HTTPConnection
 
 from sarathi.config import get_settings
+from sarathi.e2e import E2EPostgresCoordinator, e2e_gate
 from sarathi.telemetry import get_telemetry
 from tantra import (
     Agent,
@@ -16,6 +17,7 @@ from tantra import (
     ModelLimits,
     OpenAICompatible,
     OpenAICompatibleEmbedder,
+    PostgresCoordinator,
     PostgresStore,
     PruneThenSummarize,
     Runtime,
@@ -59,7 +61,8 @@ class Sarathi(Agent):
 def _wire_tools() -> None:
     settings = get_settings()
     search = [web_search(settings.BRAVE_API_KEY)] if settings.BRAVE_API_KEY else []
-    non_interactive = [*search, web_fetch(proxy=settings.WEB_PROXY), read_doc(), memory_recall]
+    gate = [e2e_gate(settings.E2E_GATE_URL)] if settings.E2E_GATE_URL else []
+    non_interactive = [*search, *gate, web_fetch(proxy=settings.WEB_PROXY), read_doc(), memory_recall]
     Sarathi.tools = [*non_interactive, memory_write]
     Subagent.tools = non_interactive
 
@@ -99,6 +102,17 @@ async def make_resources() -> RuntimeResources:
     store = make_store()
     await store.setup()
     memory = BuiltinMemory(store, embedder)
+    lease_ttl = settings.E2E_COORDINATOR_LEASE_TTL
+    if settings.E2E_GATE_URL:
+        coordinator = E2EPostgresCoordinator(
+            store,
+            settings.E2E_GATE_URL,
+            lease_ttl=lease_ttl if lease_ttl is not None else 60.0,
+        )
+    else:
+        coordinator = (
+            PostgresCoordinator(store) if lease_ttl is None else PostgresCoordinator(store, lease_ttl=lease_ttl)
+        )
     runtime = Runtime(
         provider,
         store,
@@ -109,7 +123,16 @@ async def make_resources() -> RuntimeResources:
         memory=memory,
         compactor=PruneThenSummarize(),
         telemetry=get_telemetry(),
+        coordinator=coordinator,
     )
+    try:
+        await runtime.start()
+    except BaseException:
+        closers = [runtime.aclose(), provider.aclose(), store.close()]
+        if embedder is not None:
+            closers.append(embedder.aclose())
+        await asyncio.gather(*closers, return_exceptions=True)
+        raise
     return RuntimeResources(runtime=runtime, provider=provider, store=store, memory=memory, embedder=embedder)
 
 

@@ -11,5 +11,6 @@ export interface AskExpiredFrame {
   agent_id: string;
   /** @pattern ^[0-9a-f]{32}$ */
   ask_id: string;
+  command_id?: string | null;
   message: string;
 }

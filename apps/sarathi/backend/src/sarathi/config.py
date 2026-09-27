@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     TELEMETRY_CAPTURE_CONTENT: bool = False
     EMBEDDING_MODEL: str | None = None
     SARATHI_CONTEXT_WINDOW: int | None = None
+    E2E_GATE_URL: str = ""
+    E2E_COORDINATOR_LEASE_TTL: float | None = None
     UPLOAD_DIR: str = "/data/uploads"
     CORS_ORIGINS: str = "http://localhost:3000"
 

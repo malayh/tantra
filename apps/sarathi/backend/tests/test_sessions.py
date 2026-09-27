@@ -3,9 +3,11 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
+import pytest
 from conftest import SharedStore
+from fastapi import FastAPI
 
-from tantra import SessionHeader, TurnSummary
+from tantra import CoordinatorUnavailable, ModelChangeBusy, SessionHeader, TurnSummary
 
 Signup = Callable[..., Awaitable[str]]
 NewSession = Callable[..., Awaitable[str]]
@@ -65,6 +67,50 @@ async def test_patch_session_updates_model(client: httpx.AsyncClient, signup: Si
 
     listed = await client.get("/api/sessions", headers=_auth(token))
     assert listed.json()[0]["model"] == "other-model"
+
+
+async def test_patch_session_maps_active_model_race_to_conflict(
+    client: httpx.AsyncClient,
+    store: SharedStore,
+    signup: Signup,
+    new_session: NewSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = await signup()
+    sid = await new_session(token)
+
+    async def reject_active(*args: object, **kwargs: object) -> object:
+        raise ModelChangeBusy("model cannot change while coordinated work is active")
+
+    monkeypatch.setattr(store, "patch_header", reject_active)
+    response = await client.patch(f"/api/sessions/{sid}", json={"model": "other-model"}, headers=_auth(token))
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "model cannot change while coordinated work is active"}
+
+
+async def test_patch_session_preserves_unrelated_coordinator_failures_as_server_errors(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    store: SharedStore,
+    signup: Signup,
+    new_session: NewSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = await signup()
+    sid = await new_session(token)
+
+    async def fail_database(*args: object, **kwargs: object) -> object:
+        raise CoordinatorUnavailable("database unavailable")
+
+    monkeypatch.setattr(store, "patch_header", fail_database)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as server_client:
+        response = await server_client.patch(
+            f"/api/sessions/{sid}", json={"model": "other-model"}, headers=_auth(token)
+        )
+
+    assert response.status_code == 500
 
 
 async def test_patch_session_unknown_model_rejected(

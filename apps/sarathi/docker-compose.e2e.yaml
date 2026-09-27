@@ -1,0 +1,66 @@
+name: tantra011e2e
+
+services:
+  gate:
+    image: ${SARATHI_BACKEND_IMAGE:-sarathi-backend:local}
+    build:
+      context: ../..
+      dockerfile: apps/sarathi/backend/Dockerfile
+    working_dir: /app/apps/sarathi/backend
+    command: ["uv", "run", "--no-sync", "uvicorn", "e2e_provider:app", "--host", "0.0.0.0", "--port", "8090"]
+    volumes:
+      - ./e2e/provider.py:/app/apps/sarathi/backend/e2e_provider.py:ro
+    ports:
+      - "127.0.0.1:${SARATHI_E2E_GATE_PORT:-18090}:8090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  backend_a:
+    ports:
+      - "127.0.0.1:${SARATHI_BACKEND_A_PORT:-18001}:8000"
+    environment:
+      CORS_ORIGINS: http://localhost:${SARATHI_E2E_UI_PORT:-13001}
+      OPENAI_BASE_URL: ${E2E_OPENAI_BASE_URL:-http://gate:8090/v1}
+      OPENAI_API_KEY: e2e
+      SARATHI_MODELS: e2e-model
+      SARATHI_CONTEXT_WINDOW: "128000"
+      EMBEDDING_MODEL: ""
+      E2E_GATE_URL: http://gate:8090
+      E2E_COORDINATOR_LEASE_TTL: ${E2E_COORDINATOR_LEASE_TTL:-6}
+    depends_on:
+      gate:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  backend_b:
+    ports:
+      - "127.0.0.1:${SARATHI_BACKEND_B_PORT:-18002}:8000"
+    environment:
+      CORS_ORIGINS: http://localhost:${SARATHI_E2E_UI_PORT:-13001}
+      OPENAI_BASE_URL: ${E2E_OPENAI_BASE_URL:-http://gate:8090/v1}
+      OPENAI_API_KEY: e2e
+      SARATHI_MODELS: e2e-model
+      SARATHI_CONTEXT_WINDOW: "128000"
+      EMBEDDING_MODEL: ""
+      E2E_GATE_URL: http://gate:8090
+      E2E_COORDINATOR_LEASE_TTL: ${E2E_COORDINATOR_LEASE_TTL:-6}
+    depends_on:
+      gate:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  nginx:
+    ports: !override
+      - "127.0.0.1:${SARATHI_E2E_API_PORT:-18000}:8000"
+
+  ui:
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:${SARATHI_E2E_API_PORT:-18000}
+      NEXTAUTH_URL: http://localhost:${SARATHI_E2E_UI_PORT:-13001}
+    ports: !override
+      - "127.0.0.1:${SARATHI_E2E_UI_PORT:-13001}:3000"

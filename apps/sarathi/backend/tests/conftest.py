@@ -133,16 +133,18 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
         yield http_client
 
 
-Socket = Callable[[str, str], AbstractAsyncContextManager[AsyncWebSocketSession]]
+Socket = Callable[..., AbstractAsyncContextManager[AsyncWebSocketSession]]
 
 
 @pytest.fixture
 def socket(app: FastAPI) -> Socket:
     @asynccontextmanager
-    async def open_socket(sid: str, token: str) -> AsyncIterator[AsyncWebSocketSession]:
+    async def open_socket(sid: str, token: str, view: str | None = None) -> AsyncIterator[AsyncWebSocketSession]:
         transport = ASGIWebSocketTransport(app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
             url = f"/api/ws/sessions/{sid}?token={token}"
+            if view is not None:
+                url += f"&view={view}"
             async with aconnect_ws(url, http_client, keepalive_ping_interval_seconds=None) as ws:
                 yield ws
 

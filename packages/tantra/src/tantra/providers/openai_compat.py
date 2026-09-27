@@ -223,6 +223,8 @@ class OpenAICompatible:
                 retryable=True if isinstance(exc, openai.APIConnectionError) else None,
                 context_overflow=_context_overflow(exc),
             ) from exc
+        except httpx.HTTPError as exc:
+            raise ProviderError(str(exc), retryable=True) from exc
         except (TypeError, ValueError, AttributeError, KeyError, AssertionError) as exc:
             raise ProviderError(f"malformed stream from {self.base_url}: {exc!r}") from exc
 

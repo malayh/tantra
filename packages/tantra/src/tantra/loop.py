@@ -132,6 +132,7 @@ class TurnEngine:
         ask_future: Callable[[AskRaised], asyncio.Future[AskResponse]] | None = None,
         allow_asks: bool = True,
         append_events: Callable[[Sequence[SessionEvent]], Awaitable[list[Stamped]]] | None = None,
+        patch_header: Callable[..., Awaitable[SessionHeader]] | None = None,
         terminal_tool: str | None = None,
     ) -> None:
         self.store = store
@@ -154,6 +155,7 @@ class TurnEngine:
         self.ask_future = ask_future
         self.allow_asks = allow_asks
         self.append_events = append_events
+        self.patch_header = patch_header
         self.terminal_tool = terminal_tool
         self.schemas = [tool.schema for tool in tools.values()]
         if agent.output_schema is not None:
@@ -662,7 +664,8 @@ class TurnEngine:
             parts, calls, invalid = self._parts(sample_id, end)
             await self._append(parts)
             self.header.usage = accumulate(self.header.usage, end.usage)
-            await self.store.patch_header(self.header.id, usage=self.header.usage)
+            patch = self.patch_header or self.store.patch_header
+            await patch(self.header.id, usage=self.header.usage)
             if not calls:
                 return await self._finish(TurnCompleted(turn_id=self.turn.turn_id, stop_reason="completed"))
             capped = sample_number + 1 >= self.agent.max_steps

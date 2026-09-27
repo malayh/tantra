@@ -271,6 +271,27 @@ async def test_mid_stream_error_frame_raises(tmp_path: Path, provider) -> None:
         await collect(provider(replay(tmp_path, chunks)).stream(REQ))
 
 
+async def test_transport_error_during_sse_body_is_retryable_provider_error(provider) -> None:
+    class TimedOutStream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield frame({"content": "partial"}).encode()
+            raise httpx.ReadTimeout("gate timed out")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=TimedOutStream(),
+            request=request,
+        )
+
+    with pytest.raises(ProviderError, match="gate timed out") as caught:
+        await collect(provider(httpx.MockTransport(handler)).stream(REQ))
+
+    assert caught.value.retryable is True
+    assert isinstance(caught.value.__cause__, httpx.ReadTimeout)
+
+
 async def test_stream_without_data_frames_raises(tmp_path: Path, provider) -> None:
     with pytest.raises(ProviderError, match="no SSE data frames"):
         await collect(provider(replay(tmp_path, ["data: [DONE]\n\n"])).stream(REQ))

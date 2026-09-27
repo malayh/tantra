@@ -8,8 +8,23 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from tantra.errors import CorruptLog, InvalidCommandReuse, SessionExists, SessionNotFound, TantraError
-from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
+from tantra.errors import (
+    CoordinatorUnavailable,
+    CorruptLog,
+    InvalidCommandReuse,
+    ModelChangeBusy,
+    SessionExists,
+    SessionNotFound,
+    TantraError,
+)
+from tantra.events import (
+    InputQueued,
+    SessionEvent,
+    SessionHeader,
+    SessionStatus,
+    Stamped,
+    Usage,
+)
 from tantra.memory import MemoryRecord
 from tantra.stores.base import UNSET, EnqueueResult, apply_patch, reduce_header
 
@@ -58,6 +73,243 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
     (
         "CREATE INDEX IF NOT EXISTS memories_metadata_idx"
         " ON {schema}.memories USING gin ((row->'metadata') jsonb_path_ops)",
+    ),
+    (
+        """
+        CREATE TABLE IF NOT EXISTS {schema}.coordinator_roots (
+            root_id text PRIMARY KEY,
+            owner_instance text,
+            generation bigint NOT NULL DEFAULT 0,
+            expires_at timestamptz,
+            writer_connection text,
+            recovery jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+            updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS {schema}.coordinator_activity (
+            root_id text NOT NULL REFERENCES {schema}.coordinator_roots(root_id) ON DELETE CASCADE,
+            actor_id text NOT NULL,
+            active boolean NOT NULL,
+            updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            PRIMARY KEY (root_id, actor_id)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS {schema}.coordinator_requests (
+            request_id uuid PRIMARY KEY,
+            root_id text NOT NULL REFERENCES {schema}.coordinator_roots(root_id) ON DELETE CASCADE,
+            destination_instance text NOT NULL,
+            destination_generation bigint NOT NULL,
+            envelope jsonb NOT NULL,
+            reply jsonb,
+            deadline timestamptz NOT NULL,
+            created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            completed_at timestamptz
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS coordinator_requests_destination_idx
+        ON {schema}.coordinator_requests
+        (destination_instance, destination_generation, created_at, request_id)
+        WHERE reply IS NULL
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS coordinator_requests_cleanup_idx
+        ON {schema}.coordinator_requests (completed_at, deadline)
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS {schema}.coordinator_changes (
+            id bigserial PRIMARY KEY,
+            root_id text NOT NULL,
+            kind text NOT NULL,
+            actor_id text,
+            seq bigint,
+            created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS coordinator_changes_root_idx
+        ON {schema}.coordinator_changes (root_id, id)
+        """,
+        """
+        CREATE OR REPLACE FUNCTION {schema}.assert_coordinated_fence(candidate text) RETURNS void AS $$
+        DECLARE
+            enrolled boolean;
+            owner text;
+            fence_generation bigint;
+            fence_expires_at timestamptz;
+        BEGIN
+            IF candidate IS NULL THEN
+                RETURN;
+            END IF;
+            PERFORM pg_advisory_xact_lock(hashtextextended(candidate, 0));
+            SELECT true, owner_instance, generation, expires_at
+            INTO enrolled, owner, fence_generation, fence_expires_at
+            FROM {schema}.coordinator_roots WHERE root_id = candidate FOR UPDATE;
+            IF enrolled AND (
+                current_setting('tantra.root_id', true) = candidate
+                AND owner = current_setting('tantra.instance_id', true)
+                AND fence_generation::text = current_setting('tantra.generation', true)
+                AND fence_expires_at > clock_timestamp()
+            ) IS DISTINCT FROM TRUE THEN
+                RAISE EXCEPTION 'coordinated root % requires a valid ownership fence', candidate
+                    USING ERRCODE = '55000';
+            END IF;
+        END;
+        $$ LANGUAGE plpgsql
+        """,
+        """
+        CREATE OR REPLACE FUNCTION {schema}.guard_coordinated_write() RETURNS trigger AS $$
+        DECLARE
+            root text;
+            old_root text;
+            new_root text;
+        BEGIN
+            IF TG_TABLE_NAME = 'events' THEN
+                IF TG_OP <> 'INSERT' THEN
+                    SELECT COALESCE(NULLIF(header->>'root_id', ''), id) INTO old_root
+                    FROM {schema}.sessions WHERE id = OLD.session_id;
+                END IF;
+                IF TG_OP <> 'DELETE' THEN
+                    SELECT COALESCE(NULLIF(header->>'root_id', ''), id) INTO new_root
+                    FROM {schema}.sessions WHERE id = NEW.session_id;
+                END IF;
+            ELSE
+                IF TG_OP <> 'INSERT' THEN
+                    old_root := COALESCE(NULLIF(OLD.header->>'root_id', ''), OLD.id);
+                END IF;
+                IF TG_OP <> 'DELETE' THEN
+                    new_root := COALESCE(NULLIF(NEW.header->>'root_id', ''), NEW.id);
+                END IF;
+                IF TG_OP = 'UPDATE'
+                    AND OLD.id = NEW.id
+                    AND old_root IS NOT DISTINCT FROM new_root
+                    AND OLD.last_seq = NEW.last_seq
+                    AND OLD.parent_id IS NOT DISTINCT FROM NEW.parent_id
+                    AND OLD.created_at = NEW.created_at
+                    AND (OLD.header - ARRAY['title', 'metadata', 'updated_at'])
+                        = (NEW.header - ARRAY['title', 'metadata', 'updated_at']) THEN
+                    RETURN NEW;
+                END IF;
+            END IF;
+            IF old_root IS NOT NULL AND new_root IS NOT NULL
+                AND old_root IS DISTINCT FROM new_root THEN
+                PERFORM {schema}.assert_coordinated_fence(LEAST(old_root, new_root));
+                PERFORM {schema}.assert_coordinated_fence(GREATEST(old_root, new_root));
+            ELSE
+                PERFORM {schema}.assert_coordinated_fence(COALESCE(old_root, new_root));
+            END IF;
+            IF TG_OP = 'UPDATE' AND old_root IS DISTINCT FROM new_root
+                AND EXISTS (
+                    SELECT 1 FROM {schema}.coordinator_roots
+                    WHERE root_id = old_root OR root_id = new_root
+                ) THEN
+                RAISE EXCEPTION 'cannot move a row across coordinated roots'
+                    USING ERRCODE = '55000';
+            END IF;
+            IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'sessions' THEN
+                IF OLD.id IS DISTINCT FROM NEW.id AND EXISTS (
+                    SELECT 1 FROM {schema}.coordinator_roots
+                    WHERE root_id = old_root OR root_id = new_root
+                ) THEN
+                    RAISE EXCEPTION 'cannot move a row across coordinated roots'
+                        USING ERRCODE = '55000';
+                END IF;
+            END IF;
+            root := CASE WHEN TG_OP = 'INSERT' THEN new_root ELSE old_root END;
+            RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+        END;
+        $$ LANGUAGE plpgsql
+        """,
+        "DROP TRIGGER IF EXISTS sessions_coordinator_guard ON {schema}.sessions",
+        """
+        CREATE TRIGGER sessions_coordinator_guard
+        BEFORE INSERT OR UPDATE OR DELETE ON {schema}.sessions
+        FOR EACH ROW EXECUTE FUNCTION {schema}.guard_coordinated_write()
+        """,
+        "DROP TRIGGER IF EXISTS events_coordinator_guard ON {schema}.events",
+        """
+        CREATE TRIGGER events_coordinator_guard
+        BEFORE INSERT OR UPDATE OR DELETE ON {schema}.events
+        FOR EACH ROW EXECUTE FUNCTION {schema}.guard_coordinated_write()
+        """,
+    ),
+    (
+        """
+        CREATE OR REPLACE FUNCTION {schema}.guard_coordinated_write() RETURNS trigger AS $$
+        DECLARE
+            root text;
+            old_root text;
+            new_root text;
+        BEGIN
+            IF TG_TABLE_NAME = 'events' THEN
+                IF TG_OP <> 'INSERT' THEN
+                    SELECT COALESCE(NULLIF(header->>'root_id', ''), id) INTO old_root
+                    FROM {schema}.sessions WHERE id = OLD.session_id;
+                END IF;
+                IF TG_OP <> 'DELETE' THEN
+                    SELECT COALESCE(NULLIF(header->>'root_id', ''), id) INTO new_root
+                    FROM {schema}.sessions WHERE id = NEW.session_id;
+                END IF;
+            ELSE
+                IF TG_OP <> 'INSERT' THEN
+                    old_root := COALESCE(NULLIF(OLD.header->>'root_id', ''), OLD.id);
+                END IF;
+                IF TG_OP <> 'DELETE' THEN
+                    new_root := COALESCE(NULLIF(NEW.header->>'root_id', ''), NEW.id);
+                END IF;
+                IF TG_OP = 'UPDATE'
+                    AND OLD.id = NEW.id
+                    AND old_root IS NOT DISTINCT FROM new_root
+                    AND OLD.last_seq = NEW.last_seq
+                    AND OLD.parent_id IS NOT DISTINCT FROM NEW.parent_id
+                    AND OLD.created_at = NEW.created_at
+                    AND (OLD.header - ARRAY['title', 'metadata', 'updated_at'])
+                        = (NEW.header - ARRAY['title', 'metadata', 'updated_at']) THEN
+                    RETURN NEW;
+                END IF;
+                IF TG_OP = 'UPDATE'
+                    AND current_setting('tantra.model_patch_root', true) = old_root
+                    AND OLD.id = NEW.id
+                    AND old_root IS NOT DISTINCT FROM new_root
+                    AND OLD.last_seq = NEW.last_seq
+                    AND OLD.parent_id IS NOT DISTINCT FROM NEW.parent_id
+                    AND OLD.created_at = NEW.created_at
+                    AND (OLD.header - ARRAY['title', 'metadata', 'updated_at', 'model'])
+                        = (NEW.header - ARRAY['title', 'metadata', 'updated_at', 'model']) THEN
+                    RETURN NEW;
+                END IF;
+            END IF;
+            IF old_root IS NOT NULL AND new_root IS NOT NULL
+                AND old_root IS DISTINCT FROM new_root THEN
+                PERFORM {schema}.assert_coordinated_fence(LEAST(old_root, new_root));
+                PERFORM {schema}.assert_coordinated_fence(GREATEST(old_root, new_root));
+            ELSE
+                PERFORM {schema}.assert_coordinated_fence(COALESCE(old_root, new_root));
+            END IF;
+            IF TG_OP = 'UPDATE' AND old_root IS DISTINCT FROM new_root
+                AND EXISTS (
+                    SELECT 1 FROM {schema}.coordinator_roots
+                    WHERE root_id = old_root OR root_id = new_root
+                ) THEN
+                RAISE EXCEPTION 'cannot move a row across coordinated roots'
+                    USING ERRCODE = '55000';
+            END IF;
+            IF TG_OP = 'UPDATE' AND TG_TABLE_NAME = 'sessions' THEN
+                IF OLD.id IS DISTINCT FROM NEW.id AND EXISTS (
+                    SELECT 1 FROM {schema}.coordinator_roots
+                    WHERE root_id = old_root OR root_id = new_root
+                ) THEN
+                    RAISE EXCEPTION 'cannot move a row across coordinated roots'
+                        USING ERRCODE = '55000';
+                END IF;
+            END IF;
+            root := CASE WHEN TG_OP = 'INSERT' THEN new_root ELSE old_root END;
+            RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+        END;
+        $$ LANGUAGE plpgsql
+        """,
     ),
 )
 
@@ -130,6 +382,7 @@ class PostgresStore:
         async with self._lock:
             conn = await self._connection()
             async with conn.transaction():
+                await self._guard_session(conn, h.id)
                 cursor = await conn.execute(
                     self._sql("SELECT last_seq FROM {schema}.sessions WHERE id = %s FOR UPDATE"), (h.id,)
                 )
@@ -160,6 +413,9 @@ class PostgresStore:
         async with self._lock:
             conn = await self._connection()
             async with conn.transaction():
+                if any(value is not UNSET for value in (status, pending_ask, usage, finished)):
+                    await self._guard_session(conn, sid)
+                model_root = await self._prepare_model_patch(conn, sid) if model is not UNSET else None
                 cursor = await conn.execute(
                     self._sql("SELECT header, last_seq FROM {schema}.sessions WHERE id = %s FOR UPDATE"), (sid,)
                 )
@@ -168,6 +424,9 @@ class PostgresStore:
                     raise SessionNotFound(sid)
                 current = SessionHeader.model_validate(row[0])
                 current.last_seq = row[1]
+                root_id = current.root_id or current.id
+                if model_root is not None and root_id != model_root:
+                    raise CoordinatorUnavailable("session root changed while applying model patch")
                 stored = apply_patch(
                     current,
                     title=title,
@@ -182,12 +441,14 @@ class PostgresStore:
                     self._sql("UPDATE {schema}.sessions SET header = %s, metadata = %s WHERE id = %s"),
                     (_json(stored), Jsonb(stored.metadata), sid),
                 )
+                await self._publish_header_change(conn, root_id, sid)
                 return stored
 
     async def append(self, sid: str, events: Sequence[SessionEvent]) -> int:
         async with self._lock:
             conn = await self._connection()
             async with conn.transaction():
+                await self._guard_session(conn, sid)
                 cursor = await conn.execute(
                     self._sql("SELECT header, last_seq FROM {schema}.sessions WHERE id = %s FOR UPDATE"), (sid,)
                 )
@@ -217,6 +478,7 @@ class PostgresStore:
         async with self._lock:
             conn = await self._connection()
             async with conn.transaction():
+                await self._guard_session(conn, sid)
                 cursor = await conn.execute(
                     self._sql("SELECT header, last_seq FROM {schema}.sessions WHERE id = %s FOR UPDATE"),
                     (sid,),
@@ -409,6 +671,62 @@ class PostgresStore:
             )
             self._vector = await cursor.fetchone() is not None
         return self._vector
+
+    async def _guard_session(self, conn: Any, sid: str) -> None:
+        cursor = await conn.execute(
+            self._sql("SELECT COALESCE(NULLIF(header->>'root_id', ''), id) FROM {schema}.sessions WHERE id = %s"),
+            (sid,),
+        )
+        row = await cursor.fetchone()
+        root_id = row[0] if row is not None else sid
+        await conn.execute(self._sql("SELECT {schema}.assert_coordinated_fence(%s)"), (root_id,))
+
+    async def _prepare_model_patch(self, conn: Any, sid: str) -> str:
+        cursor = await conn.execute(
+            self._sql("SELECT COALESCE(NULLIF(header->>'root_id', ''), id) FROM {schema}.sessions WHERE id = %s"),
+            (sid,),
+        )
+        row = await cursor.fetchone()
+        root_id = row[0] if row is not None else sid
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (root_id,))
+        cursor = await conn.execute(
+            self._sql("SELECT 1 FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE"),
+            (root_id,),
+        )
+        if await cursor.fetchone() is None:
+            return root_id
+        cursor = await conn.execute(
+            self._sql(
+                "SELECT EXISTS ("
+                " SELECT 1 FROM {schema}.coordinator_activity WHERE root_id = %s AND active"
+                " UNION ALL SELECT 1 FROM {schema}.coordinator_requests"
+                " WHERE root_id = %s AND reply IS NULL AND deadline > clock_timestamp()"
+                " UNION ALL SELECT 1 FROM {schema}.sessions"
+                " WHERE COALESCE(NULLIF(header->>'root_id', ''), id) = %s"
+                " AND header->>'status' IN ('queued', 'running', 'awaiting_input')"
+                ")"
+            ),
+            (root_id, root_id, root_id),
+        )
+        if (await cursor.fetchone())[0]:
+            raise ModelChangeBusy("model cannot change while coordinated work is active")
+        await conn.execute("SELECT set_config('tantra.model_patch_root', %s, true)", (root_id,))
+        return root_id
+
+    async def _publish_header_change(self, conn: Any, root_id: str, sid: str) -> None:
+        await conn.execute(
+            self._sql(
+                "WITH change AS ("
+                " INSERT INTO {schema}.coordinator_changes (root_id, kind, actor_id)"
+                " SELECT %s, 'header', %s WHERE EXISTS ("
+                " SELECT 1 FROM {schema}.coordinator_roots WHERE root_id = %s"
+                ") RETURNING id"
+                ") SELECT pg_notify(%s, json_build_object("
+                " 'id', id, 'root_id', %s::text, 'kind', 'header', 'actor_id', %s::text, 'seq', NULL"
+                ")::text) FROM change"
+            ),
+            (root_id, sid, root_id, f"tantra_{abs(self._key):x}"[:63], root_id, sid),
+        )
 
 
 def _advisory_key(schema: str) -> int:

@@ -19,6 +19,24 @@ class WriterReplaced(TantraError): ...
 class WriterRequired(TantraError): ...
 
 
+class LeaseLost(TantraError): ...
+
+
+class CoordinatorUnavailable(TantraError): ...
+
+
+class ModelChangeBusy(TantraError): ...
+
+
+class CommandTimeout(TantraError):
+    def __init__(self, message: str, *, command_id: object | None = None) -> None:
+        super().__init__(message)
+        self.command_id = command_id
+
+
+class RemoteExecutionError(TantraError): ...
+
+
 class AskExpired(TantraError): ...
 
 

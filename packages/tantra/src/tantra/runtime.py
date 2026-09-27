@@ -5,6 +5,7 @@ import inspect
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4, uuid5
 
@@ -12,10 +13,29 @@ from pydantic import TypeAdapter
 
 from tantra.agent import Agent, agent_name, build_name_table
 from tantra.ask import ApprovalResponse, AskResponse
+from tantra.coordinator import (
+    AnswerPayload,
+    CancelPayload,
+    ClaimWriterPayload,
+    CommandEnvelope,
+    CommandReply,
+    CoordinatedStoreProtocol,
+    Coordinator,
+    Ownership,
+    PostgresCoordinator,
+    ReleaseWriterPayload,
+    SendPayload,
+    WriterToken,
+)
 from tantra.errors import (
     AskExpired,
+    CommandTimeout,
+    CoordinatorUnavailable,
     InvalidCommandReuse,
+    LeaseLost,
     MaxDepthExceeded,
+    RemoteExecutionError,
+    SessionExists,
     SessionNotFound,
     TantraError,
     WriterReplaced,
@@ -210,9 +230,11 @@ class Runtime:
         memory: Memory | None = None,
         compactor: Compactor | None = None,
         telemetry: Tracer | None = None,
+        coordinator: Coordinator | None = None,
     ) -> None:
         self.provider = provider
         self.store = store
+        self.coordinator = coordinator
         self.default_model = default_model
         self.max_depth = max_depth
         self.deps_factory = deps_factory
@@ -262,7 +284,16 @@ class Runtime:
         self._task_reasons: dict[asyncio.Task[None], tuple[str, str]] = {}
         self._task_turns: dict[asyncio.Task[None], str] = {}
         self._errors: dict[str, dict[str, BaseException]] = {}
+        self._failed_prestarts: dict[str, dict[str, str | None]] = {}
         self._known_roots: dict[str, str] = {}
+        self._ownerships: dict[str, Ownership] = {}
+        self._unrecovered: set[str] = set()
+        self._renewals: dict[str, asyncio.Task[None]] = {}
+        self._watchers: dict[str, asyncio.Task[None]] = {}
+        self._connections: dict[UUID, Connection] = {}
+        self._maintenance_task: asyncio.Task[None] | None = None
+        self._started = coordinator is None
+        self._closing = False
         self._closed = False
 
     def _agent_for(self, name: str) -> type[Agent]:
@@ -283,8 +314,181 @@ class Runtime:
         return self.conditions.setdefault(agent_id, _Signal())
 
     def _ensure_open(self) -> None:
-        if self._closed:
+        if self._closed or self._closing:
             raise TantraError("runtime is closed")
+
+    async def start(self) -> None:
+        self._ensure_open()
+        if self._started:
+            return
+        assert self.coordinator is not None
+        if isinstance(self.coordinator, PostgresCoordinator) and self.coordinator.store is not self.store:
+            raise TypeError("PostgresCoordinator and Runtime must use the same PostgresStore")
+        await self.coordinator.start(self._handle_request)
+        self._started = True
+        if callable(getattr(self.coordinator, "cleanup", None)):
+            self._maintenance_task = asyncio.create_task(self._maintain())
+
+    async def _maintain(self) -> None:
+        assert self.coordinator is not None
+        cleanup = getattr(self.coordinator, "cleanup", None)
+        while not self._closed:
+            await asyncio.sleep(60.0)
+            try:
+                await cleanup(100)
+            except asyncio.CancelledError:
+                raise
+            except CoordinatorUnavailable:
+                pass
+
+    def _ensure_started(self) -> None:
+        if self.coordinator is not None and not self._started:
+            raise CoordinatorUnavailable("coordinated runtime is not started")
+
+    async def _ensure_owner_locked(self, root_id: str) -> Ownership:
+        self._ensure_started()
+        ownership = self._ownerships.get(root_id)
+        if ownership is not None:
+            return ownership
+        assert self.coordinator is not None
+        ownership = await self.coordinator.acquire(root_id)
+        if ownership is None:
+            raise CoordinatorUnavailable(f"root {root_id} is owned by another runtime")
+        self._ownerships[root_id] = ownership
+        self._unrecovered.add(root_id)
+        renewal = asyncio.create_task(self._renew(root_id, ownership))
+        self._renewals[root_id] = renewal
+        try:
+            await self._recover_locked(root_id, ownership)
+            self._unrecovered.discard(root_id)
+        except BaseException:
+            if await self.coordinator.release(ownership):
+                self._ownerships.pop(root_id, None)
+                self._unrecovered.discard(root_id)
+                renewal.cancel()
+                await asyncio.gather(renewal, return_exceptions=True)
+                self._renewals.pop(root_id, None)
+            raise
+        return ownership
+
+    async def _renew(self, root_id: str, ownership: Ownership) -> None:
+        assert self.coordinator is not None
+        current = ownership
+        interval = float(getattr(self.coordinator, "lease_ttl", 60.0)) / 3
+        try:
+            while not self._closed and self._ownerships.get(root_id) == current:
+                await asyncio.sleep(interval)
+                current = await self.coordinator.renew(current)
+                self._ownerships[root_id] = current
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            async with self._lock(root_id):
+                if self._ownerships.get(root_id) is not None:
+                    self._invalidate_root_locked(root_id)
+
+    def _invalidate_root_locked(self, root_id: str) -> None:
+        self._ownerships.pop(root_id, None)
+        for agent_id, task in list(self.active.items()):
+            if self._known_roots.get(agent_id) != root_id or task.done():
+                continue
+            self._turn_generations[agent_id] = self._turn_generations.get(agent_id, 0) + 1
+            self._task_reasons[task] = ("interrupted", "lease_lost")
+            if self.active.get(agent_id) is task:
+                del self.active[agent_id]
+            task.cancel()
+        for ask_id, live in list(self.asks.items()):
+            if live.root_id == root_id and not live.future.done():
+                live.future.set_exception(AskExpired(ask_id))
+
+    def _watch_root(self, root_id: str) -> None:
+        if self.coordinator is None or root_id in self._watchers or self._closed:
+            return
+        self._watchers[root_id] = asyncio.create_task(self._watch(root_id))
+
+    async def _watch(self, root_id: str) -> None:
+        assert self.coordinator is not None
+        cursor = 0
+        interval = float(getattr(self.coordinator, "catch_up_interval", 2.0))
+        try:
+            while not self._closed:
+                iterator = self.coordinator.watch(root_id, after=cursor)
+                pending: asyncio.Task[Any] | None = None
+                try:
+                    await self._refresh_writers(root_id)
+                    pending = asyncio.create_task(anext(iterator))
+                    while not self._closed:
+                        done, _ = await asyncio.wait({pending}, timeout=interval)
+                        if not done:
+                            await self._refresh_writers(root_id)
+                            continue
+                        notice = pending.result()
+                        if notice.kind == "writer":
+                            await self._refresh_writers(root_id)
+                        if notice.actor_id is not None:
+                            await self._notify(notice.actor_id)
+                        else:
+                            for agent_id, known_root in list(self._known_roots.items()):
+                                if known_root == root_id:
+                                    await self._notify(agent_id)
+                        cursor = notice.change_id
+                        pending = asyncio.create_task(anext(iterator))
+                except asyncio.CancelledError:
+                    raise
+                except BaseException:
+                    for agent_id, known_root in list(self._known_roots.items()):
+                        if known_root == root_id:
+                            await self._notify(agent_id)
+                    await asyncio.sleep(interval)
+                finally:
+                    if pending is not None:
+                        pending.cancel()
+                        await asyncio.gather(pending, return_exceptions=True)
+                    close = getattr(iterator, "aclose", None)
+                    if close is not None:
+                        await close()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            self._watchers.pop(root_id, None)
+
+    async def _refresh_writers(self, root_id: str) -> None:
+        assert self.coordinator is not None
+        for connection in list(self._connections.values()):
+            token = connection._writer_token
+            if connection._root != root_id or token is None:
+                continue
+            if not await self.coordinator.writer_matches(token):
+                connection._writer_token = None
+                await self._notify(root_id)
+
+    async def _initialize_root_locked(self, header: SessionHeader, created: SessionCreated) -> None:
+        assert self.coordinator is not None
+        if await self.store.header(header.id) is not None:
+            raise SessionExists(header.id)
+        ownership = await self.coordinator.acquire(header.id)
+        if ownership is None:
+            if await self.store.header(header.id) is not None:
+                raise SessionExists(header.id)
+            raise CoordinatorUnavailable(f"root {header.id} is owned by another runtime")
+        self._ownerships[header.id] = ownership
+        self._known_roots[header.id] = header.id
+        self._unrecovered.add(header.id)
+        renewal = asyncio.create_task(self._renew(header.id, ownership))
+        self._renewals[header.id] = renewal
+        try:
+            async with self.coordinator.transaction(ownership) as store:
+                await store.create(header)
+                await store.append(header.id, [created])
+            self._unrecovered.discard(header.id)
+            await self._notify(header.id)
+        finally:
+            if await self.coordinator.release(ownership):
+                self._ownerships.pop(header.id, None)
+                self._unrecovered.discard(header.id)
+                renewal.cancel()
+                await asyncio.gather(renewal, return_exceptions=True)
+                self._renewals.pop(header.id, None)
 
     async def _notify(self, agent_id: str) -> None:
         signal = self._signal(agent_id)
@@ -292,14 +496,117 @@ class Runtime:
             signal.generation += 1
             signal.condition.notify_all()
 
-    async def _append(self, agent_id: str, events: Sequence[SessionEvent]) -> list[Stamped]:
+    async def _append(
+        self,
+        agent_id: str,
+        events: Sequence[SessionEvent],
+        store: CoordinatedStoreProtocol | None = None,
+    ) -> list[Stamped]:
         if not events:
             return []
-        last = await self.store.append(agent_id, events)
+        root_id = self._known_roots.get(agent_id, agent_id)
+        if store is not None:
+            last = await store.append(agent_id, events)
+        elif self.coordinator is not None and root_id in self._known_roots:
+            ownership = self._ownerships.get(root_id)
+            if ownership is None:
+                raise LeaseLost(root_id)
+            async with self.coordinator.transaction(ownership) as guarded:
+                last = await guarded.append(agent_id, events)
+        else:
+            last = await self.store.append(agent_id, events)
         first = last - len(events) + 1
         stamped = [Stamped(seq=first + index, event=event) for index, event in enumerate(events)]
         await self._notify(agent_id)
         return stamped
+
+    async def _patch_header(self, agent_id: str, **fields: Any) -> SessionHeader:
+        root_id = self._known_roots.get(agent_id, agent_id)
+        if self.coordinator is None or root_id not in self._known_roots:
+            return await self.store.patch_header(agent_id, **fields)
+        ownership = self._ownerships.get(root_id)
+        if ownership is None:
+            raise LeaseLost(root_id)
+        async with self.coordinator.transaction(ownership) as store:
+            return await store.patch_header(agent_id, **fields)
+
+    async def _create_session(self, header: SessionHeader) -> None:
+        root_id = header.root_id or header.id
+        if self.coordinator is None:
+            await self.store.create(header)
+            return
+        ownership = self._ownerships.get(root_id)
+        if ownership is None:
+            raise LeaseLost(root_id)
+        async with self.coordinator.transaction(ownership) as store:
+            await store.create(header)
+
+    async def _enqueue(self, agent_id: str, event: InputQueued) -> Any:
+        root_id = self._known_roots.get(agent_id, agent_id)
+        if self.coordinator is None:
+            return await self.store.enqueue(agent_id, event)
+        ownership = self._ownerships.get(root_id)
+        if ownership is None:
+            raise LeaseLost(root_id)
+        async with self.coordinator.transaction(ownership) as store:
+            return await store.enqueue(agent_id, event)
+
+    async def _set_active(self, root_id: str, agent_id: str, active: bool) -> None:
+        if self.coordinator is None:
+            return
+        ownership = self._ownerships.get(root_id)
+        if ownership is None:
+            if active:
+                raise LeaseLost(root_id)
+            return
+        async with self.coordinator.transaction(ownership) as store:
+            await store.set_active(agent_id, active)
+
+    async def _release_if_idle_locked(self, root_id: str) -> None:
+        if self.coordinator is None:
+            return
+        if self._closing:
+            return
+        ownership = self._ownerships.get(root_id)
+        if ownership is None:
+            return
+        if any(
+            not task.done() and self._known_roots.get(agent_id) == root_id for agent_id, task in self.active.items()
+        ):
+            return
+        if any(live.root_id == root_id and not live.future.done() for live in self.asks.values()):
+            return
+        failed = self._failed_prestarts.get(root_id, {})
+        for agent_id in list(failed):
+            if await self.coordinator.relinquish_failed_prestart(ownership, agent_id):
+                self._failed_prestarts.pop(root_id, None)
+                self._ownerships.pop(root_id, None)
+                renewal = self._renewals.pop(root_id, None)
+                if renewal is not None and renewal is not asyncio.current_task():
+                    renewal.cancel()
+                return
+            continue
+        if not failed:
+            self._failed_prestarts.pop(root_id, None)
+        if await self.coordinator.release(ownership):
+            self._failed_prestarts.pop(root_id, None)
+            self._ownerships.pop(root_id, None)
+            renewal = self._renewals.pop(root_id, None)
+            if renewal is not None and renewal is not asyncio.current_task():
+                renewal.cancel()
+
+    async def _engine_patch_header(
+        self,
+        agent_id: str,
+        root_id: str,
+        generation: int,
+        sid: str,
+        **fields: Any,
+    ) -> SessionHeader:
+        async with self._lock(root_id):
+            if self._turn_generations.get(agent_id) != generation:
+                raise asyncio.CancelledError
+            return await self._patch_header(sid, **fields)
 
     async def _engine_append(
         self,
@@ -374,6 +681,51 @@ class Runtime:
                         return header.id, event
         return None
 
+    async def _recover_locked(self, root_id: str, ownership: Ownership) -> None:
+        assert self.coordinator is not None
+        headers = await self._tree_headers(root_id)
+        journals = {header.id: await self._journal(header.id) for header in headers}
+        cancelled: dict[str, set[str]] = {}
+        for item in journals[root_id]:
+            if not isinstance(item.event, CancellationRequested):
+                continue
+            for actor_id, turn_ids in item.event.targets.items():
+                cancelled.setdefault(actor_id, set()).update(turn_ids)
+        changed: set[str] = set()
+        async with self.coordinator.transaction(ownership) as store:
+            await store.set_recovery({"generation": ownership.generation, "phase": "running"})
+            for header in headers:
+                state = reduce_journal(journals[header.id])
+                live = {item.command_id for item in state.pending}
+                if state.incomplete is not None:
+                    live.add(state.incomplete.turn_id)
+                terminals = [
+                    TurnCancelled(turn_id=turn_id, reason="cancelled")
+                    for turn_id in cancelled.get(header.id, set())
+                    if turn_id in live
+                ]
+                terminal_ids = {event.turn_id for event in terminals}
+                if state.incomplete is not None and state.incomplete.turn_id not in terminal_ids:
+                    terminals.append(TurnInterrupted(turn_id=state.incomplete.turn_id, reason="owner_lost"))
+                if terminals:
+                    await store.append(header.id, terminals)
+                    changed.add(header.id)
+                await store.set_active(header.id, False)
+            await store.set_recovery({"generation": ownership.generation, "phase": "complete"})
+        for agent_id in changed:
+            await self._notify(agent_id)
+        headers = await self._tree_headers(root_id)
+        for header in headers:
+            self._known_roots[header.id] = root_id
+            if header.last_turn is not None:
+                await self._deliver_lifecycle_locked(header, header.last_turn)
+        for header in headers:
+            journal = await self._journal(header.id)
+            state = reduce_journal(journal)
+            if state.pending and self._finished(journal) is None and header.agent in self.agents:
+                self._activations[header.id] = self._activations.get(header.id, 0) + 1
+                self._activate(header.id, root_id)
+
     @staticmethod
     def _finished(journal: Sequence[Stamped]) -> AgentFinished | None:
         return next((item.event for item in reversed(journal) if isinstance(item.event, AgentFinished)), None)
@@ -387,6 +739,7 @@ class Runtime:
         metadata: Mapping[str, Any] | None = None,
     ) -> UUID:
         self._ensure_open()
+        self._ensure_started()
         name = self._name_of(agent)
         resolved = self.agents[name].model or model or self.default_model
         if not resolved:
@@ -400,23 +753,22 @@ class Runtime:
             model=resolved,
             metadata=dict(metadata or {}),
         )
+        created = SessionCreated(
+            agent=name,
+            root_id=sid,
+            parent_id=None,
+            depth=0,
+            model=resolved,
+            metadata=header.metadata,
+        )
         async with self._lock(sid):
             self._ensure_open()
-            await self.store.create(header)
-            await self._append(
-                sid,
-                [
-                    SessionCreated(
-                        agent=name,
-                        root_id=sid,
-                        parent_id=None,
-                        depth=0,
-                        model=resolved,
-                        metadata=header.metadata,
-                    )
-                ],
-            )
-            self._known_roots[sid] = sid
+            if self.coordinator is None:
+                await self.store.create(header)
+                await self._append(sid, [created])
+                self._known_roots[sid] = sid
+            else:
+                await self._initialize_root_locked(header, created)
         return public_id
 
     def connect(self, root_id: UUID, *, after: int = 0, writable: bool = False) -> Connection:
@@ -427,7 +779,7 @@ class Runtime:
             raise ValueError("after must be non-negative")
         return Connection(self, root_id, sid, after=after, writable=writable)
 
-    def _status_from_header(self, header: SessionHeader) -> ActorStatus:
+    def _status_from_header(self, header: SessionHeader, active: bool | None = None) -> ActorStatus:
         task = self.active.get(header.id)
         return ActorStatus(
             agent_id=UUID(hex=header.id),
@@ -436,7 +788,7 @@ class Runtime:
             agent=header.agent,
             name=header.name or header.agent,
             state="finished" if header.finished else header.status,
-            active=task is not None and not task.done(),
+            active=active if active is not None else task is not None and not task.done(),
             current_turn_id=UUID(hex=header.current_turn_id) if header.current_turn_id is not None else None,
             last_turn=header.last_turn,
             last_seq=header.last_seq,
@@ -444,21 +796,34 @@ class Runtime:
         )
 
     async def status(self, agent_id: UUID) -> ActorStatus:
+        self._ensure_started()
         _, sid = _id(agent_id, "agent_id")
-        return self._status_from_header(await self._header(sid))
+        header = await self._header(sid)
+        if self.coordinator is None:
+            return self._status_from_header(header)
+        self._ensure_started()
+        return self._status_from_header(header, await self.coordinator.active(header.root_id or header.id, sid))
 
     async def tree_status(self, root_id: UUID) -> list[ActorStatus]:
+        self._ensure_started()
         _, sid = _id(root_id, "root_id")
         headers = await self._tree_headers(sid)
-        return [self._status_from_header(header) for header in headers]
+        if self.coordinator is None:
+            return [self._status_from_header(header) for header in headers]
+        self._ensure_started()
+        active = {header.id: await self.coordinator.active(sid, header.id) for header in headers}
+        return [self._status_from_header(header, active[header.id]) for header in headers]
 
     async def events(self, agent_id: UUID, *, after: int = 0) -> AsyncIterator[LoggedEvent]:
+        self._ensure_started()
         public_id, sid = _id(agent_id, "agent_id")
         if not isinstance(after, int):
             raise TypeError("after must be an integer")
         if after < 0:
             raise ValueError("after must be non-negative")
-        await self._header(sid)
+        header = await self._header(sid)
+        self._known_roots[sid] = header.root_id or header.id
+        self._watch_root(header.root_id or header.id)
         async for item in self._stream(public_id, sid, after, None):
             yield item
 
@@ -493,7 +858,14 @@ class Runtime:
                 return
             async with signal.condition:
                 if signal.generation == generation and not self._closed:
-                    await signal.condition.wait()
+                    if self.coordinator is None:
+                        await signal.condition.wait()
+                    else:
+                        interval = float(getattr(self.coordinator, "catch_up_interval", 2.0))
+                        try:
+                            await asyncio.wait_for(signal.condition.wait(), interval)
+                        except TimeoutError:
+                            pass
 
     async def _skill_index(self, agent: type[Agent]) -> list[SkillInfo]:
         if self.skills is None or agent.skills == []:
@@ -526,7 +898,7 @@ class Runtime:
         return future
 
     def _activate(self, agent_id: str, root_id: str) -> None:
-        if self._closed:
+        if self._closed or self._closing:
             return
         self._known_roots[agent_id] = root_id
         task = self.active.get(agent_id)
@@ -551,7 +923,7 @@ class Runtime:
     async def _finalize_finished(self, agent_id: str, header: SessionHeader) -> None:
         if not header.finished:
             try:
-                await self.store.patch_header(agent_id, status="finished", pending_ask=None, finished=True)
+                await self._patch_header(agent_id, status="finished", pending_ask=None, finished=True)
             except Exception:
                 pass
         parent_id = header.parent_id
@@ -566,8 +938,11 @@ class Runtime:
             return
         root_id = child.root_id or child.id
         await self._header(child.parent_id)
-        await self.store.enqueue(child.parent_id, queued)
+        accepted = await self._enqueue(child.parent_id, queued)
         await self._notify(child.parent_id)
+        parent_task = self.active.get(child.parent_id)
+        if self.coordinator is not None and accepted.duplicate and parent_task is not None and not parent_task.done():
+            return
         self._activations[child.parent_id] = self._activations.get(child.parent_id, 0) + 1
         self._activate(child.parent_id, root_id)
 
@@ -659,6 +1034,7 @@ class Runtime:
         input_uuid = self._internal_id(header, ctx, "spawn_input")
         child_id = child_uuid.hex
         root_id = header.root_id or header.id
+        self._known_roots[child_id] = root_id
         async with self._lock(root_id):
             self._ensure_open()
             await self._header(header.id)
@@ -681,7 +1057,7 @@ class Runtime:
                     model=model,
                     metadata=dict(root.metadata),
                 )
-                await self.store.create(child)
+                await self._create_session(child)
             elif (
                 child.root_id != root_id
                 or child.parent_id != header.id
@@ -722,7 +1098,7 @@ class Runtime:
             elif existing != event:
                 raise InvalidCommandReuse(child_id)
             queued = InputQueued(command_id=input_uuid.hex, input=input)
-            accepted = await self.store.enqueue(child_id, queued)
+            accepted = await self._enqueue(child_id, queued)
             if not accepted.duplicate:
                 await self._notify(child_id)
             self._activations[child_id] = self._activations.get(child_id, 0) + 1
@@ -759,7 +1135,7 @@ class Runtime:
                 return {"command_id": str(command), "duplicate": True}
             if self._finished(journal) is not None:
                 raise TantraError(f"agent {target_uuid} is finished")
-            accepted = await self.store.enqueue(target_id, queued)
+            accepted = await self._enqueue(target_id, queued)
             await self._notify(target_id)
             self._activations[target_id] = self._activations.get(target_id, 0) + 1
             self._activate(target_id, root_id)
@@ -769,7 +1145,9 @@ class Runtime:
         child = await self._header(child_uuid.hex)
         if child.parent_id != header.id:
             raise TantraError("status is allowed only for direct child agents")
-        return self._status_from_header(child)
+        if self.coordinator is None:
+            return self._status_from_header(child)
+        return self._status_from_header(child, await self.coordinator.active(child.root_id or child.id, child.id))
 
     async def _descendants(self, agent_id: str) -> list[SessionHeader]:
         descendants: list[SessionHeader] = []
@@ -836,7 +1214,7 @@ class Runtime:
             if existing is None:
                 if self._finished(parent_journal) is not None:
                     raise TantraError(f"agent {UUID(hex=parent_id)} is finished")
-                await self.store.enqueue(parent_id, parent_input)
+                await self._enqueue(parent_id, parent_input)
             elif existing != parent_input:
                 raise InvalidCommandReuse(command.hex)
             return FinishResult(normalized, (AgentFinished(result=normalized),))
@@ -847,8 +1225,12 @@ class Runtime:
         current: str | None = None
         turn_generation: int | None = None
         failed = False
+        failed_prestart = False
+        failed_prestart_unknown = False
         aborted = False
         try:
+            async with self._lock(root_id):
+                await self._set_active(root_id, agent_id, True)
             while True:
                 if self._closed:
                     return
@@ -924,6 +1306,9 @@ class Runtime:
                     append_events=lambda events, generation=turn_generation: self._engine_append(
                         agent_id, root_id, generation, events
                     ),
+                    patch_header=lambda sid, generation=turn_generation, **fields: self._engine_patch_header(
+                        agent_id, root_id, generation, sid, **fields
+                    ),
                     terminal_tool="finish" if header.parent_id is not None else None,
                 )
                 terminal = await engine.run(queued)
@@ -958,11 +1343,21 @@ class Runtime:
             try:
                 async with self._lock(root_id):
                     header = await self._header(agent_id)
-                    if self._finished(await self._journal(agent_id)) is not None:
+                    journal = await self._journal(agent_id)
+                    if self._finished(journal) is not None:
                         await self._finalize_finished(agent_id, header)
                         reconciled = True
+                    else:
+                        state = reduce_journal(journal)
+                        if current is None and state.incomplete is None and state.pending:
+                            current = state.pending[0].command_id
+                        if current is not None:
+                            pending = any(item.command_id == current for item in state.pending)
+                            failed_prestart = state.incomplete is None and pending
             except BaseException as finalize_exc:
                 error = finalize_exc
+                failed_prestart = True
+                failed_prestart_unknown = True
             if reconciled:
                 if current is not None:
                     self._errors.get(agent_id, {}).pop(current, None)
@@ -975,15 +1370,268 @@ class Runtime:
         finally:
             self._task_turns.pop(task, None)
             async with self._lock(root_id):
+                try:
+                    await self._set_active(root_id, agent_id, False)
+                except LeaseLost:
+                    pass
                 if self.active.get(agent_id) is task:
                     del self.active[agent_id]
-                if (failed or aborted) and not self._closed and self._activations.get(agent_id, 0) > generation:
+                reactivate = (
+                    (failed or aborted) and not self._closed and self._activations.get(agent_id, 0) > generation
+                )
+                if reactivate:
                     self._activate(agent_id, root_id)
+                if failed_prestart and not reactivate:
+                    marker = None if failed_prestart_unknown else current
+                    self._failed_prestarts.setdefault(root_id, {})[agent_id] = marker
+                await self._release_if_idle_locked(root_id)
+
+    async def _request_command(
+        self,
+        root_id: str,
+        operation: str,
+        payload: Any,
+        writer_token: WriterToken | None,
+    ) -> dict[str, Any]:
+        self._ensure_started()
+        assert self.coordinator is not None
+        if await self.coordinator.locate(root_id) is None:
+            async with self._lock(root_id):
+                if await self.coordinator.locate(root_id) is None:
+                    await self._ensure_owner_locked(root_id)
+        timeout = float(getattr(self.coordinator, "request_timeout", 10.0))
+        envelope = CommandEnvelope(
+            request_id=uuid4(),
+            root_id=root_id,
+            operation=operation,
+            writer_token=writer_token,
+            payload=payload,
+            deadline=datetime.now(UTC) + timedelta(seconds=timeout),
+        )
+        try:
+            while True:
+                try:
+                    reply = await self.coordinator.request(envelope)
+                    break
+                except CoordinatorUnavailable:
+                    async with self._lock(root_id):
+                        if await self.coordinator.locate(root_id) is not None:
+                            raise
+                        await self._ensure_owner_locked(root_id)
+        except CommandTimeout as exc:
+            command_id = getattr(payload, "command_id", None)
+            raise CommandTimeout(str(command_id or envelope.request_id), command_id=command_id) from exc
+        if reply.status == "ok":
+            return reply.result or {}
+        errors: dict[str, type[TantraError]] = {
+            "ask_expired": AskExpired,
+            "invalid_command_reuse": InvalidCommandReuse,
+            "writer_replaced": WriterReplaced,
+            "writer_required": WriterRequired,
+        }
+        error = errors.get(reply.error_code or "")
+        if error is not None:
+            raise error(reply.message or reply.error_code or operation)
+        message = reply.message or reply.error_code or "remote command failed"
+        if reply.retryable:
+            raise CoordinatorUnavailable(message)
+        raise RemoteExecutionError(message)
+
+    async def _handle_request(self, envelope: CommandEnvelope, transact: Any) -> None:
+        self._ensure_open()
+        after: list[Callable[[], None]] = []
+        async with self._lock(envelope.root_id):
+            self._ensure_open()
+            if envelope.root_id in self._unrecovered:
+                ownership = self._ownerships.get(envelope.root_id)
+                if ownership is None:
+                    raise CoordinatorUnavailable(f"root {envelope.root_id} has no recovered owner")
+                await self._recover_locked(envelope.root_id, ownership)
+                self._unrecovered.discard(envelope.root_id)
+            headers = await self._tree_headers(envelope.root_id)
+            journals = {header.id: await self._journal(header.id) for header in headers}
+
+            async def apply(request: CommandEnvelope, store: CoordinatedStoreProtocol) -> CommandReply:
+                try:
+                    payload = request.payload
+                    result: dict[str, Any]
+                    if isinstance(payload, ClaimWriterPayload):
+                        token = await store.claim_writer(payload.connection_id)
+                        result = {"writer_token": token.model_dump(mode="json")}
+                    else:
+                        assert request.writer_token is not None
+                        await store.validate_writer(request.writer_token)
+                        if isinstance(payload, ReleaseWriterPayload):
+                            result = {"released": await store.release_writer(request.writer_token)}
+                        elif isinstance(payload, SendPayload):
+                            event = InputQueued(command_id=payload.command_id.hex, input=payload.input)
+                            existing = self._find_tree_command(journals, payload.command_id.hex)
+                            if existing is not None:
+                                if existing != (request.root_id, event):
+                                    raise InvalidCommandReuse(payload.command_id.hex)
+                                duplicate = True
+                            else:
+                                root_journal = journals[request.root_id]
+                                if self._finished(root_journal) is not None:
+                                    raise TantraError(f"agent {UUID(hex=request.root_id)} is finished")
+                                duplicate = (await store.enqueue(request.root_id, event)).duplicate
+                            after.append(lambda: self._accepted_input(request.root_id))
+                            result = {"command_id": str(payload.command_id), "duplicate": duplicate}
+                        elif isinstance(payload, AnswerPayload):
+                            event = AskAnswered(
+                                ask_id=payload.ask_id.hex,
+                                response=payload.response,
+                                command_id=payload.command_id.hex,
+                                answered_by=request.root_id,
+                            )
+                            existing = self._find_tree_command(journals, payload.command_id.hex)
+                            if existing is not None:
+                                previous = existing[1]
+                                if (
+                                    not isinstance(previous, AskAnswered)
+                                    or previous.model_copy(update={"answered_by": request.root_id}) != event
+                                ):
+                                    raise InvalidCommandReuse(payload.command_id.hex)
+                                duplicate = True
+                            else:
+                                live = self.asks.get(payload.ask_id.hex)
+                                if live is None or live.root_id != request.root_id or live.future.done():
+                                    raise AskExpired(payload.ask_id.hex)
+                                if live.event.request.kind != payload.response.kind:
+                                    raise TantraError(
+                                        f"ask {payload.ask_id.hex!r} needs a {live.event.request.kind!r} response, "
+                                        f"got {payload.response.kind!r}"
+                                    )
+                                if live.event.request.extra.get("permission") and not isinstance(
+                                    payload.response, ApprovalResponse
+                                ):
+                                    message = (
+                                        f"ask {payload.ask_id.hex!r} is a permission request and needs "
+                                        "an ApprovalResponse"
+                                    )
+                                    raise TantraError(message)
+                                await store.append(live.agent_id, [event])
+                                after.append(
+                                    lambda live=live, response=payload.response: live.future.set_result(response)
+                                )
+                                duplicate = False
+                            result = {"command_id": str(payload.command_id), "duplicate": duplicate}
+                        elif isinstance(payload, CancelPayload):
+                            existing = self._find_tree_command(journals, payload.command_id.hex)
+                            if existing is not None:
+                                if existing[0] != request.root_id or not isinstance(existing[1], CancellationRequested):
+                                    raise InvalidCommandReuse(payload.command_id.hex)
+                                cancellation = existing[1]
+                                duplicate = True
+                            else:
+                                targets = self._cancellation_targets(journals)
+                                cancellation = CancellationRequested(command_id=payload.command_id.hex, targets=targets)
+                                await store.append(request.root_id, [cancellation])
+                                duplicate = False
+                            for actor_id, turn_ids in cancellation.targets.items():
+                                state = reduce_journal(journals[actor_id])
+                                live_turns = {item.command_id for item in state.pending}
+                                if state.incomplete is not None:
+                                    live_turns.add(state.incomplete.turn_id)
+                                terminals = [
+                                    TurnCancelled(turn_id=turn_id, reason="cancelled")
+                                    for turn_id in turn_ids
+                                    if turn_id in live_turns
+                                ]
+                                if terminals:
+                                    await store.append(actor_id, terminals)
+                            after.append(lambda cancellation=cancellation: self._cancel_local(cancellation))
+                            result = {"command_id": str(payload.command_id), "duplicate": duplicate}
+                        else:
+                            raise TantraError(f"unsupported coordinator operation {request.operation!r}")
+                    return CommandReply(request_id=request.request_id, result=result)
+                except TantraError as exc:
+                    code = type(exc).__name__
+                    code = "".join(("_" + char.lower()) if char.isupper() else char for char in code).lstrip("_")
+                    return CommandReply(
+                        request_id=request.request_id,
+                        status="error",
+                        error_code=code,
+                        message=str(exc),
+                    )
+
+            reply = await transact(apply)
+        if reply is not None and reply.status == "ok":
+            for effect in after:
+                effect()
+        async with self._lock(envelope.root_id):
+            await self._release_if_idle_locked(envelope.root_id)
+
+    @staticmethod
+    def _find_tree_command(
+        journals: Mapping[str, Sequence[Stamped]], command_id: str
+    ) -> tuple[str, SessionEvent] | None:
+        for actor_id, journal in journals.items():
+            for item in journal:
+                event = item.event
+                if (
+                    isinstance(event, InputQueued | AskAnswered | CancellationRequested)
+                    and getattr(event, "command_id", None) == command_id
+                ):
+                    return actor_id, event
+        return None
+
+    @staticmethod
+    def _cancellation_targets(journals: Mapping[str, Sequence[Stamped]]) -> dict[str, list[str]]:
+        targets: dict[str, list[str]] = {}
+        for actor_id, journal in journals.items():
+            if Runtime._finished(journal) is not None:
+                continue
+            state = reduce_journal(journal)
+            turns = [item.command_id for item in state.pending]
+            if state.incomplete is not None and state.incomplete.turn_id not in turns:
+                turns.append(state.incomplete.turn_id)
+            if turns:
+                targets[actor_id] = turns
+        return targets
+
+    def _accepted_input(self, root_id: str) -> None:
+        self._activations[root_id] = self._activations.get(root_id, 0) + 1
+        self._activate(root_id, root_id)
+        asyncio.create_task(self._notify(root_id))
+
+    def _cancel_local(self, cancellation: CancellationRequested) -> None:
+        for actor_id, turn_ids in cancellation.targets.items():
+            task = self.active.get(actor_id)
+            if task is None or task.done():
+                continue
+            task_turn = self._task_turns.get(task)
+            if task_turn is not None and task_turn not in turn_ids:
+                continue
+            self._turn_generations[actor_id] = self._turn_generations.get(actor_id, 0) + 1
+            self._task_reasons[task] = ("cancelled", "cancelled")
+            if self.active.get(actor_id) is task:
+                del self.active[actor_id]
+            task.cancel()
 
     async def _claim(self, connection: Connection) -> None:
         self._ensure_open()
+        self._ensure_started()
         header = await self._root_header(connection._root)
         self._known_roots[connection._root] = connection._root
+        self._watch_root(connection._root)
+        if self.coordinator is not None:
+            if connection.writable:
+                self._agent_for(header.agent)
+                if await self.coordinator.locate(connection._root) is None:
+                    async with self._lock(connection._root):
+                        if await self.coordinator.locate(connection._root) is None:
+                            await self._ensure_owner_locked(connection._root)
+                result = await self._request_command(
+                    connection._root,
+                    "claim_writer",
+                    ClaimWriterPayload(connection_id=connection._connection_id),
+                    None,
+                )
+                connection._writer_token = WriterToken.model_validate(result["writer_token"])
+                self._connections[connection._connection_id] = connection
+            connection._entered = True
+            return
         if connection.writable:
             self._agent_for(header.agent)
             async with self._lock(connection._root):
@@ -996,9 +1644,32 @@ class Runtime:
             return
         connection._entered = True
 
+    async def _release_connection(self, connection: Connection) -> None:
+        self._connections.pop(connection._connection_id, None)
+        if self.coordinator is None or connection._writer_token is None:
+            return
+        token = connection._writer_token
+        connection._writer_token = None
+        if self._closed or getattr(self.coordinator, "_closed", False):
+            return
+        try:
+            await self._request_command(
+                connection._root,
+                "release_writer",
+                ReleaseWriterPayload(),
+                token,
+            )
+        except WriterReplaced:
+            pass
+
     def _check_writer(self, connection: Connection) -> None:
         if not connection._entered or not connection.writable:
             raise WriterRequired("an active writable connection is required")
+        if self.coordinator is not None:
+            if connection._writer_token is None:
+                raise WriterRequired("an active writable connection is required")
+            self._ensure_open()
+            return
         if self.writers.get(connection._root) != connection._generation:
             raise WriterReplaced(f"writer for {connection.root_id} was replaced")
         self._ensure_open()
@@ -1008,6 +1679,15 @@ class Runtime:
 
     async def _accept_send(self, connection: Connection, input: str, command_id: UUID) -> CommandReceipt:
         public_id, cid = _id(command_id, "command_id")
+        if self.coordinator is not None:
+            self._check_writer(connection)
+            result = await self._request_command(
+                connection._root,
+                "send",
+                SendPayload(command_id=public_id, input=input),
+                connection._writer_token,
+            )
+            return CommandReceipt(public_id, bool(result["duplicate"]))
         event = InputQueued(command_id=cid, input=input)
         async with self._lock(connection._root):
             self._check_writer(connection)
@@ -1020,7 +1700,7 @@ class Runtime:
                 await self._root_header(connection._root)
                 if self._finished(await self._journal(connection._root)) is not None:
                     raise TantraError(f"agent {connection.root_id} is finished")
-                accepted = await self.store.enqueue(connection._root, event)
+                accepted = await self._enqueue(connection._root, event)
                 duplicate = accepted.duplicate
                 await self._notify(connection._root)
             self._activations[connection._root] = self._activations.get(connection._root, 0) + 1
@@ -1045,6 +1725,15 @@ class Runtime:
     ) -> CommandReceipt:
         public_command, cid = _id(command_id, "command_id")
         _, aid = _id(ask_id, "ask_id")
+        if self.coordinator is not None:
+            self._check_writer(connection)
+            result = await self._request_command(
+                connection._root,
+                "answer",
+                AnswerPayload(command_id=public_command, ask_id=ask_id, response=response),
+                connection._writer_token,
+            )
+            return CommandReceipt(public_command, bool(result["duplicate"]))
         event = AskAnswered(
             ask_id=aid,
             response=response,
@@ -1078,6 +1767,15 @@ class Runtime:
 
     async def _accept_cancel(self, connection: Connection, command_id: UUID) -> CommandReceipt:
         public_id, cid = _id(command_id, "command_id")
+        if self.coordinator is not None:
+            self._check_writer(connection)
+            result = await self._request_command(
+                connection._root,
+                "cancel",
+                CancelPayload(command_id=public_id),
+                connection._writer_token,
+            )
+            return CommandReceipt(public_id, bool(result["duplicate"]))
         async with self._lock(connection._root):
             self._check_writer(connection)
             existing = await self._tree_command(connection._root, cid)
@@ -1157,31 +1855,135 @@ class Runtime:
     async def _wait_result(self, agent_id: str, command_id: UUID) -> TurnResult:
         cid = command_id.hex
         signal = self._signal(agent_id)
+        inactive = 0
+        root_id = self._known_roots.get(agent_id, agent_id)
+        self._watch_root(root_id)
         while True:
             journal = await self._journal(agent_id)
-            error = self._errors.get(agent_id, {}).get(cid)
-            if error is not None:
-                raise error
             result = _turn_result(UUID(hex=agent_id), command_id, journal)
+            error = self._errors.get(agent_id, {}).get(cid)
+            if error is not None and (self.coordinator is None or result is None):
+                raise error
             if result is not None:
                 return result
+            if self.coordinator is not None:
+                active = await self.coordinator.active(root_id, agent_id)
+                owner = await self.coordinator.locate(root_id)
+                recovered = False
+                if owner is not None and not active:
+                    recovery = await self.coordinator.recovery(root_id)
+                    recovered = recovery.get("generation") == owner.generation and recovery.get("phase") == "complete"
+                if active or owner is not None and not recovered:
+                    inactive = 0
+                else:
+                    inactive += 1
+                    if inactive >= 2:
+                        raise RemoteExecutionError(f"command {command_id} has no active owner execution")
             if self._closed:
                 raise TantraError(f"runtime closed before command {command_id} finished")
             async with signal.condition:
                 generation = signal.generation
             journal = await self._journal(agent_id)
-            error = self._errors.get(agent_id, {}).get(cid)
-            if error is not None:
-                raise error
             result = _turn_result(UUID(hex=agent_id), command_id, journal)
+            error = self._errors.get(agent_id, {}).get(cid)
+            if error is not None and (self.coordinator is None or result is None):
+                raise error
             if result is not None:
                 return result
             async with signal.condition:
                 if signal.generation == generation and not self._closed:
-                    await signal.condition.wait()
+                    if self.coordinator is None:
+                        await signal.condition.wait()
+                    else:
+                        interval = float(getattr(self.coordinator, "catch_up_interval", 2.0))
+                        try:
+                            await asyncio.wait_for(signal.condition.wait(), interval)
+                        except TimeoutError:
+                            pass
+
+    async def _close_coordinated(self) -> None:
+        assert self.coordinator is not None
+        tasks = [task for task in self.active.values() if not task.done()]
+        control_tasks = list(self._watchers.values())
+        if self._maintenance_task is not None:
+            control_tasks.append(self._maintenance_task)
+        for task in control_tasks:
+            task.cancel()
+        await asyncio.gather(*control_tasks, return_exceptions=True)
+        for agent_id, task in list(self.active.items()):
+            if task.done():
+                continue
+            self._turn_generations[agent_id] = self._turn_generations.get(agent_id, 0) + 1
+            self._task_reasons[task] = ("interrupted", "runtime_closed")
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        first_error: BaseException | None = None
+        for root_id, ownership in list(self._ownerships.items()):
+            async with self._lock(root_id):
+                headers = await self._tree_headers(root_id)
+                journals = {header.id: await self._journal(header.id) for header in headers}
+                for agent_id, task in list(self.active.items()):
+                    if task.done() or self._known_roots.get(agent_id) != root_id:
+                        continue
+                    self._turn_generations[agent_id] = self._turn_generations.get(agent_id, 0) + 1
+                    self._task_reasons[task] = ("interrupted", "runtime_closed")
+                try:
+                    async with self.coordinator.transaction(ownership) as store:
+                        for header in headers:
+                            state = reduce_journal(journals[header.id])
+                            if state.incomplete is not None:
+                                await store.append(
+                                    header.id,
+                                    [TurnInterrupted(turn_id=state.incomplete.turn_id, reason="runtime_closed")],
+                                )
+                            await store.set_active(header.id, False)
+                except LeaseLost:
+                    pass
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+                for header in headers:
+                    await self._notify(header.id)
+                self.active = {
+                    agent_id: task
+                    for agent_id, task in self.active.items()
+                    if self._known_roots.get(agent_id) != root_id
+                }
+                try:
+                    await self.coordinator.release(ownership)
+                except LeaseLost:
+                    pass
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+                self._ownerships.pop(root_id, None)
+        for task in tasks:
+            task.cancel()
+        for ask_id, live in list(self.asks.items()):
+            if not live.future.done():
+                live.future.set_exception(AskExpired(ask_id))
+        renewal_tasks = list(self._renewals.values())
+        for task in renewal_tasks:
+            task.cancel()
+        await asyncio.gather(*renewal_tasks, return_exceptions=True)
+        self._renewals.clear()
+        self._watchers.clear()
+        self._connections.clear()
+        self._maintenance_task = None
+        await self.coordinator.close()
+        if first_error is not None:
+            raise first_error
 
     async def aclose(self) -> None:
-        if self._closed:
+        if self._closed or self._closing:
+            return
+        if self.coordinator is not None:
+            self._closing = True
+            try:
+                await self._close_coordinated()
+            finally:
+                self._closed = True
+                self._closing = False
             return
         self._closed = True
         tasks = [task for task in self.active.values() if not task.done()]
@@ -1252,6 +2054,8 @@ class Connection:
         self.writable = writable
         self._root = root
         self._after = after
+        self._connection_id = uuid4()
+        self._writer_token: WriterToken | None = None
         self._generation: int | None = None
         self._entered = False
         self._iterator: AsyncIterator[LoggedEvent] | None = None
@@ -1263,6 +2067,7 @@ class Connection:
         return self
 
     async def __aexit__(self, *_args: Any) -> None:
+        await self.runtime._release_connection(self)
         self._entered = False
         if self._iterator is not None:
             await self._iterator.aclose()
@@ -1271,7 +2076,13 @@ class Connection:
     def _check_iteration(self) -> None:
         if not self._entered:
             raise WriterRequired("connection must be entered before use")
-        if self.writable and self.runtime.writers.get(self._root) != self._generation:
+        if self.writable and self.runtime.coordinator is not None and self._writer_token is None:
+            raise WriterReplaced(f"writer for {self.root_id} was replaced")
+        if (
+            self.writable
+            and self.runtime.coordinator is None
+            and self.runtime.writers.get(self._root) != self._generation
+        ):
             raise WriterReplaced(f"writer for {self.root_id} was replaced")
 
     def __aiter__(self) -> Connection:

@@ -12,6 +12,7 @@ import pytest
 
 from tantra import (
     Agent,
+    CommandTimeout,
     CoordinatorUnavailable,
     FreeText,
     FreeTextResponse,
@@ -480,6 +481,123 @@ async def test_closing_owner_rejects_command_waiting_for_root_lock(postgres_dsn:
         await connection.__aexit__(None, None, None)
         await second.aclose()
         await second_store.close()
+        await owner.aclose()
+        await owner_store.close()
+
+
+async def test_cancellation_acceptance_commit_boundary_and_retry_targets(
+    postgres_dsn: str, pg_schema: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class GateProvider(EchoProvider):
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            started.set()
+            await release.wait()
+            yield StreamEnd(text="done")
+
+    owner_store = PostgresStore(postgres_dsn, schema=pg_schema)
+    owner = Runtime(GateProvider(), owner_store, [Bot], default_model="m", coordinator=_coordinator(owner_store))
+    await owner.start()
+    root_id = await owner.create(Bot)
+    first_id = uuid4()
+    cancel_id = uuid4()
+    later_id = uuid4()
+    second_store: PostgresStore | None = None
+    second: Runtime | None = None
+    try:
+        async with owner.connect(root_id, writable=True) as connection:
+            await connection.send("first", command_id=first_id)
+        await asyncio.wait_for(started.wait(), 1)
+
+        second_store = PostgresStore(postgres_dsn, schema=pg_schema)
+        second = Runtime(GateProvider(), second_store, [Bot], default_model="m", coordinator=_coordinator(second_store))
+        await second.start()
+        async with second.connect(root_id, writable=True) as connection:
+            assert owner.coordinator is not None
+            assert second.coordinator is not None
+            original_apply = owner.coordinator._apply_request
+            failed = False
+            precommit_visible = False
+
+            async def fail_before_commit(envelope: Any, ownership: Any, operation: Any) -> Any:
+                async def wrapped(locked: Any, store: Any) -> Any:
+                    nonlocal failed, precommit_visible
+                    reply = await operation(locked, store)
+                    if envelope.operation == "cancel" and not failed:
+                        failed = True
+                        visible = [item.event async for item in second_store.read(root_id.hex)]
+                        precommit_visible = any(isinstance(event, CancellationRequested) for event in visible)
+                        raise RuntimeError("injected before cancellation commit")
+                    return reply
+
+                return await original_apply(envelope, ownership, wrapped)
+
+            monkeypatch.setattr(owner.coordinator, "_apply_request", fail_before_commit)
+            with pytest.raises(CoordinatorUnavailable, match="owner could not apply"):
+                await connection.cancel(command_id=cancel_id)
+            monkeypatch.setattr(owner.coordinator, "_apply_request", original_apply)
+            events = [item.event async for item in second_store.read(root_id.hex)]
+            assert failed
+            assert not precommit_visible
+            assert not any(isinstance(event, CancellationRequested) for event in events)
+            assert not any(isinstance(event, TurnCancelled) and event.turn_id == first_id.hex for event in events)
+
+            original_request = second.coordinator.request
+            lost = False
+
+            async def lose_committed_reply(envelope: Any) -> Any:
+                nonlocal lost
+                reply = await original_request(envelope)
+                if envelope.operation == "cancel" and not lost:
+                    lost = True
+                    raise CommandTimeout("injected response loss")
+                return reply
+
+            monkeypatch.setattr(second.coordinator, "request", lose_committed_reply)
+            with pytest.raises(CommandTimeout):
+                await connection.cancel(command_id=cancel_id)
+            monkeypatch.setattr(second.coordinator, "request", original_request)
+            events = [item.event async for item in second_store.read(root_id.hex)]
+            cancellations = [event for event in events if isinstance(event, CancellationRequested)]
+            assert lost
+            assert len(cancellations) == 1
+            assert cancellations[0].command_id == cancel_id.hex
+            assert cancellations[0].targets == {root_id.hex: [first_id.hex]}
+            assert sum(isinstance(event, TurnCancelled) and event.turn_id == first_id.hex for event in events) == 1
+
+            await connection.send("later", command_id=later_id)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                events = [item.event async for item in second_store.read(root_id.hex)]
+                if any(isinstance(event, TurnStarted) and event.turn_id == later_id.hex for event in events):
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("later turn did not start")
+
+            assert (await connection.cancel(command_id=cancel_id)).duplicate
+            events = [item.event async for item in second_store.read(root_id.hex)]
+            cancellations = [event for event in events if isinstance(event, CancellationRequested)]
+            assert len(cancellations) == 1
+            assert cancellations[0].targets == {root_id.hex: [first_id.hex]}
+            assert not any(isinstance(event, TurnCancelled) and event.turn_id == later_id.hex for event in events)
+            release.set()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                events = [item.event async for item in second_store.read(root_id.hex)]
+                if any(isinstance(event, TurnCompleted) and event.turn_id == later_id.hex for event in events):
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("later turn did not complete")
+    finally:
+        release.set()
+        if second is not None:
+            await second.aclose()
+        if second_store is not None:
+            await second_store.close()
         await owner.aclose()
         await owner_store.close()
 

@@ -36,6 +36,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    ports:
+      - "12501:5432"
 
   migrate:
     image: ${SARATHI_BACKEND_IMAGE:-sarathi-backend:local}

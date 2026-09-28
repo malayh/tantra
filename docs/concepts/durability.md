@@ -10,7 +10,7 @@ Journal sequence numbers start at 1. Cursor 0 means replay from the beginning. R
 
 ## Accepted work survives readers
 
-A writable connection can call `send()` and disconnect immediately. The process-owned actor continues. Event readers replay from storage and then wait on a process-local notification; they do not buffer or throttle execution.
+A writable connection can call `send()` and disconnect immediately. The execution owner continues. Event readers replay from storage and do not buffer or throttle execution. Without a coordinator they wait on a process-local notification; `PostgresCoordinator` also publishes cross-process notices and performs bounded catch-up reads.
 
 ## Typed asks are live and root-only
 
@@ -26,6 +26,10 @@ After a child turn ends without `finish()`, Tantra durably queues one determinis
 
 ## Crash contract
 
-Connecting or subscribing never activates an actor. After a crash, a later root send activates the root, records an unmatched started turn as interrupted, and drains inputs that were accepted but never started. Model and tool work from the interrupted turn is never repeated automatically.
+Read-only connections, subscriptions, and status reads never activate an actor. Without a coordinator, a later root send recovers after a crash: it activates the root, records an unmatched started turn as interrupted, and drains inputs that were accepted but never started. With `PostgresCoordinator`, a writable connection or mutation can claim and recover an unowned or expired root. Recovery never repeats model or tool work from an interrupted turn.
 
-A shared store does not coordinate live execution across processes. Route one root tree to one Runtime process. Writer generations and subscriber wakeups are process-local; Tantra has no heartbeat, distributed lock, or cross-process event bus.
+A shared store alone does not coordinate live execution across processes. With `coordinator=None`, route one root tree to one Runtime process.
+
+Tantra 1.2 can pair `PostgresStore` with `PostgresCoordinator`. Exactly one Runtime owns a root under a renewable lease, execution writes are fenced by its generation, and writers may reconnect through another process. Commands forward to the owner, while subscriptions replay journals and catch up across processes. After owner loss, the next writable reconnect or mutation waits for lease expiry, interrupts abandoned started turns, expires asks, repairs child lifecycle state, and drains accepted unstarted inputs.
+
+Recovery never repeats model or tool work from an interrupted turn and cannot roll back an external side effect. PostgreSQL is the availability and ordering authority. See [Migrate to 1.2](../guides/migration-1.2.md) for setup and limits.

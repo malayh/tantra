@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.0
+
+Added:
+
+- An optional `Coordinator` contract and `PostgresCoordinator` implementation for one leased execution owner across Runtime processes, with database-time generations and transaction-bound fencing for execution writes.
+- Distributed writer claims, command forwarding, journal wake-ups with bounded catch-up reads, and whole-tree takeover recovery for accepted work, started turns, asks, cancellation, and child lifecycle state.
+- A two-backend Sarathi deployment behind Nginx with shared PostgreSQL and uploads, cross-backend writable reconnects, read-only viewers, and an isolated deterministic failure-test stack.
+
+Compatibility and limits:
+
+- `Runtime(..., coordinator=None)` keeps the 1.1 single-process behavior. Existing PostgreSQL stores upgrade additively through `PostgresStore.setup()`; coordinated Runtime requires the same `PostgresStore` object in `PostgresCoordinator` and an awaited `Runtime.start()`.
+- Takeover waits for lease expiry, interrupts abandoned started turns instead of replaying model or tool work, and cannot undo external side effects. PostgreSQL remains the availability and ordering authority; there is no automatic startup scan, persistent browser outbox, or cross-process child worker pool.
+
 ## 1.1.0
 
 Breaking:

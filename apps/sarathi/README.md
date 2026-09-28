@@ -51,7 +51,7 @@ docker compose up --build -d
 
 Open http://localhost:3001, sign up, chat. Nginx serves the API and WebSockets on http://localhost:8001 and round-robins both backends without affinity.
 
-Both backends use the same image, configuration, database, and uploads volume. PostgreSQL leases one Runtime as the execution owner for each root while writer claims, commands, journal readers, and recovery work across either backend. Add `?view=readonly` to a chat URL for an observing tab that never claims the writer. Storage created by Tantra 1.0 upgrades to 1.1 without a destructive migration. Pre-1.0 storage still requires a fresh database. Legacy `researcher` history remains readable but cannot resume; new work uses `subagent`.
+Both backends use the same image, configuration, database, and uploads volume. PostgreSQL leases one Runtime as the execution owner for each root while writer claims, commands, journal readers, and recovery work across either backend. Add `?view=readonly` to a chat URL for an observing tab that never claims the writer. Storage created by Tantra 1.0 or 1.1 upgrades additively to 1.2. Pre-1.0 storage still requires a fresh database. Legacy `researcher` history remains readable but cannot resume; new work uses `subagent`.
 
 After an owner loss, the next writable reconnect or mutation recovers the whole root after lease expiry, interrupts abandoned started turns, expires asks, and drains accepted unstarted inputs. `docker compose restart` does not re-read `.env` — after editing it, recreate with `docker compose up -d backend_a backend_b ui`.
 

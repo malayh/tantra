@@ -109,7 +109,7 @@ Checklist:
 
 Verification: Sarathi backend pytest 89 passed; UI reducer tests 14 passed, lint and production build passed; Ruff check and format check passed; disposable two-backend/Nginx Compose passed HTTP/WebSocket routing, shared-upload, read-only/cross-backend writer takeover, account-isolation, and backend DNS-replacement checks; independent review and `git diff --check` passed.
 
-### Phase 3 — Failure verification and documentation · deps: P2 · CODE DONE, VERIFICATION PENDING
+### Phase 3 — Failure verification and documentation · deps: P2 · COMPLETE
 
 Run test-only deterministic provider/tool gates through the real app, Runtime, Store, WebSocket, and UI. Use existing Brave with at least an A writer, a B writer, and a read-only viewer. Record actual backend, ownership generation, UUIDs, cursors, screenshots, and journal evidence in the ignored E2E report location.
 
@@ -119,13 +119,13 @@ Then run real-provider Brave smoke for streaming, delegation, child communicatio
 
 Checklist:
 
-- [ ] Deterministic failure matrix
-- [ ] Brave multi-window evidence
-- [ ] Real-provider smoke
+- [x] Deterministic failure matrix, with the sustained slow-reader same-trial conjunction accepted as a release waiver
+- [x] Brave multi-window evidence, with attachment upload accepted as a browser-gated release waiver
+- [x] Real-provider smoke, with cross-backend mid-turn reconnect accepted as a release waiver after deterministic cross-backend coverage passed
 - [x] Full automated checks
 - [x] Deployment/failure documentation
 
-Verification so far: real-PostgreSQL Tantra suite 610 passed, stress 66 passed with 18 optional skips, Sarathi backend 106 passed, UI reducer 14 passed; Ruff check/format, UI lint/build, strict MkDocs, lock check, package build, normal/E2E Compose config and disposable Docker build, and `git diff --check` passed. Independent review found and resolved provider-stream timeout and WebSocket token-log issues. The ignored `apps/sarathi/e2e/reports/011-coordinator-2026-09-27/summary.md` records live cross-backend ownership, writer takeover, remote control, reply loss, missed-notification reconnect, stale-owner fencing, ask expiry, and database-outage evidence. By user direction, cases suited to automated testing are covered there rather than repeating the entire browser matrix. The unrun live cases and real-provider smoke remain pending; do not treat Phase 3 as complete.
+Verification: real-PostgreSQL Tantra suite 610 passed, stress 66 passed with 18 optional skips, Sarathi backend 106 passed, UI reducer 14 passed; Ruff check/format, UI lint/build, strict MkDocs, lock check, package build, normal/E2E Compose config and disposable Docker build, and `git diff --check` passed. Independent review found and resolved provider-stream timeout and WebSocket token-log issues. Live deterministic checks passed cross-backend forwarding while the owner worked, recovery after owner death without model replay, graceful lease release, same-socket missed-notification catch-up, an 18-second non-reading observer catch-up, lazy child-journal subscription, and the cancellation commit/retry boundary. Brave real-provider smoke passed streaming, delegation with child-to-parent messaging, child drawer replay, approval, Stop and follow-up, refresh/replay, and same-backend mid-turn continuation. By user direction, three unproven checks are accepted as release waivers rather than claimed passes: Brave attachment upload was blocked by its security gate; sustained slow-reader queue pressure and catch-up were not proven together in one trial; and real-provider mid-turn reconnect did not switch backends, although deterministic A-owner/B-forwarder coverage passed. The ignored [local remaining-issues report](../apps/sarathi/e2e/reports/011-coordinator-2026-09-28/remaining-issues.md) contains supplementary evidence and reproduction details.
 
 ### Conventions (all phases)
 

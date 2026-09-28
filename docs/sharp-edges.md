@@ -8,9 +8,11 @@ Disconnecting a reader or cancelling a local `prompt()` wait does not cancel acc
 
 Only a root actor can raise an ask, and only a live writable root connection can answer it. Children must message their parent. After interruption, send a new root input; do not reuse the expired ask ID.
 
-## One tree, one process
+## One tree, one execution owner
 
-Writer replacement is process-local. Never drive the same root tree from multiple Runtime processes, even when they share a store.
+With `coordinator=None`, writer replacement is process-local; never drive the same root tree from multiple Runtime processes. `PostgresCoordinator` allows multiple Runtime processes to serve a shared root, but only while every one uses its own coordinator and the identical `PostgresStore` object supplied to that Runtime. Bare writes to an enrolled root are fenced.
+
+Takeover waits for the old lease to expire. PostgreSQL uncertainty is an availability error, not proof that the actor is inactive. Started model and tool work is interrupted rather than replayed, and external side effects cannot be rolled back.
 
 ## Actor streams are separate and lazy
 

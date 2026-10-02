@@ -12,4 +12,5 @@ site/
 .coverage
 htmlcov/
 .env
+stress/bench/artifacts/
 .DS_Store

@@ -1,0 +1,19 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: tantra_bench
+      POSTGRES_PASSWORD: tantra_bench
+      POSTGRES_DB: tantra_bench
+    command: [postgres, -c, fsync=on, -c, synchronous_commit=on, -c, max_connections=100]
+    ports:
+      - "127.0.0.1::5432"
+    volumes:
+      - bench_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U tantra_bench -d tantra_bench]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+volumes:
+  bench_data:

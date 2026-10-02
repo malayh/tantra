@@ -10,6 +10,9 @@ test *args:
 stress *args:
     uv run pytest stress {{args}}
 
+bench *args:
+    uv run python -m stress.bench {{args}}
+
 lint:
     uv run ruff check .
     uv run ruff format --check .

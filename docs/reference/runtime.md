@@ -29,6 +29,14 @@ With `coordinator=None`, Runtime keeps its existing single-process behavior. A c
 
 `create(agent, *, session_id=None, model=None, metadata=None) -> UUID` creates an idle root and records its header.
 
+`await delete(root_id, *, allow_active=False) -> bool` permanently removes a root and every descendant. It returns `True` after deletion and `False` for an absent root. Passing a live child ID is rejected. Applications authorize this control operation; it needs no writer token and is never exposed as an agent tool.
+
+Deletion raises `SessionBusy` while a tree has running or queued work, pending approvals, or accepted mutating requests. Pass `allow_active=True` to cancel work and delete without resuming it. Cancellation cannot undo external effects already committed or forcibly stop blocking code. Cooperative tasks are awaited outside the root lock, bounded by the coordinator's request timeout (10 seconds without a coordinator).
+
+Deletion is atomic in PostgreSQL and SQLite, and locked in memory. It removes actor headers, journals, projections, and historical coordinator request bodies. Only permanent ID markers and content-free coordination evidence remain. UUID reuse raises `SessionExists`; readers, result waits, writer operations, and reconnects fail with `SessionNotFound`. Events already delivered or buffered cannot be recalled. A timeout has an unknown outcome: retry deletion using the same root UUID.
+
+`MemoryStore`, `SQLiteStore`, and `PostgresStore` support deletion. Coordinated deletion requires `PostgresCoordinator` using that same store. Filesystem stores and unsupported custom stores/coordinators raise `NotImplementedError` before mutation. Uncoordinated runtimes retain their single-process ownership assumptions; use PostgreSQL coordination for multiple workers.
+
 `connect(root_id, *, after=0, writable=False) -> Connection` validates a root. A connection iterates only the root journal.
 
 `events(agent_id, *, after=0) -> AsyncIterator[LoggedEvent]` replays and tails any root or child journal without activating it.

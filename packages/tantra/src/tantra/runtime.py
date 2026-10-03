@@ -22,6 +22,7 @@ from tantra.coordinator import (
     CommandReply,
     CoordinatedStoreProtocol,
     Coordinator,
+    DeletePayload,
     Ownership,
     PostgresCoordinator,
     ReleaseWriterPayload,
@@ -36,6 +37,7 @@ from tantra.errors import (
     LeaseLost,
     MaxDepthExceeded,
     RemoteExecutionError,
+    SessionBusy,
     SessionExists,
     SessionNotFound,
     TantraError,
@@ -294,6 +296,7 @@ class Runtime:
         self._known_roots: dict[str, str] = {}
         self._ownerships: dict[str, Ownership] = {}
         self._unrecovered: set[str] = set()
+        self._deleting: set[str] = set()
         self._renewals: dict[str, asyncio.Task[None]] = {}
         self._watchers: dict[str, asyncio.Task[None]] = {}
         self._connection_interests: dict[str, int] = {}
@@ -469,6 +472,8 @@ class Runtime:
         task = self._watchers.pop(root_id, None)
         self._observations.pop(root_id, None)
         self._observation_errors.pop(root_id, None)
+        if task is asyncio.current_task():
+            return
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -520,6 +525,8 @@ class Runtime:
             try:
                 async for observation in iterator:
                     await self._apply_observation(root_id, observation)
+                    if getattr(observation, "deleted", False):
+                        return
             except asyncio.CancelledError:
                 raise
             except CoordinatorUnavailable as exc:
@@ -532,6 +539,10 @@ class Runtime:
                     await close()
 
     async def _apply_observation(self, root_id: str, observation: Any) -> None:
+        if getattr(observation, "deleted", False):
+            self._observations[root_id] = observation
+            await self._finish_deletion(root_id, [])
+            return
         previous = self._observations.get(root_id)
         self._observations[root_id] = observation
         self._observation_errors.pop(root_id, None)
@@ -641,6 +652,9 @@ class Runtime:
 
     async def _initialize_root_locked(self, header: SessionHeader, created: SessionCreated) -> None:
         assert self.coordinator is not None
+        is_deleted = getattr(self.store, "is_deleted", None)
+        if is_deleted is not None and await is_deleted(header.id):
+            raise SessionExists(header.id)
         if await self.store.header(header.id) is not None:
             raise SessionExists(header.id)
         ownership = await self.coordinator.acquire(header.id)
@@ -877,6 +891,11 @@ class Runtime:
             raise SessionNotFound(agent_id)
         return header
 
+    async def _check_deleted(self, agent_id: str) -> None:
+        check = getattr(self.store, "is_deleted", None)
+        if check is not None and await check(agent_id):
+            raise SessionNotFound(agent_id)
+
     async def _root_header(self, root_id: str) -> SessionHeader:
         header = await self._header(root_id)
         if header.parent_id is not None or header.root_id not in (None, header.id):
@@ -1012,6 +1031,139 @@ class Runtime:
                 await self._initialize_root_locked(header, created)
         return public_id
 
+    async def delete(self, root_id: UUID, *, allow_active: bool = False) -> bool:
+        return await _shielded(self._accept_delete(root_id, allow_active=allow_active))
+
+    async def _accept_delete(self, root_id: UUID, *, allow_active: bool) -> bool:
+        self._ensure_open()
+        self._ensure_started()
+        _, sid = _id(root_id, "root_id")
+        if not isinstance(allow_active, bool):
+            raise TypeError("allow_active must be a boolean")
+        delete_tree = getattr(self.store, "delete_tree", None)
+        if (
+            not callable(delete_tree)
+            or self.coordinator is not None
+            and not isinstance(self.coordinator, PostgresCoordinator)
+        ):
+            raise NotImplementedError("this store/coordinator does not support session deletion")
+        if self.coordinator is not None:
+            header = await self.store.header(sid)
+            if header is None:
+                return False
+            try:
+                await self._root_header(sid)
+                result = await self._request_command(sid, "delete", DeletePayload(allow_active=allow_active), None)
+            except SessionNotFound:
+                return False
+            finally:
+                await self._release_delete_ownership(sid)
+            return bool(result["deleted"])
+        tasks: list[asyncio.Task[None]] = []
+        async with self._lock(sid):
+            try:
+                ids = await delete_tree(
+                    sid,
+                    allow_active=allow_active,
+                    before_delete=lambda ids: tasks.extend(self._begin_deletion(sid, ids, allow_active)),
+                )
+            except BaseException:
+                self._deleting.discard(sid)
+                raise
+        if ids:
+            await self._finish_deletion(sid, ids, tasks)
+        return bool(ids)
+
+    async def _acquire_for_deletion(self, root_id: str) -> None:
+        assert self.coordinator is not None
+        ownership = await self.coordinator.acquire(root_id)
+        if ownership is None:
+            raise CoordinatorUnavailable(f"root {root_id} is owned by another runtime")
+        self._ownerships[root_id] = ownership
+        self._unrecovered.add(root_id)
+        renewal = self._renewals.pop(root_id, None)
+        if renewal is not None:
+            renewal.cancel()
+            await asyncio.gather(renewal, return_exceptions=True)
+        self._renewals[root_id] = asyncio.create_task(self._renew(root_id, ownership))
+
+    async def _release_delete_ownership(self, root_id: str) -> None:
+        async with self._lock(root_id):
+            if root_id not in self._unrecovered:
+                return
+            ownership = self._ownerships.get(root_id)
+            if ownership is not None:
+                assert self.coordinator is not None
+                try:
+                    async with self.coordinator.transaction(ownership) as store:
+                        await store.relinquish_unrecovered()
+                except LeaseLost:
+                    pass
+                finally:
+                    renewal = self._renewals.pop(root_id, None)
+                    if renewal is not None:
+                        renewal.cancel()
+                        await asyncio.gather(renewal, return_exceptions=True)
+            self._ownerships.pop(root_id, None)
+            self._unrecovered.discard(root_id)
+
+    def _begin_deletion(self, root_id: str, ids: list[str], allow_active: bool) -> list[asyncio.Task[None]]:
+        tasks = [task for actor_id, task in self.active.items() if actor_id in ids and not task.done()]
+        if not allow_active and (
+            tasks or any(live.root_id == root_id and not live.future.done() for live in self.asks.values())
+        ):
+            raise SessionBusy(root_id)
+        self._deleting.add(root_id)
+        for actor_id in ids:
+            self._turn_generations[actor_id] = self._turn_generations.get(actor_id, 0) + 1
+            task = self.active.get(actor_id)
+            if task is not None and not task.done():
+                self._task_reasons[task] = ("interrupted", "session_deleted")
+                task.cancel()
+        for ask_id, live in list(self.asks.items()):
+            if live.root_id == root_id and not live.future.done():
+                live.future.set_exception(AskExpired(ask_id))
+        return tasks
+
+    async def _finish_deletion(self, root_id: str, ids: list[str], tasks: Sequence[asyncio.Task[None]] = ()) -> None:
+        ids = list(set(ids) | {actor for actor, root in self._known_roots.items() if root == root_id})
+        self._deleting.add(root_id)
+        pending = list(tasks)
+        for actor_id in ids:
+            task = self.active.get(actor_id)
+            if task is not None and not task.done() and task not in pending:
+                pending.append(task)
+        self._invalidate_root_locked(root_id)
+        self._unrecovered.discard(root_id)
+        renewal = self._renewals.pop(root_id, None)
+        if renewal is not None:
+            renewal.cancel()
+            pending.append(renewal)
+        for connection in list(self._connections.values()):
+            if connection._root != root_id:
+                continue
+            connection._failure = SessionNotFound(root_id)
+            connection._writer_token = None
+            await self._release_connection(connection)
+        await self._notify_root_interests(root_id)
+        for actor_id in ids:
+            await self._notify(actor_id)
+        if pending:
+            timeout = float(getattr(self.coordinator, "request_timeout", 10.0))
+            done, unfinished = await asyncio.wait(pending, timeout=timeout)
+            for task in done:
+                _consume(task)
+            for task in unfinished:
+                task.add_done_callback(_consume)
+        self._failed_prestarts.pop(root_id, None)
+        self.writers.pop(root_id, None)
+        for actor_id in ids:
+            self._known_roots.pop(actor_id, None)
+            self._errors.pop(actor_id, None)
+            self._activations.pop(actor_id, None)
+            self._turn_generations.pop(actor_id, None)
+        self._deleting.discard(root_id)
+
     def connect(self, root_id: UUID, *, after: int = 0, writable: bool = False) -> Connection:
         _, sid = _id(root_id, "root_id")
         if not isinstance(after, int):
@@ -1090,11 +1242,13 @@ class Runtime:
                         cursor = item.seq
                         yield LoggedEvent(agent_id=public_id, seq=item.seq, event=item.event)
                     continue
+                await self._header(sid)
                 async with signal.condition:
                     generation = signal.generation
                 page = await self.store.read_page(sid, after=cursor)
                 if page:
                     continue
+                await self._header(sid)
                 if connection is not None:
                     connection._check_iteration()
                 if self._closing or self._closed:
@@ -1146,7 +1300,7 @@ class Runtime:
         return future
 
     def _activate(self, agent_id: str, root_id: str) -> None:
-        if self._closed or self._closing:
+        if self._closed or self._closing or root_id in self._deleting:
             return
         self._known_roots[agent_id] = root_id
         task = self.active.get(agent_id)
@@ -1586,8 +1740,12 @@ class Runtime:
                     if interrupted:
                         await self._deliver_lifecycle(header, _terminal_summary(event))
                 except BaseException as exc:
+                    if isinstance(exc, SessionNotFound):
+                        return
                     self._errors.setdefault(agent_id, {})[current] = exc
                     await self._notify(agent_id)
+        except SessionNotFound:
+            return
         except BaseException as exc:
             error: BaseException = exc
             reconciled = False
@@ -1627,11 +1785,16 @@ class Runtime:
                 if self.active.get(agent_id) is task:
                     del self.active[agent_id]
                 reactivate = (
-                    (failed or aborted) and not self._closed and self._activations.get(agent_id, 0) > generation
+                    (failed or aborted)
+                    and not self._closed
+                    and root_id not in self._deleting
+                    and self._activations.get(agent_id, 0) > generation
                 )
+                if reactivate and await self.store.header(agent_id) is None:
+                    reactivate = False
                 if reactivate:
                     self._activate(agent_id, root_id)
-                if failed_prestart and not reactivate:
+                if failed_prestart and not reactivate and root_id not in self._deleting:
                     marker = None if failed_prestart_unknown else current
                     self._failed_prestarts.setdefault(root_id, {})[agent_id] = marker
                 try:
@@ -1651,7 +1814,10 @@ class Runtime:
         if await self.coordinator.locate(root_id) is None:
             async with self._lock(root_id):
                 if await self.coordinator.locate(root_id) is None:
-                    await self._ensure_owner_locked(root_id)
+                    if operation == "delete":
+                        await self._acquire_for_deletion(root_id)
+                    else:
+                        await self._ensure_owner_locked(root_id)
         timeout = float(getattr(self.coordinator, "request_timeout", 10.0))
         envelope = CommandEnvelope(
             request_id=uuid4(),
@@ -1669,8 +1835,13 @@ class Runtime:
                 except CoordinatorUnavailable:
                     async with self._lock(root_id):
                         if await self.coordinator.locate(root_id) is not None:
+                            if operation == "delete":
+                                continue
                             raise
-                        await self._ensure_owner_locked(root_id)
+                        if operation == "delete":
+                            await self._acquire_for_deletion(root_id)
+                        else:
+                            await self._ensure_owner_locked(root_id)
         except CommandTimeout as exc:
             command_id = getattr(payload, "command_id", None)
             raise CommandTimeout(str(command_id or envelope.request_id), command_id=command_id) from exc
@@ -1681,6 +1852,8 @@ class Runtime:
             "invalid_command_reuse": InvalidCommandReuse,
             "writer_replaced": WriterReplaced,
             "writer_required": WriterRequired,
+            "session_busy": SessionBusy,
+            "session_not_found": SessionNotFound,
         }
         error = errors.get(reply.error_code or "")
         if error is not None:
@@ -1692,6 +1865,9 @@ class Runtime:
 
     async def _handle_request(self, envelope: CommandEnvelope, transact: Any) -> None:
         self._ensure_open()
+        if isinstance(envelope.payload, DeletePayload):
+            await self._handle_delete(envelope, transact)
+            return
         after: list[Callable[[], None]] = []
         async with self._lock(envelope.root_id):
             self._ensure_open()
@@ -1699,6 +1875,8 @@ class Runtime:
                 ownership = self._ownerships.get(envelope.root_id)
                 if ownership is None:
                     raise CoordinatorUnavailable(f"root {envelope.root_id} has no recovered owner")
+                if envelope.root_id not in self._renewals:
+                    self._renewals[envelope.root_id] = asyncio.create_task(self._renew(envelope.root_id, ownership))
                 await self._recover_locked(envelope.root_id, ownership)
                 self._unrecovered.discard(envelope.root_id)
             headers: list[SessionHeader] = []
@@ -1851,6 +2029,44 @@ class Runtime:
         async with self._lock(envelope.root_id):
             await self._release_if_idle_locked(envelope.root_id)
 
+    async def _handle_delete(self, envelope: CommandEnvelope, transact: Any) -> None:
+        ids: list[str] = []
+        tasks: list[asyncio.Task[None]] = []
+
+        async def apply(request: CommandEnvelope, store: Any) -> CommandReply:
+            nonlocal ids
+            payload = request.payload
+            assert isinstance(payload, DeletePayload)
+            store.delete_request_id = request.request_id
+            try:
+                ids = await store.delete_tree(
+                    request.root_id,
+                    allow_active=payload.allow_active,
+                    before_delete=lambda actors: tasks.extend(
+                        self._begin_deletion(request.root_id, actors, payload.allow_active)
+                    ),
+                )
+                return CommandReply(request_id=request.request_id, result={"deleted": bool(ids)})
+            except SessionBusy:
+                return CommandReply(
+                    request_id=request.request_id, status="error", error_code="session_busy", message=request.root_id
+                )
+
+        try:
+            async with self._lock(envelope.root_id):
+                reply = await transact(apply)
+        except BaseException:
+            self._deleting.discard(envelope.root_id)
+            if ids and await self.store.is_deleted(envelope.root_id):
+                await self._finish_deletion(envelope.root_id, ids, tasks)
+            raise
+        if reply is not None and reply.status == "ok" and ids:
+            await self._finish_deletion(envelope.root_id, ids, tasks)
+        else:
+            self._deleting.discard(envelope.root_id)
+            async with self._lock(envelope.root_id):
+                await self._release_if_idle_locked(envelope.root_id)
+
     @staticmethod
     def _find_tree_command(
         journals: Mapping[str, Sequence[Stamped]], command_id: str
@@ -1927,18 +2143,29 @@ class Runtime:
                     if connection._writer_token is None:
                         raise WriterReplaced(f"writer for {connection.root_id} was replaced")
                 connection._entered = True
+                self._connections[connection._connection_id] = connection
+                await self._root_header(connection._root)
+                observation = self._current_observation(connection._root)
+                if observation is not None and getattr(observation, "deleted", False):
+                    raise SessionNotFound(connection._root)
                 return
             if connection.writable:
                 self._agent_for(header.agent)
                 async with self._lock(connection._root):
                     self._ensure_open()
+                    await self._root_header(connection._root)
                     generation = self.writers.get(connection._root, 0) + 1
                     self.writers[connection._root] = generation
                     connection._generation = generation
                     connection._entered = True
+                    self._connections[connection._connection_id] = connection
                 await self._notify(connection._root)
                 return
-            connection._entered = True
+            async with self._lock(connection._root):
+                self._ensure_open()
+                await self._root_header(connection._root)
+                connection._entered = True
+                self._connections[connection._connection_id] = connection
         except BaseException:
             if connection._connection_id in self._connections:
                 try:
@@ -1975,6 +2202,8 @@ class Runtime:
                 await self._release_connection_interest(connection._root)
 
     def _check_writer(self, connection: Connection) -> None:
+        if connection._failure is not None:
+            raise connection._failure
         if not connection._entered or not connection.writable:
             raise WriterRequired("an active writable connection is required")
         if self.coordinator is not None:
@@ -2173,6 +2402,7 @@ class Runtime:
             await self._release_actor_interest(self._wait_interests, root_id, agent_id)
 
     async def _wait_observed_result(self, root_id: str, agent_id: str, command_id: UUID) -> TurnResult:
+        await self._check_deleted(agent_id)
         cid = command_id.hex
         signal = self._wait_signal(agent_id)
         inactive = 0
@@ -2207,6 +2437,8 @@ class Runtime:
                 await self._close_complete.wait()
                 continue
             if observation is not None:
+                if getattr(observation, "deleted", False):
+                    raise SessionNotFound(agent_id)
                 if observation.error is not None:
                     if not self._closing and not self._closed:
                         raise observation.error
@@ -2250,6 +2482,7 @@ class Runtime:
         signal = self._wait_signal(agent_id)
         inactive = 0
         while True:
+            await self._check_deleted(agent_id)
             result = await self._result(agent_id, command_id)
             error = self._errors.get(agent_id, {}).get(cid)
             if error is not None and (self.coordinator is None or result is None):
@@ -2484,6 +2717,7 @@ class Connection:
         self._entered = False
         self._watching = False
         self._iterator: AsyncIterator[LoggedEvent] | None = None
+        self._failure: SessionNotFound | None = None
 
     async def __aenter__(self) -> Connection:
         if self._entered:
@@ -2502,6 +2736,8 @@ class Connection:
                 await iterator.aclose()
 
     def _check_iteration(self) -> None:
+        if self._failure is not None:
+            raise self._failure
         if not self._entered:
             raise WriterRequired("connection must be entered before use")
         if self.writable and self.runtime.coordinator is not None and self._writer_token is None:

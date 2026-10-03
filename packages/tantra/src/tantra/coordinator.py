@@ -22,6 +22,7 @@ from tantra.errors import (
     RemoteExecutionError,
     SessionExists,
     SessionNotFound,
+    TantraError,
     WriterReplaced,
 )
 from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
@@ -86,11 +87,16 @@ class CancelPayload(FrozenModel):
     command_id: UUID
 
 
+class DeletePayload(FrozenModel):
+    type: Literal["delete"] = "delete"
+    allow_active: bool = False
+
+
 CommandPayload = Annotated[
-    ClaimWriterPayload | ReleaseWriterPayload | SendPayload | AnswerPayload | CancelPayload,
+    ClaimWriterPayload | ReleaseWriterPayload | SendPayload | AnswerPayload | CancelPayload | DeletePayload,
     Field(discriminator="type"),
 ]
-CommandOperation = Literal["claim_writer", "release_writer", "send", "answer", "cancel"]
+CommandOperation = Literal["claim_writer", "release_writer", "send", "answer", "cancel", "delete"]
 
 
 class CommandEnvelope(FrozenModel):
@@ -106,9 +112,9 @@ class CommandEnvelope(FrozenModel):
     def validate_operation(self) -> CommandEnvelope:
         if self.operation != self.payload.type:
             raise ValueError("operation does not match payload")
-        if self.operation == "claim_writer" and self.writer_token is not None:
-            raise ValueError("claim_writer cannot include a writer token")
-        if self.operation != "claim_writer" and self.writer_token is None:
+        if self.operation in ("claim_writer", "delete") and self.writer_token is not None:
+            raise ValueError(f"{self.operation} cannot include a writer token")
+        if self.operation not in ("claim_writer", "delete") and self.writer_token is None:
             raise ValueError(f"{self.operation} requires a writer token")
         if self.writer_token is not None and self.writer_token.root_id != self.root_id:
             raise ValueError("writer token belongs to another root")
@@ -136,7 +142,7 @@ class ChangeNotice(FrozenModel):
     version: Literal[1] = 1
     change_id: int
     root_id: str
-    kind: Literal["journal", "header", "ownership", "writer", "activity", "recovery", "request"]
+    kind: Literal["journal", "header", "ownership", "writer", "activity", "recovery", "request", "deleted"]
     actor_id: str | None = None
     seq: int | None = None
 
@@ -154,6 +160,7 @@ class RootObservation:
     actors: dict[str, tuple[int, bool]]
     expires_at: datetime | None = None
     error: CoordinatorUnavailable | None = None
+    deleted: bool = False
 
 
 @dataclass
@@ -330,6 +337,11 @@ class PostgresCoordinator:
                 async with conn.transaction():
                     await self._configure_transaction(conn)
                     await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (root_id,))
+                    deleted = await conn.execute(
+                        self._sql("SELECT 1 FROM {schema}.deleted_sessions WHERE actor_id = %s"), (root_id,)
+                    )
+                    if await deleted.fetchone() is not None:
+                        raise SessionNotFound(root_id)
                     await conn.execute(
                         self._sql(
                             "INSERT INTO {schema}.coordinator_roots (root_id) VALUES (%s)"
@@ -559,6 +571,8 @@ class PostgresCoordinator:
                     reply = self._observed_replies.get(envelope.request_id)
                     if submitted and reply is not None:
                         return reply
+                    if observed.deleted:
+                        raise SessionNotFound(envelope.root_id)
                     if not observed.owner_valid or observed.owner_instance is None or observed.expires_at is None:
                         if not submitted:
                             if located:
@@ -746,6 +760,11 @@ class PostgresCoordinator:
                 async with conn.transaction():
                     await self._configure_transaction(conn)
                     await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (envelope.root_id,))
+                    deleted = await conn.execute(
+                        self._sql("SELECT 1 FROM {schema}.deleted_sessions WHERE actor_id = %s"), (envelope.root_id,)
+                    )
+                    if await deleted.fetchone() is not None:
+                        raise SessionNotFound(envelope.root_id)
                     root = await conn.execute(
                         self._sql(
                             "SELECT owner_instance, generation, expires_at"
@@ -897,8 +916,10 @@ class PostgresCoordinator:
                         " 'change_id', coalesce(c.id, 0), 'writer', r.writer_connection,"
                         " 'owner', r.owner_instance, 'generation', coalesce(r.generation, 0),"
                         " 'valid', coalesce(r.owner_instance IS NOT NULL AND r.expires_at > clock_timestamp(), false),"
-                        " 'expires', r.expires_at, 'recovery', coalesce(r.recovery, '{{}}'::jsonb))"
+                        " 'expires', r.expires_at, 'recovery', coalesce(r.recovery, '{{}}'::jsonb),"
+                        " 'deleted', d.actor_id IS NOT NULL)"
                         " FROM interested i LEFT JOIN {schema}.coordinator_roots r ON r.root_id = i.root_id"
+                        " LEFT JOIN {schema}.deleted_sessions d ON d.actor_id = i.root_id"
                         " LEFT JOIN LATERAL (SELECT id FROM {schema}.coordinator_changes"
                         " WHERE root_id = i.root_id ORDER BY id DESC LIMIT 1) c ON true"
                         " UNION ALL SELECT 'actor', i.root_id, s.id, jsonb_build_array(s.last_seq,"
@@ -941,6 +962,7 @@ class PostgresCoordinator:
                     recovery=dict(data["recovery"]),
                     actors=actors[root_id],
                     expires_at=datetime.fromisoformat(data["expires"]) if data["expires"] else None,
+                    deleted=bool(data["deleted"]),
                 )
                 async with state.condition:
                     state.snapshot = snapshot
@@ -1014,6 +1036,8 @@ class PostgresCoordinator:
             if reply.request_id != locked.request_id:
                 raise ValueError("handler replied to a different request")
             await store.reply(reply)
+            if store.deleted_ids:
+                await store.finish_deletion()
             return reply
 
     async def _next_request(self) -> tuple[CommandEnvelope, Ownership] | None:
@@ -1182,12 +1206,55 @@ class CoordinatedStore:
         self.conn = conn
         self._active = True
         self.writer_change_id: int | None = None
+        self.deleted_ids: list[str] = []
+        self.delete_request_id: UUID | None = None
+
+    async def delete_tree(
+        self, sid: str, *, allow_active: bool = False, before_delete: Callable[[list[str]], None] | None = None
+    ) -> list[str]:
+        await self._assert_fence()
+        if sid != self.ownership.root_id:
+            raise LeaseLost(sid)
+        if self.delete_request_id is None:
+            raise TantraError("coordinated deletion requires a delete control request")
+        self.deleted_ids = await self.coordinator.store._delete_tree(
+            self.conn,
+            sid,
+            allow_active=allow_active,
+            before_delete=before_delete,
+            request_id=self.delete_request_id,
+        )
+        return self.deleted_ids
+
+    async def finish_deletion(self) -> None:
+        await self._assert_fence()
+        await self.conn.execute(
+            self.coordinator._sql(
+                "UPDATE {schema}.coordinator_roots SET owner_instance = NULL, expires_at = NULL,"
+                " writer_connection = NULL, recovery = '{{}}'::jsonb, generation = generation + 1,"
+                " updated_at = clock_timestamp() WHERE root_id = %s"
+            ),
+            (self.ownership.root_id,),
+        )
+        await self.coordinator._publish(self.conn, self.ownership.root_id, "deleted")
+
+    async def relinquish_unrecovered(self) -> None:
+        await self._assert_fence()
+        await self.conn.execute(
+            self.coordinator._sql(
+                "UPDATE {schema}.coordinator_roots SET owner_instance = NULL, expires_at = NULL,"
+                " updated_at = clock_timestamp() WHERE root_id = %s"
+            ),
+            (self.ownership.root_id,),
+        )
+        await self.coordinator._publish(self.conn, self.ownership.root_id, "ownership")
 
     async def create(self, header: SessionHeader) -> None:
         self._ensure_active()
         root_id = header.root_id or header.id
         if root_id != self.ownership.root_id:
             raise LeaseLost(root_id)
+        await self.coordinator.store._check_create(self.conn, header)
         stored = header.model_copy(deep=True)
         cursor = await self.conn.execute(
             self.coordinator._sql(
@@ -1515,7 +1582,7 @@ class CoordinatedStore:
 
     async def change(
         self,
-        kind: Literal["journal", "header", "ownership", "writer", "activity", "recovery", "request"],
+        kind: Literal["journal", "header", "ownership", "writer", "activity", "recovery", "request", "deleted"],
         actor_id: str | None = None,
         seq: int | None = None,
     ) -> int:

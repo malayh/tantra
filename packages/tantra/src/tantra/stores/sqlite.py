@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
-from tantra.errors import CorruptLog, InvalidCommandReuse, SessionExists, SessionNotFound
+from tantra.errors import CorruptLog, InvalidCommandReuse, SessionBusy, SessionExists, SessionNotFound, TantraError
 from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
-from tantra.stores.base import UNSET, EnqueueResult, apply_patch, reduce_header, select_headers, select_memories
+from tantra.stores.base import (
+    UNSET,
+    EnqueueResult,
+    apply_patch,
+    reduce_header,
+    reduce_journal,
+    select_headers,
+    select_memories,
+)
 
 BUSY_TIMEOUT_MS = 30000
 
@@ -39,6 +47,11 @@ SCHEMA = (
         row TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS deleted_sessions (
+        id TEXT PRIMARY KEY
+    )
+    """,
 )
 
 
@@ -58,8 +71,15 @@ class SQLiteStore:
         stored = header.model_copy(deep=True)
         with self._write() as conn:
             existing = conn.execute("SELECT 1 FROM sessions WHERE id = ?", (header.id,)).fetchone()
-            if existing is not None:
+            deleted = conn.execute("SELECT 1 FROM deleted_sessions WHERE id = ?", (header.id,)).fetchone()
+            if existing is not None or deleted is not None:
                 raise SessionExists(header.id)
+            deleted_parent = conn.execute(
+                "SELECT id FROM deleted_sessions WHERE id IN (?, ?) LIMIT 1",
+                (header.root_id, header.parent_id),
+            ).fetchone()
+            if deleted_parent is not None:
+                raise SessionNotFound(deleted_parent[0])
             conn.execute(
                 "INSERT INTO sessions (id, header, created_at, parent_id, last_seq) VALUES (?, ?, ?, ?, ?)",
                 (
@@ -71,10 +91,61 @@ class SQLiteStore:
                 ),
             )
 
+    async def delete_tree(
+        self,
+        sid: str,
+        *,
+        allow_active: bool = False,
+        before_delete: Callable[[list[str]], None] | None = None,
+    ) -> list[str]:
+        with self._write() as conn:
+            row = conn.execute("SELECT header FROM sessions WHERE id = ?", (sid,)).fetchone()
+            if row is None:
+                return []
+            root = SessionHeader.model_validate_json(row[0])
+            if root.parent_id is not None or root.root_id not in (None, sid):
+                raise TantraError(f"session {sid} is not a root session")
+            rows = conn.execute("SELECT id, parent_id FROM sessions").fetchall()
+            by_parent: dict[str, list[str]] = {}
+            for actor_id, parent_id in rows:
+                if parent_id is not None:
+                    by_parent.setdefault(parent_id, []).append(actor_id)
+            ids = [sid]
+            for current in ids:
+                ids.extend(sorted(by_parent.get(current, [])))
+            if not allow_active:
+                for actor_id in ids:
+                    header_row = conn.execute("SELECT header FROM sessions WHERE id = ?", (actor_id,)).fetchone()
+                    event_rows = conn.execute(
+                        "SELECT stamped FROM events WHERE session_id = ? ORDER BY seq",
+                        (actor_id,),
+                    ).fetchall()
+                    journal = reduce_journal(_parse(actor_id, event[0]) for event in event_rows)
+                    header = SessionHeader.model_validate_json(header_row[0])
+                    if (
+                        header.pending_ask is not None
+                        or header.status in ("queued", "running", "awaiting_input")
+                        or header.current_turn_id is not None
+                        or journal.pending
+                        or journal.incomplete is not None
+                    ):
+                        raise SessionBusy(sid)
+            if before_delete is not None:
+                before_delete(ids)
+            placeholders = ", ".join("?" for _ in ids)
+            conn.execute(f"DELETE FROM events WHERE session_id IN ({placeholders})", ids)
+            conn.execute(f"DELETE FROM sessions WHERE id IN ({placeholders})", ids)
+            conn.executemany("INSERT INTO deleted_sessions (id) VALUES (?)", ((actor_id,) for actor_id in ids))
+            return ids
+
     async def header(self, sid: str) -> SessionHeader | None:
         with self._connect() as conn:
             row = conn.execute("SELECT header, last_seq FROM sessions WHERE id = ?", (sid,)).fetchone()
         return _hydrate(row) if row is not None else None
+
+    async def is_deleted(self, sid: str) -> bool:
+        with self._connect() as conn:
+            return conn.execute("SELECT 1 FROM deleted_sessions WHERE id = ?", (sid,)).fetchone() is not None
 
     async def put_header(self, h: SessionHeader) -> None:
         stored = h.model_copy(deep=True)

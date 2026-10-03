@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add `Runtime.delete(root_id, allow_active=False)` for atomic root-tree deletion on PostgreSQL, SQLite, and memory stores, with active-work protection and permanent UUID markers. Coordinated deletion revokes ownership and ends readers with `SessionNotFound`.
+- PostgreSQL migration 8 adds deletion markers and write guards. Stop writers before setup; retained event bodies, sequences, and replay cursors remain unchanged. Filesystem deletion is unsupported.
+
 ## 1.3.0
 
 Added:

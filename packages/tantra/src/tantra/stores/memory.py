@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any
 
-from tantra.errors import InvalidCommandReuse, SessionExists, SessionNotFound
+from tantra.errors import InvalidCommandReuse, SessionBusy, SessionExists, SessionNotFound, TantraError
 from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
-from tantra.stores.base import UNSET, EnqueueResult, apply_patch, reduce_header, select_headers, select_memories
+from tantra.stores.base import (
+    UNSET,
+    EnqueueResult,
+    apply_patch,
+    reduce_header,
+    reduce_journal,
+    select_headers,
+    select_memories,
+)
 
 
 class MemoryStore:
@@ -15,6 +23,7 @@ class MemoryStore:
         self._headers: dict[str, SessionHeader] = {}
         self._events: dict[str, list[Stamped]] = {}
         self._memories: dict[str, MemoryRecord] = {}
+        self._deleted: set[str] = set()
         self._lock = threading.Lock()
 
     async def setup(self) -> None:
@@ -22,16 +31,58 @@ class MemoryStore:
 
     async def create(self, header: SessionHeader) -> None:
         with self._lock:
-            if header.id in self._headers:
+            if header.id in self._headers or header.id in self._deleted:
                 raise SessionExists(header.id)
+            if header.root_id in self._deleted or header.parent_id in self._deleted:
+                raise SessionNotFound(header.root_id or header.parent_id)
             stored = header.model_copy(deep=True)
             self._headers[stored.id] = stored
             self._events[stored.id] = []
+
+    async def delete_tree(
+        self,
+        sid: str,
+        *,
+        allow_active: bool = False,
+        before_delete: Callable[[list[str]], None] | None = None,
+    ) -> list[str]:
+        with self._lock:
+            root = self._headers.get(sid)
+            if root is None:
+                return []
+            if root.parent_id is not None or root.root_id not in (None, sid):
+                raise TantraError(f"session {sid} is not a root session")
+            ids = [sid]
+            for current in ids:
+                ids.extend(sorted(h.id for h in self._headers.values() if h.parent_id == current))
+            if not allow_active:
+                for actor_id in ids:
+                    header = self._headers[actor_id]
+                    journal = reduce_journal(self._events.get(actor_id, []))
+                    if (
+                        header.pending_ask is not None
+                        or header.status in ("queued", "running", "awaiting_input")
+                        or header.current_turn_id is not None
+                        or journal.pending
+                        or journal.incomplete is not None
+                    ):
+                        raise SessionBusy(sid)
+            if before_delete is not None:
+                before_delete(ids)
+            for actor_id in ids:
+                del self._headers[actor_id]
+                self._events.pop(actor_id, None)
+                self._deleted.add(actor_id)
+            return ids
 
     async def header(self, sid: str) -> SessionHeader | None:
         with self._lock:
             header = self._headers.get(sid)
             return header.model_copy(deep=True) if header is not None else None
+
+    async def is_deleted(self, sid: str) -> bool:
+        with self._lock:
+            return sid in self._deleted
 
     async def put_header(self, h: SessionHeader) -> None:
         with self._lock:

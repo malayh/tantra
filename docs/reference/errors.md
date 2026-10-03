@@ -4,6 +4,7 @@
 |---|---|
 | `TantraError` | Base error or invalid configuration/call |
 | `SessionNotFound` | Unknown root or actor UUID |
+| `SessionBusy` | Deletion refused because the session tree has active or uncertain work |
 | `InvalidCommandReuse` | One command UUID was reused with different content |
 | `WriterRequired` | Mutation attempted without an entered writable connection |
 | `WriterReplaced` | A newer writable connection owns the root tree |

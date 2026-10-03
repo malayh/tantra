@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -14,6 +14,7 @@ from tantra.errors import (
     CorruptLog,
     InvalidCommandReuse,
     ModelChangeBusy,
+    SessionBusy,
     SessionExists,
     SessionNotFound,
     TantraError,
@@ -372,6 +373,48 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         " ON {schema}.coordinator_requests ((COALESCE(completed_at, deadline)), request_id)",
         "CREATE INDEX coordinator_changes_cleanup_idx ON {schema}.coordinator_changes (created_at, id)",
     ),
+    (
+        "CREATE TABLE {schema}.deleted_sessions (actor_id text PRIMARY KEY, root_id text NOT NULL)",
+        """
+        CREATE FUNCTION {schema}.guard_deleted_session() RETURNS trigger AS $$
+        DECLARE
+            actor text;
+            root text;
+            parent text;
+        BEGIN
+            IF TG_TABLE_NAME = 'sessions' THEN
+                actor := NEW.id;
+                root := COALESCE(NULLIF(NEW.header->>'root_id', ''), actor);
+                parent := NEW.parent_id;
+                IF parent IS NOT NULL AND NULLIF(NEW.header->>'root_id', '') IS NULL THEN
+                    WITH RECURSIVE ancestors AS (
+                        SELECT id, parent_id, header FROM {schema}.sessions WHERE id = parent
+                        UNION SELECT s.id, s.parent_id, s.header FROM {schema}.sessions s
+                              JOIN ancestors a ON s.id = a.parent_id
+                    ) SELECT COALESCE(NULLIF(header->>'root_id', ''), id) INTO root
+                      FROM ancestors WHERE parent_id IS NULL LIMIT 1;
+                    root := COALESCE(root, actor);
+                END IF;
+            ELSE
+                actor := NEW.session_id;
+                SELECT COALESCE(NULLIF(header->>'root_id', ''), id)
+                    INTO root FROM {schema}.sessions WHERE id = actor;
+                root := COALESCE(root, actor);
+            END IF;
+            PERFORM pg_advisory_xact_lock(hashtextextended(root, 0));
+            IF EXISTS (SELECT 1 FROM {schema}.deleted_sessions
+                       WHERE actor_id = actor OR actor_id = root OR actor_id = parent) THEN
+                RAISE EXCEPTION 'session % was deleted', actor USING ERRCODE = '55000';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        """,
+        "CREATE TRIGGER deleted_session_guard BEFORE INSERT OR UPDATE ON {schema}.sessions"
+        " FOR EACH ROW EXECUTE FUNCTION {schema}.guard_deleted_session()",
+        "CREATE TRIGGER deleted_event_guard BEFORE INSERT OR UPDATE ON {schema}.events"
+        " FOR EACH ROW EXECUTE FUNCTION {schema}.guard_deleted_session()",
+    ),
 )
 
 
@@ -419,22 +462,138 @@ class PostgresStore:
     async def create(self, header: SessionHeader) -> None:
         stored = header.model_copy(deep=True)
         async with self._connection() as conn:
+            async with conn.transaction():
+                await self._check_create(conn, stored)
+                cursor = await conn.execute(
+                    self._sql(
+                        "INSERT INTO {schema}.sessions (id, header, metadata, parent_id, created_at, last_seq)"
+                        " VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING"
+                    ),
+                    (
+                        stored.id,
+                        _json(stored),
+                        Jsonb(stored.metadata),
+                        stored.parent_id,
+                        stored.created_at,
+                        stored.last_seq,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    raise SessionExists(header.id)
+
+    async def _check_create(self, conn: Any, header: SessionHeader) -> None:
+        root_id = header.root_id or header.id
+        if header.root_id is None and header.parent_id is not None:
             cursor = await conn.execute(
                 self._sql(
-                    "INSERT INTO {schema}.sessions (id, header, metadata, parent_id, created_at, last_seq)"
-                    " VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING"
+                    "WITH RECURSIVE ancestors AS (SELECT id, parent_id, header FROM {schema}.sessions WHERE id = %s"
+                    " UNION SELECT s.id, s.parent_id, s.header FROM {schema}.sessions s"
+                    " JOIN ancestors a ON s.id = a.parent_id)"
+                    " SELECT COALESCE(NULLIF(header->>'root_id', ''), id)"
+                    " FROM ancestors WHERE parent_id IS NULL LIMIT 1"
                 ),
-                (
-                    stored.id,
-                    _json(stored),
-                    Jsonb(stored.metadata),
-                    stored.parent_id,
-                    stored.created_at,
-                    stored.last_seq,
-                ),
+                (header.parent_id,),
             )
-            if cursor.rowcount == 0:
-                raise SessionExists(header.id)
+            ancestor = await cursor.fetchone()
+            if ancestor is not None:
+                root_id = ancestor[0]
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (root_id,))
+        cursor = await conn.execute(
+            self._sql("SELECT actor_id FROM {schema}.deleted_sessions WHERE actor_id = ANY(%s::text[])"),
+            ([header.id, root_id, header.parent_id],),
+        )
+        deleted = {row[0] for row in await cursor.fetchall()}
+        if header.id in deleted:
+            raise SessionExists(header.id)
+        if deleted:
+            raise SessionNotFound(root_id)
+
+    async def is_deleted(self, sid: str) -> bool:
+        async with self._connection() as conn:
+            cursor = await conn.execute(
+                self._sql("SELECT EXISTS (SELECT 1 FROM {schema}.deleted_sessions WHERE actor_id = %s)"), (sid,)
+            )
+            return bool((await cursor.fetchone())[0])
+
+    async def delete_tree(
+        self, sid: str, *, allow_active: bool = False, before_delete: Callable[[list[str]], None] | None = None
+    ) -> list[str]:
+        async with self._connection() as conn, conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (sid,))
+            cursor = await conn.execute(self._sql("SELECT 1 FROM {schema}.sessions WHERE id = %s"), (sid,))
+            if await cursor.fetchone() is None:
+                return []
+            await self._guard_session(conn, sid)
+            return await self._delete_tree(conn, sid, allow_active=allow_active, before_delete=before_delete)
+
+    async def _deletion_headers(self, conn: Any, sid: str) -> list[SessionHeader]:
+        cursor = await conn.execute(
+            self._sql(
+                "WITH RECURSIVE tree(id) AS (SELECT id FROM {schema}.sessions WHERE id = %s"
+                " UNION SELECT s.id FROM {schema}.sessions s JOIN tree t ON s.parent_id = t.id)"
+                " SELECT s.header, s.last_seq FROM {schema}.sessions s JOIN tree t ON s.id = t.id"
+                ' ORDER BY s.id COLLATE "C" FOR UPDATE OF s'
+            ),
+            (sid,),
+        )
+        headers = [_hydrate(row) for row in await cursor.fetchall()]
+        root = next((header for header in headers if header.id == sid), None)
+        if root is not None and (root.parent_id is not None or root.root_id not in (None, sid)):
+            raise TantraError(f"session {sid} is not a root")
+        return headers
+
+    async def _delete_tree(
+        self,
+        conn: Any,
+        sid: str,
+        *,
+        allow_active: bool,
+        before_delete: Callable[[list[str]], None] | None = None,
+        request_id: Any = None,
+    ) -> list[str]:
+        headers = await self._deletion_headers(conn, sid)
+        if not headers:
+            return []
+        ids = [header.id for header in headers]
+        if not allow_active:
+            cursor = await conn.execute(
+                self._sql(
+                    "SELECT EXISTS (SELECT 1 FROM {schema}.journal_index WHERE actor_id = ANY(%s::text[]) AND live"
+                    " UNION ALL SELECT 1 FROM {schema}.sessions WHERE id = ANY(%s::text[])"
+                    " AND (operational_version <> 1 OR operational_seq <> last_seq"
+                    " OR header->>'status' IN ('queued', 'running', 'awaiting_input')"
+                    " OR header->>'current_turn_id' IS NOT NULL OR header->>'pending_ask' IS NOT NULL)"
+                    " UNION ALL SELECT 1 FROM {schema}.coordinator_activity"
+                    " WHERE root_id = %s AND active"
+                    " UNION ALL SELECT 1 FROM {schema}.coordinator_requests WHERE root_id = %s"
+                    " AND reply IS NULL AND deadline > clock_timestamp()"
+                    " AND envelope->>'operation' IN ('send', 'answer', 'cancel'))"
+                ),
+                (ids, ids, sid, sid),
+            )
+            if (await cursor.fetchone())[0]:
+                raise SessionBusy(sid)
+        if before_delete is not None:
+            before_delete(ids)
+        await conn.execute(
+            self._sql(
+                "DELETE FROM {schema}.cancellation_targets"
+                " WHERE source_actor_id = ANY(%s::text[]) OR actor_id = ANY(%s::text[])"
+            ),
+            (ids, ids),
+        )
+        await conn.execute(self._sql("DELETE FROM {schema}.events WHERE session_id = ANY(%s::text[])"), (ids,))
+        await conn.execute(self._sql("DELETE FROM {schema}.sessions WHERE id = ANY(%s::text[])"), (ids,))
+        await conn.execute(self._sql("INSERT INTO {schema}.deleted_sessions SELECT unnest(%s::text[]), %s"), (ids, sid))
+        await conn.execute(self._sql("DELETE FROM {schema}.coordinator_activity WHERE root_id = %s"), (sid,))
+        await conn.execute(
+            self._sql(
+                "DELETE FROM {schema}.coordinator_requests WHERE root_id = %s AND request_id IS DISTINCT FROM %s::uuid"
+            ),
+            (sid, request_id),
+        )
+        await conn.execute(self._sql("DELETE FROM {schema}.coordinator_changes WHERE root_id = %s"), (sid,))
+        return ids
 
     async def header(self, sid: str) -> SessionHeader | None:
         async with self._connection() as conn:

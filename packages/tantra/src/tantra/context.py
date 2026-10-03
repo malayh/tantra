@@ -84,6 +84,18 @@ def compaction_window(events: Sequence[SessionEvent]) -> tuple[str, list[Session
     return applied.summary, list(events[floor:])
 
 
+def compacted_history(events: Sequence[SessionEvent]) -> list[SessionEvent]:
+    _, window = compaction_window(events)
+    latest = next(
+        (index for index in range(len(events) - 1, -1, -1) if isinstance(events[index], CompactionApplied)),
+        -1,
+    )
+    if latest < 0:
+        return window
+    floor = len(events) - len(window)
+    return list(events[min(latest, floor) :])
+
+
 def assemble_messages(summary: str, events: Sequence[SessionEvent]) -> list[Message]:
     messages: list[Message] = [UserMessage(content=summary)] if summary else []
     samples: dict[str, AssistantMessage] = {}

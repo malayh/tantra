@@ -1048,3 +1048,59 @@ async def test_runtime_memory_tools_write_and_recall_without_a_coordinator() -> 
     assert isinstance(completed["w"], str)
     assert completed["r"][0]["title"] == "Failure modes first"
     await runtime.aclose()
+
+
+async def test_prompt_waits_for_shutdown_terminal_commit(monkeypatch):
+    provider = GateProvider()
+    runtime = Runtime(provider, MemoryStore(), [Bot], default_model="m")
+    sid = await runtime.create(Bot)
+    entered, release = asyncio.Event(), asyncio.Event()
+    read = runtime._operational
+
+    async def delayed(actor_id, **kwargs):
+        if runtime._closed:
+            entered.set()
+            await release.wait()
+        return await read(actor_id, **kwargs)
+
+    monkeypatch.setattr(runtime, "_operational", delayed)
+    async with runtime.connect(sid, writable=True) as connection:
+        command = uuid4()
+        await connection.send("active", command_id=command)
+        await provider.started.wait()
+        waiter = asyncio.create_task(runtime._wait_result(sid.hex, command))
+        closing = asyncio.create_task(runtime.aclose())
+        await asyncio.wait_for(entered.wait(), 1)
+        await runtime._notify(sid.hex)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        release.set()
+        await asyncio.wait_for(closing, 1)
+        assert (await asyncio.wait_for(waiter, 1)).outcome == "interrupted"
+
+
+async def test_prompt_rechecks_result_if_shutdown_finishes_during_read(monkeypatch):
+    provider = GateProvider()
+    runtime = Runtime(provider, MemoryStore(), [Bot], default_model="m")
+    sid = await runtime.create(Bot)
+    entered, release = asyncio.Event(), asyncio.Event()
+    read = runtime._result
+
+    async def delayed(actor_id, command_id):
+        result = await read(actor_id, command_id)
+        if result is None and not entered.is_set():
+            entered.set()
+            await release.wait()
+        return result
+
+    monkeypatch.setattr(runtime, "_result", delayed)
+    async with runtime.connect(sid, writable=True) as connection:
+        command = uuid4()
+        await connection.send("active", command_id=command)
+        await provider.started.wait()
+        waiter = asyncio.create_task(runtime._wait_result(sid.hex, command))
+        await asyncio.wait_for(entered.wait(), 1)
+        await runtime.aclose()
+        release.set()
+        assert (await asyncio.wait_for(waiter, 1)).outcome == "interrupted"

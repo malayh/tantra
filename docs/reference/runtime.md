@@ -17,10 +17,13 @@ Runtime(
     skills=None,
     memory=None,
     compactor=None,
+    history_mode="full",
     telemetry=None,
     coordinator=None,
 )
 ```
+
+`history_mode="full"` preserves complete history for hooks, callable prompts, and custom compactors. Opt into `"compacted"` to expose only the latest compaction marker and its retained event window while building the same model request. This affects turn context only; event replay and cursors remain complete.
 
 With `coordinator=None`, Runtime keeps its existing single-process behavior. A coordinated Runtime must use the same Store object as its coordinator and must be started with idempotent `await runtime.start()` before create, connect, status, or event operations. Startup failures should fail application readiness.
 

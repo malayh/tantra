@@ -46,6 +46,20 @@ class JournalState:
     incomplete: TurnStarted | None
 
 
+@dataclass(frozen=True)
+class OperationalState(JournalState):
+    finished: AgentFinished | None
+    cancellations: dict[str, list[str]]
+    last_seq: int
+    version: int = 1
+
+
+@dataclass(frozen=True)
+class HistorySnapshot:
+    items: list[Stamped]
+    last_seq: int
+
+
 def matches_metadata(metadata: dict[str, Any], wanted: dict[str, Any] | None) -> bool:
     if not wanted:
         return True

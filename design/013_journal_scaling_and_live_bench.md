@@ -97,16 +97,59 @@ Verified on 2026-10-02:
 - 635 package/bench tests and 95 stress tests passed against durable Compose PostgreSQL with zero skips. Long-journal tests assert zero journal reads for warm writer control, bounded event decoding, and indexed original-event query plans. Migration, NUL keys, conflicts, cancellation transaction reads, retries, and rollback checks passed.
 - Ruff lint/format and `git diff --check` passed. One independent review completed after its fixes. No paid inference ran. Owned workers and Compose resources were removed.
 
-### P2 — Bounded recovery and optional compacted history · deps: P1 · —
+### P2 — Bounded recovery and optional compacted history · deps: P1 · ✅ DONE
 
-Deliver transactional versioned operational checkpoints with watermarks, pending inputs, unfinished turns, finish state, and unresolved cancellation intent; suffix recovery; targeted result reads; and opt-in compacted context loading.
+Separate operational state from model history. Replace repeated full reductions in recovery, queue draining, cancellation, and result waits. Keep full history as the default. Use deterministic providers and the owned durable Compose database; no paid inference.
 
-Verify equivalence with full journal reduction, corrupt/stale checkpoint recovery, crash boundaries, asks, child delivery, cancellation, queued work, retained floors preceding compaction markers, tool pairing, skill content, and default hook compatibility. Started abandoned turns remain interrupted and are never replayed.
+Deliverables, in order:
 
-- [ ] Checkpoints and backfill
-- [ ] Recovery and targeted results
-- [ ] Compacted context and public option
-- [ ] Focused checks, comparison, and review
+1. **Transactional operational checkpoints — `stores/postgres.py`, `stores/base.py`, `coordinator.py`.**
+   - Add migration 6 with an operational format version and covered sequence on each session. Advance a current watermark in the existing header/sequence update; preserve stale/invalid markers until catch-up or repair. Streaming-only appends add no separate checkpoint write or round trip.
+   - Extend `journal_index` with a live-work flag and partial actor/type/sequence index. Live input/start pointers represent pending inputs and unmatched starts; the existing latest-finish index supplies journal-backed finish evidence. Fetch original typed events only for live work and finish. Validate live pointer identity and absence of closing lifecycle evidence before use; contradictory live flags require fenced repair.
+   - Match `reduce_journal`: preserve input sequence order and generic append duplicates; any start/terminal excludes matching inputs, and any terminal excludes matching starts. Keep all unmatched starts and expose the latest, including terminal-before-input/start cases. Use P1's lifetime existence indexes and byte keys.
+   - Add normalized unresolved cancellation-target pointers. Terminal commits resolve matching projected targets; original cancellation events/targets stay immutable. Only root-journal intent participates in tree recovery. This avoids checkpoint blobs and cancellation lists growing with history.
+   - Share maintenance across ordinary/coordinated append and enqueue on their transaction connection. Backfill at most 1,000 events per keyset page through the existing codec, with writers stopped. Preserve both envelopes, NUL payloads, original bodies/sequences, and atomic schema-version publication; failure rolls back and remains retryable.
+
+2. **Bounded state reads and recovery — `runtime.py`, Store and coordinated view.**
+   - Add optional `read_operational(actor_id)` returning pending/start/finish evidence, unresolved targets, version, and watermark. Required Store/Coordinator protocols remain unchanged; unsupported implementations retain full reduction.
+   - Read a consistent snapshot at a journal high-water mark. Catch up a valid stale checkpoint from indexed lifecycle evidence, excluding streaming deltas. Missing, unsupported-version, invalid-watermark, or structurally invalid state requires authoritative reduction and fenced repair before activation. Corrupt journal evidence and database failures remain explicit errors.
+   - Route `_recover_locked`, `_drain` selection/rechecks/error handling, `_interrupt_if_incomplete`, pending cancellation on finish, explicit cancellation, and shutdown interruption through operational state. Mutation decisions/repair use the fenced connection; preserve lock order, task generations, and effects after commit. Result waiters synchronize with shutdown completion before treating a missing terminal as closed; shutdown still rejects new work immediately.
+   - Preserve the recovery barrier: apply stored cancellation targets, interrupt abandoned starts, expire their asks, reconcile child lifecycle notices idempotently, then drain accepted unstarted inputs. Do not replay samples/tools or recreate historical ask futures. Repeated recovery must not duplicate terminals or parent notifications.
+
+3. **Targeted results — `runtime.py::_wait_result`, PostgreSQL Store.**
+   - Add optional `read_turn(actor_id, turn_id)`. Resolve the first matching start/terminal with P1's index. Until a terminal exists, read no turn body; prestart terminals require only their own row.
+   - Page the inclusive start-to-terminal interval at a frozen upper bound and reuse `_turn_result`. Preserve completed-sample text, usage, output, and every terminal outcome. Unsupported stores keep full reconstruction; notification/watcher behavior stays in P3.
+
+4. **Optional compacted history — `runtime.py`, `loop.py`, Store, reference docs.**
+   - Add validated `Runtime(history_mode="full" | "compacted")`, default `"full"`. Full mode retains full history for hooks, callable prompts, and custom compactors; load it only when preparing a turn, independently of operational state.
+   - Index `CompactionApplied` pointers. Optional `read_compacted(actor_id)` selects the latest original marker and resolves its floor to the first matching `TurnStarted`, including floors before the marker. Read the retained window with the marker in original order at a fixed high-water mark. Absent/unresolved floors use existing marker-plus-suffix behavior; no marker means full history.
+   - Opted-in callbacks see that retained window. Unsupported stores read full history and derive the same window in memory. Reuse `compaction_window`/`build_messages`; preserve request assembly, retained tool pairs/skill bodies, and current pruning policy.
+   - Give `TurnEngine` the loaded high-water mark for subsequent absorption. Shrink its in-memory window after new compaction commits and existing event callbacks. Public Store reads, Runtime events, and `connect(after=...)` still replay the complete unchanged journal.
+
+Verify:
+
+- Differential state tests against full reduction: generated event sequences, generic duplicates/unusual ordering, multiple unmatched starts, finish, cancellation, rollback, lost replies, concurrent acceptance, and header-independent finish evidence. Cover stale/invalid checkpoint repair and interrupted migration/retry without changing original events.
+- Extend existing two-process gates for takeover, failures before/after start, cancellation commit boundaries, expired asks, child/grandchild delivery, queued recovery, repeated recovery, and shutdown. Accepted unstarted inputs execute once; abandoned started turns never execute again.
+- At 4,000/100,000 historical events, enforce read bounds for operational recovery/cancel/shutdown, active/completed result waits, and compacted loading. Inspect SQL plans as well as fetched/decoded rows. Current checkpoints read live evidence; stale checkpoints read uncovered lifecycle rows. Repair and default full context are excluded from these bounds.
+- The bench accepts `--history-mode compacted`, with separate fixture/workload identity. The default full-mode workload remains identical to P0/P1; compare never mixes these modes.
+- Compare full/compacted request assembly for repeated markers, earlier/missing floors, pruning overrides, tools, skills, cancellation context, and actor isolation. Verify default hooks, custom Store/Coordinator fallbacks, compaction during a turn, and unchanged replay digests/cursors.
+- Rerun the unchanged P0 baseline workload; compare with `p1-baseline-final` and publish CLI/HTML results, including regressions. Keep full context/playback measurements comparable; add separate deterministic compacted Runtime evidence. Disclose background SQL, projection write costs, repair costs, and full context reads when queued work begins.
+- Run focused PostgreSQL checks, `just lint`, package/bench tests, the PostgreSQL stress suite with zero skips, one independent review, and `git diff --check`. Update P2 only after verification; stop before P3. Pooling, observer cleanup, and the fresh-model campaign remain later phases.
+
+- [x] Checkpoints and backfill
+- [x] Recovery and targeted results
+- [x] Compacted context and public option
+- [x] Focused checks, comparison, and review
+
+Verified on 2026-10-03:
+
+- [Full baseline](../stress/bench/artifacts/p2-baseline-final/report.html) and [P1/P2 comparison](../stress/bench/artifacts/p2-comparison/report.html): unchanged 10,000-chat, 4,000/100,000-event workload, five repetitions, 166 observations, zero errors. Host, Python, PostgreSQL 17.10, image, and coordinator settings match P1; `fsync=on` and `synchronous_commit=on`. Reports identify the final source hash; owned workers and Compose resources were removed.
+- At 100,000 events, median claim/send fell from 2,446/2,312 ms to 55/44 ms; completion from 1,014 to 118 ms; recovery after lease expiry from 2,240 to 65 ms. Claim/send/recovery fetched 55/56/61 rows, including background activity, versus approximately 200,000 previously. Claim CPU fell from 2,322 to 13 ms. Actual SQL-plan tests enforce indexed event reads at both journal sizes.
+- Regressions remain visible: 100,000-event p95 duplicate/context/playback rose from 36/870/848 to 98/1,675/1,446 ms; full-journal oracle verification from 1,937 to 3,047 ms. At 4,000 events, playback/verification p95 rose by 56/54 ms. Default context, public replay, and bench oracles still decode historical events; five samples on a shared host do not establish causal attribution or a broad latency guarantee. No regression was hidden or used to change the matched workload.
+- [Separate compacted report](../stress/bench/artifacts/p2-compacted-final/report.html): two chats with 4,000/100,000-event histories, five repetitions, 166 observations, zero errors. Both loaded 15–71 retained events; median context reads were 1.9/2.1 ms with four SQL calls and 45 median fetched rows. This is a distinct fixture, not a matched P1 comparison. Public playback and journal invariants still cover every original event.
+- Projection maintenance adds two indexed live-flag updates per distinct lifecycle key and one cancellation-target delete per terminal key. Compaction markers and unresolved targets add their index/pointer inserts. Streaming-only appends add no projection statements or separate checkpoint write; the existing header update advances current coverage. Current 100,000-event claim/send still issue 111/122 median SQL calls including background work; pooling, observer polling, and watcher cleanup remain P3. Stale catch-up scales with uncovered lifecycle evidence; invalid-state repair and maintenance backfill require full authoritative reads. Default context still fetches approximately 100,000 rows when a turn begins.
+- 696 package/bench tests and 96 stress tests passed against durable Compose PostgreSQL with zero skips. Coverage includes projection/reduction parity, rollback, both envelopes/NUL content, interrupted migration, stale/invalid repair, finish evidence, takeover/cancellation/asks/descendants, bounded active/completed result reads, compaction/request parity, custom-store fallback, callbacks, and unchanged replay cursors. Stress-discovered grandchild fallback and shutdown races have deterministic regressions, including all three coordinator liveness-query stages and genuine outage propagation.
+- Ruff lint/format and `git diff --check` passed. One independent review completed, with material fixes re-reviewed and no remaining findings. [Verification output](../stress/bench/artifacts/p2-checks/package-bench.txt) and the earlier [failed stress report](../stress/bench/artifacts/p2-baseline-stress-failure/report.html) are retained. No paid inference ran. Stop after P2.
 
 ### P3 — Concurrent database access and efficient observation · deps: P2 · —
 

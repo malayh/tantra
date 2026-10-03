@@ -374,6 +374,7 @@ def parser() -> argparse.ArgumentParser:
     made.add_argument("--sessions", type=int, default=10_000)
     made.add_argument("--histories", type=int, nargs="+", default=[4_000, 100_000])
     made.add_argument("--samples", type=int, default=5)
+    made.add_argument("--history-mode", choices=("full", "compacted"), default="full")
     made.add_argument("--observers", type=int, default=1_000)
     made.add_argument("--active", type=int, default=100)
     made.add_argument("--campaign", default="journal-scaling")
@@ -408,6 +409,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.mode == "scale" and not (1 <= args.active <= args.observers <= args.sessions - len(args.histories)):
             raise ValueError("scale requires 1 <= active <= observers <= sessions minus history roots")
         settings = provider_settings(args)
+        settings["history_mode"] = args.history_mode
         live = args.mode in ("live", "replay")
         commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
         report.update(
@@ -427,11 +429,13 @@ def main(argv: list[str] | None = None) -> int:
                     "observers": args.observers if args.mode == "scale" else 0,
                     "active": args.active if args.mode == "scale" else 1,
                     "model": settings["model"],
-                    "fixture_version": 1,
+                    "fixture_version": 2 if args.history_mode == "compacted" else 1,
                     "fixture_tool_connections": 4,
                 },
             }
         )
+        if args.history_mode == "compacted":
+            report["workload"]["history_mode"] = "compacted"
         with Database() as database:
             report["database"] = database.metadata
             settings.update({"dsn": database.dsn, "schema": "bench"})
@@ -444,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
                     1 if live else args.sessions,
                     [] if live else args.histories,
                     settings["model"],
+                    compacted=args.history_mode == "compacted",
                 )
             )
             report["fixture_ms"] = (time.perf_counter() - started) * 1_000

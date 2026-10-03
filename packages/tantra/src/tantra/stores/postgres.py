@@ -21,6 +21,7 @@ from tantra.events import (
     AgentFinished,
     AskAnswered,
     CancellationRequested,
+    CompactionApplied,
     InputQueued,
     SessionEvent,
     SessionHeader,
@@ -34,7 +35,7 @@ from tantra.events import (
     Usage,
 )
 from tantra.memory import MemoryRecord
-from tantra.stores.base import UNSET, EnqueueResult, apply_patch, reduce_header
+from tantra.stores.base import UNSET, EnqueueResult, HistorySnapshot, OperationalState, apply_patch, reduce_header
 
 try:
     import psycopg
@@ -337,6 +338,26 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         "CREATE INDEX journal_finish_idx ON {schema}.journal_index (actor_id, seq DESC)"
         " WHERE event_type = 'agent_finished'",
     ),
+    (
+        "ALTER TABLE {schema}.sessions ADD COLUMN operational_version int NOT NULL DEFAULT 1",
+        "ALTER TABLE {schema}.sessions ADD COLUMN operational_seq bigint NOT NULL DEFAULT 0",
+        "ALTER TABLE {schema}.journal_index ADD COLUMN live boolean NOT NULL DEFAULT false",
+        "CREATE INDEX journal_work_idx ON {schema}.journal_index (actor_id, event_type, seq) WHERE live",
+        "CREATE INDEX journal_compaction_idx ON {schema}.journal_index (actor_id, seq DESC)"
+        " WHERE event_type = 'compaction_applied'",
+        """
+        CREATE TABLE {schema}.cancellation_targets (
+            source_actor_id text NOT NULL,
+            source_seq bigint NOT NULL,
+            actor_id text NOT NULL,
+            turn_id bytea NOT NULL,
+            PRIMARY KEY (source_actor_id, source_seq, actor_id, turn_id),
+            FOREIGN KEY (source_actor_id, source_seq)
+                REFERENCES {schema}.events (session_id, seq) ON DELETE CASCADE
+        )
+        """,
+        "CREATE INDEX cancellation_turn_idx ON {schema}.cancellation_targets (actor_id, turn_id)",
+    ),
 )
 
 
@@ -370,6 +391,8 @@ class PostgresStore:
                         await conn.execute(self._sql(statement))
                     if version == 5:
                         await self._backfill_journal_index(conn)
+                    elif version == 6:
+                        await self._backfill_operational(conn)
                     await conn.execute(
                         self._sql("INSERT INTO {schema}.schema_version (version) VALUES (%s)"), (version,)
                     )
@@ -500,8 +523,12 @@ class PostgresStore:
                 header = reduce_header(header, events)
                 header.last_seq = seq
                 await conn.execute(
-                    self._sql("UPDATE {schema}.sessions SET header = %s, last_seq = %s WHERE id = %s"),
-                    (_json(header), seq, sid),
+                    self._sql(
+                        "UPDATE {schema}.sessions SET header = %s, last_seq = %s,"
+                        " operational_seq = CASE WHEN operational_version = 1 AND operational_seq = last_seq"
+                        " THEN %s ELSE operational_seq END WHERE id = %s"
+                    ),
+                    (_json(header), seq, seq, sid),
                 )
                 return seq
 
@@ -533,8 +560,12 @@ class PostgresStore:
                 header = reduce_header(header, [event])
                 header.last_seq = seq
                 await conn.execute(
-                    self._sql("UPDATE {schema}.sessions SET header = %s, last_seq = %s WHERE id = %s"),
-                    (_json(header), seq, sid),
+                    self._sql(
+                        "UPDATE {schema}.sessions SET header = %s, last_seq = %s,"
+                        " operational_seq = CASE WHEN operational_version = 1 AND operational_seq = last_seq"
+                        " THEN %s ELSE operational_seq END WHERE id = %s"
+                    ),
+                    (_json(header), seq, seq, sid),
                 )
                 return EnqueueResult(seq=seq, duplicate=False)
 
@@ -599,7 +630,14 @@ class PostgresStore:
         row = await cursor.fetchone()
         return _parse(actor_id, row[0]) if row is not None else None
 
-    async def _index_events(self, conn: Any, items: Sequence[tuple[str, int, SessionEvent]]) -> None:
+    async def _index_events(
+        self,
+        conn: Any,
+        items: Sequence[tuple[str, int, SessionEvent]],
+        *,
+        operational: bool = True,
+        backfill: bool = False,
+    ) -> None:
         rows = []
         for actor_id, seq, event in items:
             command_id = None
@@ -610,7 +648,7 @@ class PostgresStore:
                     continue
             elif isinstance(event, TurnStarted | TurnCompleted | TurnFailed | TurnCancelled | TurnInterrupted):
                 turn_id = event.turn_id
-            elif not isinstance(event, AgentFinished):
+            elif not isinstance(event, AgentFinished) and not (operational and isinstance(event, CompactionApplied)):
                 continue
             rows.append(
                 (
@@ -626,10 +664,12 @@ class PostgresStore:
                 await cursor.executemany(
                     self._sql(
                         "INSERT INTO {schema}.journal_index (actor_id, seq, event_type, command_id, turn_id)"
-                        " VALUES (%s, %s, %s, %s, %s)"
+                        " VALUES (%s, %s, %s, %s, %s)" + (" ON CONFLICT (actor_id, seq) DO NOTHING" if backfill else "")
                     ),
                     rows,
                 )
+        if operational:
+            await self._project_work(conn, items)
 
     async def _backfill_journal_index(self, conn: Any) -> None:
         after: tuple[str, int] | None = None
@@ -643,8 +683,280 @@ class PostgresStore:
             if not rows:
                 return
             items = [(sid, seq, _parse(sid, raw).event) for sid, seq, raw in rows]
-            await self._index_events(conn, items)
+            await self._index_events(conn, items, operational=False)
             after = rows[-1][:2]
+
+    async def _project_work(self, conn: Any, items: Sequence[tuple[str, int, SessionEvent]]) -> None:
+        keys = {
+            (sid, (event.command_id if isinstance(event, InputQueued) else event.turn_id).encode())
+            for sid, _, event in items
+            if isinstance(
+                event, InputQueued | TurnStarted | TurnCompleted | TurnFailed | TurnCancelled | TurnInterrupted
+            )
+        }
+        if keys:
+            async with conn.cursor() as cursor:
+                await cursor.executemany(
+                    self._sql(
+                        "UPDATE {schema}.journal_index i SET live = NOT EXISTS ("
+                        " SELECT 1 FROM {schema}.journal_index t WHERE t.actor_id = i.actor_id"
+                        " AND t.turn_id = i.command_id)"
+                        " WHERE i.actor_id = %s AND i.command_id = %s AND i.event_type = 'input_queued'"
+                    ),
+                    sorted(keys),
+                )
+                await cursor.executemany(
+                    self._sql(
+                        "UPDATE {schema}.journal_index i SET live = NOT EXISTS ("
+                        " SELECT 1 FROM {schema}.journal_index t WHERE t.actor_id = i.actor_id"
+                        " AND t.turn_id = i.turn_id AND t.event_type <> 'turn_started')"
+                        " WHERE i.actor_id = %s AND i.turn_id = %s AND i.event_type = 'turn_started'"
+                    ),
+                    sorted(keys),
+                )
+        targets = [
+            (sid, seq, actor_id, turn_id.encode())
+            for sid, seq, event in items
+            if isinstance(event, CancellationRequested)
+            for actor_id, turn_ids in event.targets.items()
+            for turn_id in turn_ids
+        ]
+        if targets:
+            async with conn.cursor() as cursor:
+                await cursor.executemany(
+                    self._sql(
+                        "INSERT INTO {schema}.cancellation_targets (source_actor_id, source_seq, actor_id, turn_id)"
+                        " SELECT %s, %s, %s, %s WHERE NOT EXISTS ("
+                        " SELECT 1 FROM {schema}.journal_index WHERE actor_id = %s AND turn_id = %s"
+                        " AND event_type <> 'turn_started') ON CONFLICT DO NOTHING"
+                    ),
+                    [(sid, seq, actor_id, key, actor_id, key) for sid, seq, actor_id, key in targets],
+                )
+        terminals = {
+            (sid, event.turn_id.encode())
+            for sid, _, event in items
+            if isinstance(event, TurnCompleted | TurnFailed | TurnCancelled | TurnInterrupted)
+        }
+        if terminals:
+            async with conn.cursor() as cursor:
+                await cursor.executemany(
+                    self._sql("DELETE FROM {schema}.cancellation_targets WHERE actor_id = %s AND turn_id = %s"),
+                    sorted(terminals),
+                )
+
+    async def _backfill_operational(self, conn: Any) -> None:
+        await conn.execute(self._sql("UPDATE {schema}.journal_index SET live = false"))
+        await conn.execute(self._sql("DELETE FROM {schema}.cancellation_targets"))
+        after: tuple[str, int] | None = None
+        while True:
+            query = "SELECT session_id, seq, stamped FROM {schema}.events"
+            if after is not None:
+                query += " WHERE (session_id, seq) > (%s, %s)"
+            cursor = await conn.execute(self._sql(query + " ORDER BY session_id, seq LIMIT 1000"), after or ())
+            rows = await cursor.fetchall()
+            if not rows:
+                break
+            await self._index_events(
+                conn, [(sid, seq, _parse(sid, raw).event) for sid, seq, raw in rows], backfill=True
+            )
+            after = rows[-1][:2]
+        await conn.execute(
+            self._sql("UPDATE {schema}.sessions SET operational_version = 1, operational_seq = last_seq")
+        )
+
+    async def _repair_operational(self, conn: Any, sid: str, last_seq: int) -> None:
+        await self._guard_session(conn, sid)
+        await conn.execute(self._sql("DELETE FROM {schema}.journal_index WHERE actor_id = %s"), (sid,))
+        await conn.execute(self._sql("DELETE FROM {schema}.cancellation_targets WHERE source_actor_id = %s"), (sid,))
+        after = 0
+        while after < last_seq:
+            cursor = await conn.execute(
+                self._sql(
+                    "SELECT stamped FROM {schema}.events WHERE session_id = %s AND seq > %s"
+                    " AND seq <= %s ORDER BY seq LIMIT 1000"
+                ),
+                (sid, after, last_seq),
+            )
+            page = [_parse(sid, row[0]) for row in await cursor.fetchall()]
+            if not page or page[0].seq != after + 1:
+                raise CorruptLog(f"missing journal evidence for {sid} after {after}")
+            if any(item.seq != after + offset for offset, item in enumerate(page, start=1)):
+                raise CorruptLog(f"non-contiguous journal for {sid}")
+            await self._index_events(conn, [(sid, item.seq, item.event) for item in page])
+            after = page[-1].seq
+        await conn.execute(
+            self._sql("UPDATE {schema}.sessions SET operational_version = 1, operational_seq = %s WHERE id = %s"),
+            (last_seq, sid),
+        )
+
+    async def read_operational(self, actor_id: str) -> OperationalState:
+        async with self._lock:
+            conn = await self._connection()
+            async with conn.transaction():
+                await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                return await self._read_operational(conn, actor_id)
+
+    async def _read_operational(self, conn: Any, sid: str, *, repaired: bool = False) -> OperationalState:
+        cursor = await conn.execute(
+            self._sql("SELECT last_seq, operational_version, operational_seq FROM {schema}.sessions WHERE id = %s"),
+            (sid,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise SessionNotFound(sid)
+        last_seq, version, covered = row
+        if version != 1 or not 0 <= covered <= last_seq:
+            await self._repair_operational(conn, sid, last_seq)
+        elif covered < last_seq:
+            await self._guard_session(conn, sid)
+            cursor = await conn.execute(
+                self._sql(
+                    "SELECT i.seq, e.stamped FROM {schema}.journal_index i"
+                    " JOIN LATERAL (SELECT stamped FROM {schema}.events"
+                    " WHERE session_id = i.actor_id AND seq = i.seq LIMIT 1) e ON true"
+                    " WHERE i.actor_id = %s AND i.seq > %s AND i.seq <= %s ORDER BY i.seq"
+                ),
+                (sid, covered, last_seq),
+            )
+            items = [(sid, seq, _parse(sid, raw).event) for seq, raw in await cursor.fetchall()]
+            await self._index_events(conn, items, backfill=True)
+            await conn.execute(
+                self._sql("UPDATE {schema}.sessions SET operational_seq = %s WHERE id = %s"), (last_seq, sid)
+            )
+        cursor = await conn.execute(
+            self._sql(
+                "SELECT i.seq, i.event_type, i.command_id, i.turn_id, e.stamped, NOT EXISTS ("
+                " SELECT 1 FROM {schema}.journal_index t WHERE t.actor_id = i.actor_id"
+                " AND t.turn_id = coalesce(i.command_id, i.turn_id) AND t.seq <= %s"
+                " AND (i.event_type = 'input_queued' OR t.event_type <> 'turn_started')) FROM ("
+                " SELECT actor_id, seq, event_type, command_id, turn_id FROM {schema}.journal_index"
+                " WHERE actor_id = %s AND live AND seq <= %s) i"
+                " JOIN LATERAL (SELECT stamped FROM {schema}.events"
+                " WHERE session_id = i.actor_id AND seq = i.seq LIMIT 1) e ON true ORDER BY i.seq"
+            ),
+            (last_seq, sid, last_seq),
+        )
+        rows = await cursor.fetchall()
+        items = [_parse(sid, raw) for _, _, _, _, raw, _ in rows]
+        finished = await self._lookup_finished(conn, sid)
+        invalid = (
+            any(
+                seq != item.seq
+                or kind != item.event.type
+                or not isinstance(item.event, InputQueued | TurnStarted)
+                or not consistent
+                or command != (item.event.command_id.encode() if isinstance(item.event, InputQueued) else None)
+                or turn != (item.event.turn_id.encode() if isinstance(item.event, TurnStarted) else None)
+                for (seq, kind, command, turn, _, consistent), item in zip(rows, items, strict=True)
+            )
+            or finished is not None
+            and not isinstance(finished.event, AgentFinished)
+        )
+        if invalid:
+            if repaired:
+                raise CorruptLog(f"invalid operational evidence for {sid}")
+            await self._repair_operational(conn, sid, last_seq)
+            return await self._read_operational(conn, sid, repaired=True)
+        cursor = await conn.execute(
+            self._sql(
+                "SELECT c.actor_id, c.turn_id FROM {schema}.cancellation_targets c"
+                " WHERE c.source_actor_id = %s AND c.source_seq <= %s AND NOT EXISTS ("
+                " SELECT 1 FROM {schema}.journal_index t WHERE t.actor_id = c.actor_id"
+                " AND t.turn_id = c.turn_id AND t.event_type <> 'turn_started')"
+                " ORDER BY c.source_seq, c.actor_id, c.turn_id"
+            ),
+            (sid, last_seq),
+        )
+        cancellations: dict[str, list[str]] = {}
+        for actor_id, key in await cursor.fetchall():
+            turn_id = bytes(key).decode()
+            if turn_id not in cancellations.setdefault(actor_id, []):
+                cancellations[actor_id].append(turn_id)
+        return OperationalState(
+            pending=[item.event for item in items if isinstance(item.event, InputQueued)],
+            incomplete=next((item.event for item in reversed(items) if isinstance(item.event, TurnStarted)), None),
+            finished=finished.event if finished is not None else None,
+            cancellations=cancellations,
+            last_seq=last_seq,
+        )
+
+    async def _read_interval(self, conn: Any, sid: str, begin: int, end: int) -> list[Stamped]:
+        items: list[Stamped] = []
+        after = begin - 1
+        while after < end:
+            cursor = await conn.execute(
+                self._sql(
+                    "SELECT stamped FROM {schema}.events WHERE session_id = %s AND seq > %s"
+                    " AND seq <= %s ORDER BY seq LIMIT 1000"
+                ),
+                (sid, after, end),
+            )
+            page = [_parse(sid, row[0]) for row in await cursor.fetchall()]
+            if not page:
+                break
+            items.extend(page)
+            after = page[-1].seq
+        return items
+
+    async def read_turn(self, actor_id: str, turn_id: str) -> list[Stamped] | None:
+        async with self._lock:
+            return await self._read_turn(await self._connection(), actor_id, turn_id)
+
+    async def _read_turn(self, conn: Any, sid: str, turn_id: str) -> list[Stamped] | None:
+        cursor = await conn.execute(
+            self._sql(
+                "SELECT min(seq) FILTER (WHERE event_type = 'turn_started'),"
+                " min(seq) FILTER (WHERE event_type <> 'turn_started') FROM {schema}.journal_index"
+                " WHERE actor_id = %s AND turn_id = %s"
+            ),
+            (sid, turn_id.encode()),
+        )
+        start, end = await cursor.fetchone()
+        if end is None:
+            return None
+        return await self._read_interval(conn, sid, start if start is not None and start <= end else end, end)
+
+    async def read_compacted(self, actor_id: str) -> HistorySnapshot:
+        async with self._lock:
+            conn = await self._connection()
+            async with conn.transaction():
+                await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                return await self._read_compacted(conn, actor_id)
+
+    async def _read_compacted(self, conn: Any, sid: str) -> HistorySnapshot:
+        cursor = await conn.execute(self._sql("SELECT last_seq FROM {schema}.sessions WHERE id = %s"), (sid,))
+        row = await cursor.fetchone()
+        if row is None:
+            raise SessionNotFound(sid)
+        last_seq = row[0]
+        cursor = await conn.execute(
+            self._sql(
+                "SELECT e.stamped FROM (SELECT actor_id, seq FROM {schema}.journal_index"
+                " WHERE actor_id = %s AND event_type = 'compaction_applied' AND seq <= %s"
+                " ORDER BY seq DESC LIMIT 1) i JOIN LATERAL (SELECT stamped FROM {schema}.events"
+                " WHERE session_id = i.actor_id AND seq = i.seq LIMIT 1) e ON true"
+            ),
+            (sid, last_seq),
+        )
+        row = await cursor.fetchone()
+        begin = 1
+        if row is not None:
+            marker = _parse(sid, row[0])
+            if not isinstance(marker.event, CompactionApplied):
+                raise CorruptLog(f"invalid compaction evidence for {sid}")
+            begin = marker.seq
+            if marker.event.floor_turn_id is not None:
+                cursor = await conn.execute(
+                    self._sql(
+                        "SELECT seq FROM {schema}.journal_index WHERE actor_id = %s AND turn_id = %s"
+                        " AND event_type = 'turn_started' AND seq <= %s ORDER BY seq LIMIT 1"
+                    ),
+                    (sid, marker.event.floor_turn_id.encode(), last_seq),
+                )
+                floor = await cursor.fetchone()
+                if floor is not None:
+                    begin = min(begin, floor[0])
+        return HistorySnapshot(await self._read_interval(conn, sid, begin, last_seq), last_seq)
 
     async def read_page(self, sid: str, *, after: int = 0, limit: int = 1000) -> list[Stamped]:
         async with self._lock:

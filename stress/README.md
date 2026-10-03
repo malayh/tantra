@@ -23,6 +23,7 @@ The store matrix uses memory, filesystem, SQLite, and PostgreSQL. PostgreSQL cas
 ```sh
 just bench baseline --stress
 just bench baseline --sessions 12 --histories 40 400 --samples 1
+just bench baseline --history-mode compacted --output stress/bench/artifacts/compacted
 just bench scale
 just bench live
 just bench replay
@@ -30,6 +31,8 @@ just bench compare --before path/to/before/report.json --after path/to/after/rep
 ```
 
 Baseline defaults to 10,000 stored sessions, 4,000/100,000-event histories, and five repetitions. It measures claim/release, send, duplicates, writer replacement, context assembly, playback, and owner-death recovery. Scale defaults to 1,000 observers and 100 synthetic active turns; its idle and post-disconnect measurements expose polling and watcher retention.
+
+`--history-mode compacted` seeds a summary after each historical journal and runs Runtime with retained context. Its context measurements read that retained window; public playback still reads every event. This has a distinct fixture identity and cannot be compared directly with full-mode reports. The default full workload remains unchanged.
 
 Reports are JSON and standalone HTML under ignored `stress/bench/artifacts/`. Raw samples include CPU, current/lifetime peak RSS, SQL executions and fetched rows, notifications, event-loop delay, and expired transport backlog. SQL measurements include background work during the operation. Setup, verification, and provider readiness have separate labels. These are direct Runtime measurements, not WebSocket/server throughput measurements.
 

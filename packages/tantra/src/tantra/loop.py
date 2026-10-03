@@ -5,14 +5,14 @@ import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ValidationError
 
 from tantra.agent import Agent
 from tantra.ask import Approval, ApprovalResponse, AskRequest, AskResponse
-from tantra.context import TurnContext, build_sample_request, resolve_prompt
+from tantra.context import TurnContext, build_sample_request, compacted_history, resolve_prompt
 from tantra.errors import ProviderError, TantraError
 from tantra.events import (
     AskRaised,
@@ -134,6 +134,7 @@ class TurnEngine:
         append_events: Callable[[Sequence[SessionEvent]], Awaitable[list[Stamped]]] | None = None,
         patch_header: Callable[..., Awaitable[SessionHeader]] | None = None,
         terminal_tool: str | None = None,
+        history_mode: Literal["full", "compacted"] = "full",
     ) -> None:
         self.store = store
         self.provider = provider
@@ -141,7 +142,9 @@ class TurnEngine:
         self.agent = agent
         self.tools = tools
         self.model = model
+        self.history_mode = history_mode
         self.history = list(history) if history is not None else None
+        self._trim_history()
         self.deps = deps
         self.retry = retry
         self.hooks = list(hooks)
@@ -166,6 +169,10 @@ class TurnEngine:
         self.terminal: TurnCompleted | TurnFailed | None = None
         self.tool_spans: dict[object, Any] = {}
 
+    def _trim_history(self) -> None:
+        if self.history_mode == "compacted" and self.history is not None:
+            self.history[:] = compacted_history(self.history)
+
     async def _absorb(self) -> None:
         while True:
             page = await self.store.read_page(self.header.id, after=self.header.last_seq)
@@ -174,6 +181,8 @@ class TurnEngine:
             assert self.history is not None
             self.history.extend(item.event for item in page)
             self.header.last_seq = page[-1].seq
+            if any(isinstance(item.event, CompactionApplied) for item in page):
+                self._trim_history()
 
     async def _ask(self, call_id: str, request: AskRequest) -> AskResponse:
         if not self.allow_asks:
@@ -203,7 +212,8 @@ class TurnEngine:
             history.extend(item.event for item in page)
             after = page[-1].seq
         self.history = history
-        return history
+        self._trim_history()
+        return self.history
 
     async def _append(self, events: Sequence[SessionEvent]) -> list[Stamped]:
         if not events:
@@ -228,6 +238,8 @@ class TurnEngine:
                 logged = LoggedEvent(agent_id=UUID(hex=self.header.id), seq=item.seq, event=item.event)
                 for hook in self.hooks:
                     await hook.on_event(logged)
+            if any(isinstance(event, CompactionApplied) for event in events):
+                self._trim_history()
             return stamped
 
     def _verdict(self, name: str, tool_permission: str | None) -> str:

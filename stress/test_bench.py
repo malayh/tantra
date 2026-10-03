@@ -233,17 +233,28 @@ def test_compare_rejects_incompatible_workload(tmp_path: Path) -> None:
         compare(left, right)
 
 
-async def test_two_process_baseline_and_recovery(postgres_dsn: str) -> None:
+@pytest.mark.parametrize("history_mode", ["full", "compacted"])
+async def test_two_process_baseline_and_recovery(postgres_dsn: str, history_mode: str) -> None:
     schema = f"bench_{uuid4().hex[:8]}"
-    settings = {"mode": "baseline", "model": "bench/synthetic", "dsn": postgres_dsn, "schema": schema}
+    settings = {
+        "mode": "baseline",
+        "model": "bench/synthetic",
+        "dsn": postgres_dsn,
+        "schema": schema,
+        "history_mode": history_mode,
+    }
     workers = []
     try:
-        ids = await seed(postgres_dsn, schema, 4, [40], settings["model"])
+        ids = await seed(postgres_dsn, schema, 4, [40], settings["model"], compacted=history_mode == "compacted")
         workers.extend([Worker(settings), Worker(settings)])
         report = {"samples": []}
         await asyncio.to_thread(baseline, report, workers, settings, ids, SimpleNamespace(histories=[40], samples=1))
         assert any(sample["label"] == "40/recovery" and not sample["error"] for sample in report["samples"])
         assert len({sample["pid"] for sample in report["samples"]}) == 2
+        if history_mode == "compacted":
+            assert (
+                next(sample for sample in report["samples"] if sample["label"] == "40/context")["result"]["events"] < 40
+            )
     finally:
         for worker in workers:
             await asyncio.to_thread(worker.stop)

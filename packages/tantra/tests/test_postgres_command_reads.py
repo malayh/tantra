@@ -197,7 +197,7 @@ async def test_cancellation_reads_the_tree_through_the_fenced_transaction(postgr
     runtime._ownerships[root.hex] = ownership
     async with coordinator.transaction(ownership) as view:
         token = await view.claim_writer(uuid4())
-    read = runtime._journal
+    read = runtime._operational
     actors = []
 
     async def fenced(actor_id, *, store=None):
@@ -206,7 +206,7 @@ async def test_cancellation_reads_the_tree_through_the_fenced_transaction(postgr
         actors.append(actor_id)
         return await read(actor_id, store=store)
 
-    monkeypatch.setattr(runtime, "_journal", fenced)
+    monkeypatch.setattr(runtime, "_operational", fenced)
     envelope = CommandEnvelope(
         request_id=uuid4(),
         root_id=root.hex,

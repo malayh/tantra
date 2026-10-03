@@ -13,6 +13,7 @@ from pydantic import TypeAdapter
 
 from tantra.agent import Agent, agent_name, build_name_table
 from tantra.ask import ApprovalResponse, AskResponse
+from tantra.context import compacted_history
 from tantra.coordinator import (
     AnswerPayload,
     CancelPayload,
@@ -69,7 +70,7 @@ from tantra.loop import DEFAULT_RETRY, FinishResult, RetryConfig, TurnEngine
 from tantra.permissions import check_permission, decide
 from tantra.providers.base import Provider
 from tantra.skills import SKILL_TOOL, SkillInfo, Skills
-from tantra.stores.base import Store, reduce_journal
+from tantra.stores.base import HistorySnapshot, OperationalState, Store, reduce_journal
 from tantra.tools import Context, Tool
 from tantra.tracing import NULL_TRACER, Tracer
 
@@ -231,7 +232,11 @@ class Runtime:
         compactor: Compactor | None = None,
         telemetry: Tracer | None = None,
         coordinator: Coordinator | None = None,
+        history_mode: Literal["full", "compacted"] = "full",
     ) -> None:
+        if history_mode not in ("full", "compacted"):
+            raise ValueError("history_mode must be full or compacted")
+        self.history_mode = history_mode
         self.provider = provider
         self.store = store
         self.coordinator = coordinator
@@ -295,6 +300,7 @@ class Runtime:
         self._started = coordinator is None
         self._closing = False
         self._closed = False
+        self._close_complete = asyncio.Event()
 
     def _agent_for(self, name: str) -> type[Agent]:
         agent = self.agents.get(name)
@@ -620,7 +626,7 @@ class Runtime:
                 raise asyncio.CancelledError
             batch = list(events)
             if any(isinstance(event, AgentFinished) for event in batch):
-                state = reduce_journal(await self._journal(agent_id))
+                state = await self._operational(agent_id)
                 cancelled = [TurnCancelled(turn_id=item.command_id, reason="agent_finished") for item in state.pending]
                 batch = [*cancelled, *batch]
             return await self._append(agent_id, batch)
@@ -635,6 +641,56 @@ class Runtime:
                 return items
             items.extend(page)
             after = page[-1].seq
+
+    @staticmethod
+    def _reduce_operational(journal: Sequence[Stamped]) -> OperationalState:
+        state = reduce_journal(journal)
+        cancellations: dict[str, list[str]] = {}
+        for item in journal:
+            if isinstance(item.event, CancellationRequested):
+                for actor_id, turns in item.event.targets.items():
+                    for turn_id in turns:
+                        if turn_id not in cancellations.setdefault(actor_id, []):
+                            cancellations[actor_id].append(turn_id)
+        return OperationalState(
+            pending=state.pending,
+            incomplete=state.incomplete,
+            finished=Runtime._finished(journal),
+            cancellations=cancellations,
+            last_seq=journal[-1].seq if journal else 0,
+        )
+
+    async def _operational(self, agent_id: str, *, store: Any = None) -> OperationalState:
+        if store is None and isinstance(self.coordinator, PostgresCoordinator):
+            root_id = self._known_roots.get(agent_id, agent_id)
+            ownership = self._ownerships.get(root_id)
+            if ownership is None:
+                raise LeaseLost(root_id)
+            async with self.coordinator.transaction(ownership) as guarded:
+                return await self._operational(agent_id, store=guarded)
+        source = self.store if store is None else store
+        read = getattr(source, "read_operational", None)
+        if read is not None:
+            return await read(agent_id)
+        if getattr(source, "read_page", None) is None:
+            source = self.store
+        return self._reduce_operational(await self._journal(agent_id, store=source))
+
+    async def _history(self, agent_id: str) -> HistorySnapshot:
+        read = getattr(self.store, "read_compacted", None)
+        if self.history_mode == "compacted" and read is not None:
+            return await read(agent_id)
+        items = await self._journal(agent_id)
+        last_seq = items[-1].seq if items else 0
+        if self.history_mode == "compacted":
+            retained = compacted_history([item.event for item in items])
+            items = items[len(items) - len(retained) :]
+        return HistorySnapshot(items=items, last_seq=last_seq)
+
+    async def _result(self, agent_id: str, command_id: UUID) -> TurnResult | None:
+        read = getattr(self.store, "read_turn", None)
+        journal = await read(agent_id, command_id.hex) if read is not None else await self._journal(agent_id)
+        return _turn_result(UUID(hex=agent_id), command_id, journal) if journal is not None else None
 
     async def _header(self, agent_id: str) -> SessionHeader:
         header = await self.store.header(agent_id)
@@ -696,24 +752,19 @@ class Runtime:
     async def _recover_locked(self, root_id: str, ownership: Ownership) -> None:
         assert self.coordinator is not None
         headers = await self._tree_headers(root_id)
-        journals = {header.id: await self._journal(header.id) for header in headers}
-        cancelled: dict[str, set[str]] = {}
-        for item in journals[root_id]:
-            if not isinstance(item.event, CancellationRequested):
-                continue
-            for actor_id, turn_ids in item.event.targets.items():
-                cancelled.setdefault(actor_id, set()).update(turn_ids)
         changed: set[str] = set()
         async with self.coordinator.transaction(ownership) as store:
             await store.set_recovery({"generation": ownership.generation, "phase": "running"})
+            states = {header.id: await self._operational(header.id, store=store) for header in headers}
+            cancelled = states[root_id].cancellations
             for header in headers:
-                state = reduce_journal(journals[header.id])
+                state = states[header.id]
                 live = {item.command_id for item in state.pending}
                 if state.incomplete is not None:
                     live.add(state.incomplete.turn_id)
                 terminals = [
                     TurnCancelled(turn_id=turn_id, reason="cancelled")
-                    for turn_id in cancelled.get(header.id, set())
+                    for turn_id in cancelled.get(header.id, [])
                     if turn_id in live
                 ]
                 terminal_ids = {event.turn_id for event in terminals}
@@ -732,9 +783,8 @@ class Runtime:
             if header.last_turn is not None:
                 await self._deliver_lifecycle_locked(header, header.last_turn)
         for header in headers:
-            journal = await self._journal(header.id)
-            state = reduce_journal(journal)
-            if state.pending and self._finished(journal) is None and header.agent in self.agents:
+            state = await self._operational(header.id)
+            if state.pending and state.finished is None and header.agent in self.agents:
                 self._activations[header.id] = self._activations.get(header.id, 0) + 1
                 self._activate(header.id, root_id)
 
@@ -926,7 +976,7 @@ class Runtime:
     ) -> bool:
         root_id = self._known_roots.get(agent_id, agent_id)
         async with self._lock(root_id):
-            state = reduce_journal(await self._journal(agent_id))
+            state = await self._operational(agent_id)
             if state.incomplete is None or state.incomplete.turn_id != event.turn_id:
                 return False
             await self._append(agent_id, [event])
@@ -1188,8 +1238,7 @@ class Runtime:
         async with self._lock(root_id):
             self._ensure_open()
             current = await self._header(header.id)
-            journal = await self._journal(header.id)
-            prior = self._finished(journal)
+            prior = await self._actor_finished(header.id)
             if prior is not None:
                 if prior.result != normalized:
                     raise InvalidCommandReuse(command.hex)
@@ -1201,29 +1250,32 @@ class Runtime:
                 return FinishResult(normalized)
             unfinished = []
             for descendant in await self._descendants(header.id):
-                descendant_journal = await self._journal(descendant.id)
-                if self._finished(descendant_journal) is None:
+                if await self._actor_finished(descendant.id) is None:
                     unfinished.append(str(UUID(hex=descendant.id)))
             if unfinished:
                 raise TantraError(f"unfinished descendants: {unfinished}")
             parent_id = current.parent_id
             assert parent_id is not None
             await self._header(parent_id)
-            parent_journal = await self._journal(parent_id)
             parent_input = InputQueued(
                 command_id=command.hex,
                 input=f"[agent {UUID(hex=header.id)} finished] {encoded}",
             )
-            existing = next(
-                (
-                    item.event
-                    for item in parent_journal
-                    if isinstance(item.event, InputQueued) and item.event.command_id == command.hex
-                ),
-                None,
-            )
+            lookup = getattr(self.store, "lookup_command", None)
+            if lookup is not None:
+                found = await lookup(parent_id, command.hex)
+                existing = found[1].event if found is not None and found[0] == parent_id else None
+            else:
+                existing = next(
+                    (
+                        item.event
+                        for item in await self._journal(parent_id)
+                        if isinstance(item.event, InputQueued) and item.event.command_id == command.hex
+                    ),
+                    None,
+                )
             if existing is None:
-                if self._finished(parent_journal) is not None:
+                if await self._actor_finished(parent_id) is not None:
                     raise TantraError(f"agent {UUID(hex=parent_id)} is finished")
                 await self._enqueue(parent_id, parent_input)
             elif existing != parent_input:
@@ -1247,18 +1299,17 @@ class Runtime:
                     return
                 header = await self._header(agent_id)
                 await self._reconcile_lifecycle(header)
-                journal = await self._journal(agent_id)
-                finished = self._finished(journal)
+                state = await self._operational(agent_id)
+                finished = state.finished
                 if finished is not None:
                     async with self._lock(root_id):
-                        fresh = await self._journal(agent_id)
-                        durable = self._finished(fresh)
+                        fresh = await self._operational(agent_id)
+                        durable = fresh.finished
                         if durable is not None:
                             await self._finalize_finished(agent_id, header)
                         if self.active.get(agent_id) is task:
                             del self.active[agent_id]
                     return
-                state = reduce_journal(journal)
                 if state.incomplete is not None:
                     current = state.incomplete.turn_id
                     event = TurnInterrupted(turn_id=current, reason="process_stopped")
@@ -1273,7 +1324,7 @@ class Runtime:
                     continue
                 if not state.pending:
                     async with self._lock(root_id):
-                        state = reduce_journal(await self._journal(agent_id))
+                        state = await self._operational(agent_id)
                         if state.pending:
                             continue
                         if self.active.get(agent_id) is task:
@@ -1288,13 +1339,15 @@ class Runtime:
                 deps = await self._deps(header)
                 skills_index = await self._skill_index(agent)
                 async with self._lock(root_id):
-                    fresh = reduce_journal(await self._journal(agent_id))
+                    fresh = await self._operational(agent_id)
                     if not any(item.command_id == queued.command_id for item in fresh.pending):
                         current = None
                         continue
                     turn_generation = self._turn_generations.get(agent_id, 0) + 1
                     self._turn_generations[agent_id] = turn_generation
                     self._task_turns[task] = current
+                history = await self._history(agent_id)
+                header = header.model_copy(update={"last_seq": history.last_seq})
                 tools = self._framework_tools(header, agent)
                 engine = TurnEngine(
                     store=self.store,
@@ -1303,7 +1356,8 @@ class Runtime:
                     agent=agent,
                     tools=tools,
                     model=model,
-                    history=[item.event for item in journal],
+                    history=[item.event for item in history.items],
+                    history_mode=self.history_mode,
                     deps=deps,
                     retry=self.retry,
                     hooks=self.hooks,
@@ -1354,12 +1408,11 @@ class Runtime:
             try:
                 async with self._lock(root_id):
                     header = await self._header(agent_id)
-                    journal = await self._journal(agent_id)
-                    if self._finished(journal) is not None:
+                    state = await self._operational(agent_id)
+                    if state.finished is not None:
                         await self._finalize_finished(agent_id, header)
                         reconciled = True
                     else:
-                        state = reduce_journal(journal)
                         if current is None and state.incomplete is None and state.pending:
                             current = state.pending[0].command_id
                         if current is not None:
@@ -1478,6 +1531,7 @@ class Runtime:
 
             async def apply(request: CommandEnvelope, store: CoordinatedStoreProtocol) -> CommandReply:
                 journals = fallback_journals
+                states: dict[str, OperationalState] = {}
 
                 async def find_command(command_id: str) -> tuple[str, SessionEvent] | None:
                     lookup = getattr(store, "lookup_command", None)
@@ -1495,7 +1549,9 @@ class Runtime:
                     else:
                         assert request.writer_token is not None
                         await store.validate_writer(request.writer_token)
-                        if isinstance(self.coordinator, PostgresCoordinator):
+                        if isinstance(payload, CancelPayload):
+                            states = {header.id: await self._operational(header.id, store=store) for header in headers}
+                        elif isinstance(self.coordinator, PostgresCoordinator):
                             journals = {header.id: await self._journal(header.id, store=store) for header in headers}
                         if isinstance(payload, ReleaseWriterPayload):
                             result = {"released": await store.release_writer(request.writer_token)}
@@ -1565,12 +1621,12 @@ class Runtime:
                                 cancellation = existing[1]
                                 duplicate = True
                             else:
-                                targets = self._cancellation_targets(journals)
+                                targets = self._operational_targets(states)
                                 cancellation = CancellationRequested(command_id=payload.command_id.hex, targets=targets)
                                 await store.append(request.root_id, [cancellation])
                                 duplicate = False
                             for actor_id, turn_ids in cancellation.targets.items():
-                                state = reduce_journal(journals[actor_id])
+                                state = states[actor_id]
                                 live_turns = {item.command_id for item in state.pending}
                                 if state.incomplete is not None:
                                     live_turns.add(state.incomplete.turn_id)
@@ -1618,12 +1674,11 @@ class Runtime:
         return None
 
     @staticmethod
-    def _cancellation_targets(journals: Mapping[str, Sequence[Stamped]]) -> dict[str, list[str]]:
+    def _operational_targets(states: Mapping[str, OperationalState]) -> dict[str, list[str]]:
         targets: dict[str, list[str]] = {}
-        for actor_id, journal in journals.items():
-            if Runtime._finished(journal) is not None:
+        for actor_id, state in states.items():
+            if state.finished is not None:
                 continue
-            state = reduce_journal(journal)
             turns = [item.command_id for item in state.pending]
             if state.incomplete is not None and state.incomplete.turn_id not in turns:
                 turns.append(state.incomplete.turn_id)
@@ -1836,10 +1891,9 @@ class Runtime:
                 )
                 targets: dict[str, list[str]] = {}
                 for agent_id in actor_ids:
-                    actor_journal = await self._journal(agent_id)
-                    if self._finished(actor_journal) is not None:
+                    state = await self._operational(agent_id)
+                    if state.finished is not None:
                         continue
-                    state = reduce_journal(actor_journal)
                     turn_ids = [item.command_id for item in state.pending]
                     if state.incomplete is not None and state.incomplete.turn_id not in turn_ids:
                         turn_ids.append(state.incomplete.turn_id)
@@ -1849,15 +1903,14 @@ class Runtime:
                 await self._append(connection._root, [event])
                 duplicate = False
             for agent_id, target_turns in event.targets.items():
-                actor_journal = await self._journal(agent_id)
-                if self._finished(actor_journal) is not None:
+                state = await self._operational(agent_id)
+                if state.finished is not None:
                     continue
                 header = await self._header(agent_id)
                 if agent_id != connection._root and header.last_turn is not None:
                     await self._deliver_lifecycle_locked(header, header.last_turn)
                     if _lifecycle_input(header.id, header.last_turn) is not None:
                         self._errors.get(header.id, {}).pop(header.last_turn.turn_id.hex, None)
-                state = reduce_journal(actor_journal)
                 live_turns = {item.command_id for item in state.pending}
                 if state.incomplete is not None:
                     live_turns.add(state.incomplete.turn_id)
@@ -1900,32 +1953,49 @@ class Runtime:
         root_id = self._known_roots.get(agent_id, agent_id)
         self._watch_root(root_id)
         while True:
-            journal = await self._journal(agent_id)
-            result = _turn_result(UUID(hex=agent_id), command_id, journal)
+            result = await self._result(agent_id, command_id)
             error = self._errors.get(agent_id, {}).get(cid)
             if error is not None and (self.coordinator is None or result is None):
                 raise error
             if result is not None:
                 return result
+            if self._closing:
+                await self._close_complete.wait()
+                continue
+            if self._closed:
+                result = await self._result(agent_id, command_id)
+                error = self._errors.get(agent_id, {}).get(cid)
+                if error is not None and (self.coordinator is None or result is None):
+                    raise error
+                if result is not None:
+                    return result
+                raise TantraError(f"runtime closed before command {command_id} finished")
             if self.coordinator is not None:
-                active = await self.coordinator.active(root_id, agent_id)
-                owner = await self.coordinator.locate(root_id)
-                recovered = False
-                if owner is not None and not active:
-                    recovery = await self.coordinator.recovery(root_id)
-                    recovered = recovery.get("generation") == owner.generation and recovery.get("phase") == "complete"
+                try:
+                    active = await self.coordinator.active(root_id, agent_id)
+                    owner = await self.coordinator.locate(root_id)
+                    recovered = False
+                    if owner is not None and not active:
+                        recovery = await self.coordinator.recovery(root_id)
+                        recovered = (
+                            recovery.get("generation") == owner.generation and recovery.get("phase") == "complete"
+                        )
+                except CoordinatorUnavailable:
+                    if not self._closing and not self._closed:
+                        raise
+                    await self._close_complete.wait()
+                    continue
+                if self._closing or self._closed:
+                    continue
                 if active or owner is not None and not recovered:
                     inactive = 0
                 else:
                     inactive += 1
                     if inactive >= 2:
                         raise RemoteExecutionError(f"command {command_id} has no active owner execution")
-            if self._closed:
-                raise TantraError(f"runtime closed before command {command_id} finished")
             async with signal.condition:
                 generation = signal.generation
-            journal = await self._journal(agent_id)
-            result = _turn_result(UUID(hex=agent_id), command_id, journal)
+            result = await self._result(agent_id, command_id)
             error = self._errors.get(agent_id, {}).get(cid)
             if error is not None and (self.coordinator is None or result is None):
                 raise error
@@ -1962,7 +2032,6 @@ class Runtime:
         for root_id, ownership in list(self._ownerships.items()):
             async with self._lock(root_id):
                 headers = await self._tree_headers(root_id)
-                journals = {header.id: await self._journal(header.id) for header in headers}
                 for agent_id, task in list(self.active.items()):
                     if task.done() or self._known_roots.get(agent_id) != root_id:
                         continue
@@ -1971,7 +2040,7 @@ class Runtime:
                 try:
                     async with self.coordinator.transaction(ownership) as store:
                         for header in headers:
-                            state = reduce_journal(journals[header.id])
+                            state = await self._operational(header.id, store=store)
                             if state.incomplete is not None:
                                 await store.append(
                                     header.id,
@@ -2025,8 +2094,17 @@ class Runtime:
             finally:
                 self._closed = True
                 self._closing = False
+                self._close_complete.set()
             return
+        self._closing = True
         self._closed = True
+        try:
+            await self._close_local()
+        finally:
+            self._closing = False
+            self._close_complete.set()
+
+    async def _close_local(self) -> None:
         tasks = [task for task in self.active.values() if not task.done()]
         first_error: BaseException | None = None
         for root_id in set(self._known_roots.values()) | set(self.writers):
@@ -2053,7 +2131,7 @@ class Runtime:
                                 self._errors.setdefault(agent_id, {})[last_turn.turn_id.hex] = exc
                     state = None
                     try:
-                        state = reduce_journal(await self._journal(agent_id))
+                        state = await self._operational(agent_id)
                         if state.incomplete is not None:
                             event = TurnInterrupted(turn_id=state.incomplete.turn_id, reason="runtime_closed")
                             await self._append(agent_id, [event])

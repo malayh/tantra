@@ -24,7 +24,7 @@ from tantra.errors import (
     WriterReplaced,
 )
 from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
-from tantra.stores.base import UNSET, EnqueueResult, apply_patch, reduce_header
+from tantra.stores.base import UNSET, EnqueueResult, HistorySnapshot, OperationalState, apply_patch, reduce_header
 from tantra.stores.postgres import PostgresStore, _event_json, _hydrate, _json, _parse
 
 try:
@@ -1073,8 +1073,12 @@ class CoordinatedStore:
         header = reduce_header(header, events)
         header.last_seq = seq
         await self.conn.execute(
-            self.coordinator._sql("UPDATE {schema}.sessions SET header = %s, last_seq = %s WHERE id = %s"),
-            (_json(header), seq, sid),
+            self.coordinator._sql(
+                "UPDATE {schema}.sessions SET header = %s, last_seq = %s,"
+                " operational_seq = CASE WHEN operational_version = 1 AND operational_seq = last_seq"
+                " THEN %s ELSE operational_seq END WHERE id = %s"
+            ),
+            (_json(header), seq, seq, sid),
         )
         if rows:
             await self.change("journal", sid, seq)
@@ -1107,8 +1111,12 @@ class CoordinatedStore:
         header = reduce_header(header, [event])
         header.last_seq = seq
         await self.conn.execute(
-            self.coordinator._sql("UPDATE {schema}.sessions SET header = %s, last_seq = %s WHERE id = %s"),
-            (_json(header), seq, sid),
+            self.coordinator._sql(
+                "UPDATE {schema}.sessions SET header = %s, last_seq = %s,"
+                " operational_seq = CASE WHEN operational_version = 1 AND operational_seq = last_seq"
+                " THEN %s ELSE operational_seq END WHERE id = %s"
+            ),
+            (_json(header), seq, seq, sid),
         )
         await self.change("journal", sid, seq)
         await self.set_active(sid, True)
@@ -1125,6 +1133,24 @@ class CoordinatedStore:
         if await self.header(actor_id) is None:
             raise SessionNotFound(actor_id)
         return await self.coordinator.store._lookup_finished(self.conn, actor_id)
+
+    async def read_operational(self, actor_id: str) -> OperationalState:
+        self._ensure_active()
+        if await self.header(actor_id) is None:
+            raise SessionNotFound(actor_id)
+        return await self.coordinator.store._read_operational(self.conn, actor_id)
+
+    async def read_turn(self, actor_id: str, turn_id: str) -> list[Stamped] | None:
+        self._ensure_active()
+        if await self.header(actor_id) is None:
+            raise SessionNotFound(actor_id)
+        return await self.coordinator.store._read_turn(self.conn, actor_id, turn_id)
+
+    async def read_compacted(self, actor_id: str) -> HistorySnapshot:
+        self._ensure_active()
+        if await self.header(actor_id) is None:
+            raise SessionNotFound(actor_id)
+        return await self.coordinator.store._read_compacted(self.conn, actor_id)
 
     async def read_page(self, sid: str, *, after: int = 0, limit: int = 1000) -> list[Stamped]:
         self._ensure_active()

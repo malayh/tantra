@@ -33,6 +33,7 @@ from tantra import (
 from tantra.agent import agent_name
 from tantra.context import build_messages
 from tantra.events import (
+    CompactionApplied,
     InputQueued,
     ReasoningDelta,
     ReasoningPart,
@@ -137,7 +138,9 @@ def session_id(index: int) -> UUID:
     return uuid5(NAMESPACE_URL, f"tantra-bench-v1/session/{index}")
 
 
-async def seed(dsn: str, schema: str, count: int, histories: list[int], model: str) -> list[str]:
+async def seed(
+    dsn: str, schema: str, count: int, histories: list[int], model: str, *, compacted: bool = False
+) -> list[str]:
     store = PostgresStore(dsn, schema=schema)
     await store.setup()
     ids = [session_id(index).hex for index in range(count)]
@@ -152,6 +155,18 @@ async def seed(dsn: str, schema: str, count: int, histories: list[int], model: s
             await store.append(sid, [SessionCreated(agent=agent_name(BenchAgent), root_id=sid, model=model)])
             if index < len(histories):
                 await seed_history(store, sid, histories[index], model)
+                if compacted:
+                    await store.append(
+                        sid,
+                        [
+                            CompactionApplied(
+                                strategy="bench_fixture",
+                                tokens_before=1,
+                                tokens_after=1,
+                                summary="Historical fixture total: 60. Use fixture_total for fresh evidence.",
+                            )
+                        ],
+                    )
         return ids
     finally:
         await store.close()
@@ -306,6 +321,10 @@ class WorkerState:
             assert result.outcome == "completed", f"turn failed: {result.outcome}: {result.error}"
             assert result.text.strip() == "60", f"incorrect result: {result.text!r}"
             return asdict(result)
+        if op == "context" and self.runtime.history_mode == "compacted":
+            snapshot = await self.runtime.store.read_compacted(sid)
+            events = [item.event for item in snapshot.items]
+            return {"events": len(events), "messages": len(build_messages(events)), "last_seq": snapshot.last_seq}
         if op == "context":
             cursor, events = 0, []
             while True:
@@ -417,6 +436,7 @@ async def serve(pipe: Any, settings: dict[str, Any]) -> None:
         default_model=settings["model"],
         deps_factory=lambda _: (settings["dsn"], settings["schema"], slots),
         coordinator=PostgresCoordinator(store, **COORDINATOR_SETTINGS),
+        history_mode=settings.get("history_mode", "full"),
     )
     state = WorkerState(runtime, provider)
     probe = asyncio.create_task(loop_probe())

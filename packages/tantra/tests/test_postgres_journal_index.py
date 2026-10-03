@@ -403,7 +403,7 @@ async def test_migration_backfills_legacy_and_current_pages_and_setup_is_idempot
         postgres_dsn,
         pg_schema,
         "SELECT version FROM {schema}.schema_version ORDER BY version",
-    ) == [(1,), (2,), (3,), (4,), (5,)]
+    ) == [(1,), (2,), (3,), (4,), (5,), (6,)]
     assert _query(
         postgres_dsn,
         pg_schema,
@@ -464,7 +464,7 @@ async def test_corrupt_backfill_rolls_back_the_migration_and_restart_succeeds(
         postgres_dsn,
         pg_schema,
         "SELECT version FROM {schema}.schema_version ORDER BY version",
-    )[-1] == (5,)
+    )[-1] == (6,)
 
 
 async def test_interrupted_backfill_rolls_back_the_migration_and_restart_succeeds(

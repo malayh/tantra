@@ -1700,3 +1700,64 @@ async def test_multiple_failed_markers_preserve_started_work_then_release_queued
         monkeypatch.setattr(store, "read_page", original_read_page)
         await runtime.aclose()
         await store.close()
+
+
+@pytest.mark.parametrize("stage", ["active", "locate", "recovery"])
+@pytest.mark.parametrize("shutdown", [True, False])
+async def test_result_wait_racing_coordinator_close_preserves_terminal_or_outage(
+    postgres_dsn, pg_schema, monkeypatch, stage, shutdown
+):
+    started, entered, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class BlockingProvider(EchoProvider):
+        async def stream(self, req):
+            started.set()
+            await asyncio.Event().wait()
+            yield StreamEnd(text="unreachable")
+
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    coordinator = _coordinator(store, lease_ttl=30)
+    runtime = Runtime(BlockingProvider(), store, [Bot], default_model="m", coordinator=coordinator)
+    await runtime.start()
+    sid = await runtime.create(Bot)
+    waiter = None
+    method = getattr(coordinator, stage)
+    active = coordinator.active
+
+    async def delayed(*args):
+        if asyncio.current_task() is waiter:
+            entered.set()
+            await release.wait()
+            if not shutdown:
+                raise CoordinatorUnavailable("injected outage")
+        return await method(*args)
+
+    async def inactive_for_waiter(*args):
+        if asyncio.current_task() is waiter:
+            return False
+        return await active(*args)
+
+    if stage == "recovery":
+        monkeypatch.setattr(coordinator, "active", inactive_for_waiter)
+    monkeypatch.setattr(coordinator, stage, delayed)
+    try:
+        async with runtime.connect(sid, writable=True) as connection:
+            command = uuid4()
+            await connection.send("blocked", command_id=command)
+            await asyncio.wait_for(started.wait(), 2)
+            waiter = asyncio.create_task(runtime._wait_result(sid.hex, command))
+            await asyncio.wait_for(entered.wait(), 2)
+            if shutdown:
+                await runtime.aclose()
+            release.set()
+            if shutdown:
+                assert (await asyncio.wait_for(waiter, 2)).outcome == "interrupted"
+            else:
+                with pytest.raises(CoordinatorUnavailable, match="injected outage"):
+                    await asyncio.wait_for(waiter, 2)
+    finally:
+        release.set()
+        await runtime.aclose()
+        if waiter is not None:
+            await asyncio.gather(waiter, return_exceptions=True)
+        await store.close()

@@ -24,7 +24,7 @@ from tantra.errors import (
     WriterReplaced,
 )
 from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
-from tantra.stores.base import UNSET, EnqueueResult, apply_patch, reduce_header, reduce_journal
+from tantra.stores.base import UNSET, EnqueueResult, apply_patch, reduce_header
 from tantra.stores.postgres import PostgresStore, _event_json, _hydrate, _json, _parse
 
 try:
@@ -1057,6 +1057,7 @@ class CoordinatedStore:
         header = _hydrate(row)
         self._check_header(header)
         seq = header.last_seq
+        start_seq = seq
         rows = []
         for event in events:
             seq += 1
@@ -1065,6 +1066,9 @@ class CoordinatedStore:
             await cursor.executemany(
                 self.coordinator._sql("INSERT INTO {schema}.events (session_id, seq, stamped) VALUES (%s, %s, %s)"),
                 rows,
+            )
+            await self.coordinator.store._index_events(
+                self.conn, [(sid, start_seq + offset, event) for offset, event in enumerate(events, start=1)]
             )
         header = reduce_header(header, events)
         header.last_seq = seq
@@ -1087,26 +1091,19 @@ class CoordinatedStore:
             raise SessionNotFound(sid)
         header = _hydrate(row)
         self._check_header(header)
-        cursor = await self.conn.execute(
-            self.coordinator._sql("SELECT seq, stamped FROM {schema}.events WHERE session_id = %s ORDER BY seq"),
-            (sid,),
-        )
-        journal = [_parse(sid, raw) for _, raw in await cursor.fetchall()]
-        for stamped in journal:
-            seq = stamped.seq
-            existing = stamped.event
-            if not isinstance(existing, InputQueued) or existing.command_id != event.command_id:
-                continue
-            if existing == event:
-                if any(item.command_id == event.command_id for item in reduce_journal(journal).pending):
+        existing = await self.coordinator.store._lookup_input(self.conn, sid, event.command_id)
+        if existing is not None:
+            if existing.event == event:
+                if await self.coordinator.store._input_pending(self.conn, sid, event.command_id):
                     await self.set_active(sid, True)
-                return EnqueueResult(seq=seq, duplicate=True)
+                return EnqueueResult(seq=existing.seq, duplicate=True)
             raise InvalidCommandReuse(event.command_id)
         seq = header.last_seq + 1
         await self.conn.execute(
             self.coordinator._sql("INSERT INTO {schema}.events (session_id, seq, stamped) VALUES (%s, %s, %s)"),
             (sid, seq, _event_json(Stamped(seq=seq, event=event))),
         )
+        await self.coordinator.store._index_events(self.conn, [(sid, seq, event)])
         header = reduce_header(header, [event])
         header.last_seq = seq
         await self.conn.execute(
@@ -1116,6 +1113,18 @@ class CoordinatedStore:
         await self.change("journal", sid, seq)
         await self.set_active(sid, True)
         return EnqueueResult(seq=seq, duplicate=False)
+
+    async def lookup_command(self, root_id: str, command_id: str) -> tuple[str, Stamped] | None:
+        self._ensure_active()
+        if root_id != self.ownership.root_id:
+            raise LeaseLost(root_id)
+        return await self.coordinator.store._lookup_command(self.conn, root_id, command_id)
+
+    async def lookup_finished(self, actor_id: str) -> Stamped | None:
+        self._ensure_active()
+        if await self.header(actor_id) is None:
+            raise SessionNotFound(actor_id)
+        return await self.coordinator.store._lookup_finished(self.conn, actor_id)
 
     async def read_page(self, sid: str, *, after: int = 0, limit: int = 1000) -> list[Stamped]:
         self._ensure_active()

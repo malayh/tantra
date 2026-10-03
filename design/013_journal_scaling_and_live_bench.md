@@ -74,15 +74,28 @@ Verified on 2026-10-02:
 - Budget, strict replay, fresh recording, and fragmented usage accounting passed through the actual provider SDK with mocked HTTP streams. No paid requests ran: `OPENROUTER_API_KEY` was unavailable in the execution environment. Fresh-model acceptance remains P4.
 - Idle polling continued after observers disconnected. This measured runtime issue remains assigned to P3.
 
-### P1 — Indexed commands and selective reads · deps: P0 · —
+### P1 — Indexed commands and selective reads · deps: P0 · ✅ DONE
 
 Deliver an atomic root/command index pointing to original actor events, selective command dispatch, indexed enqueue deduplication, and compatible backfill.
 
+- Keep a small `journal_index` projection of commands, turn starts/terminals, and agent finishes. Root lookup follows existing actor relationships and traversal precedence; original typed events remain authoritative.
+- Store projected command/turn keys as UTF-8 bytes so generic Store events with NUL identifiers remain valid. Select the projection pointer before the exact event fetch to prevent planner-selected journal scans.
+- Maintain the projection in the same append/enqueue transaction. Backfill at most 1,000 events per page during versioned setup with writers stopped; corruption or interruption rolls back migration without rewriting event bodies or sequences.
+- Optional command/finish lookup capabilities leave the required Store interface unchanged. Recovery, cancellation reduction, context loading, and result reconstruction retain full reads until later phases.
+
 Verify input/answer/cancel retries, payload conflicts, cross-actor reuse, concurrent acceptance, lost replies, old envelopes, NUL content, and bounded duplicate reads for long journals. Claim/release may still pay recovery costs until P2.
 
-- [ ] Index and backfill
-- [ ] Runtime and enqueue cutover
-- [ ] Focused checks, comparison, and review
+- [x] Index and backfill
+- [x] Runtime and enqueue cutover
+- [x] Focused checks, comparison, and review
+
+Verified on 2026-10-02:
+
+- [Baseline](../stress/bench/artifacts/p1-baseline-final/report.html) and [P0/P1 comparison](../stress/bench/artifacts/p1-comparison/report.html): matching 10,000-chat, 4,000/100,000-event workloads and environment, five repetitions, 166 observations, zero errors. PostgreSQL 17.10 retained `fsync=on` and `synchronous_commit=on`.
+- At 100,000 events, median claim/send improved from 3,256/4,726 ms to 2,446/2,312 ms; duplicate send from 2,481 to 27 ms; writer replacement from 922 to 13 ms; remote duplicate from 1,148 to 13 ms. Cold claim/send still fetch approximately 200,000 rows including background activity; recovery and context remain P2 work.
+- Comparisons report regressions as well: 4,000-event provider-ready/completion p95 rose by 50/11 ms, recovery verification by 52 ms; 100,000-event playback median rose by 13 ms and recovery verification by 135 ms. These operations still include full reads and scheduling effects; five samples establish a local comparison, not a broad latency guarantee.
+- 635 package/bench tests and 95 stress tests passed against durable Compose PostgreSQL with zero skips. Long-journal tests assert zero journal reads for warm writer control, bounded event decoding, and indexed original-event query plans. Migration, NUL keys, conflicts, cancellation transaction reads, retries, and rollback checks passed.
+- Ruff lint/format and `git diff --check` passed. One independent review completed after its fixes. No paid inference ran. Owned workers and Compose resources were removed.
 
 ### P2 — Bounded recovery and optional compacted history · deps: P1 · —
 

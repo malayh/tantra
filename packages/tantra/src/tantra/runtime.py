@@ -625,11 +625,12 @@ class Runtime:
                 batch = [*cancelled, *batch]
             return await self._append(agent_id, batch)
 
-    async def _journal(self, agent_id: str) -> list[Stamped]:
+    async def _journal(self, agent_id: str, *, store: Any = None) -> list[Stamped]:
+        source = self.store if store is None else store
         items: list[Stamped] = []
         after = 0
         while True:
-            page = await self.store.read_page(agent_id, after=after)
+            page = await source.read_page(agent_id, after=after)
             if not page:
                 return items
             items.extend(page)
@@ -673,6 +674,10 @@ class Runtime:
         return headers
 
     async def _tree_command(self, root_id: str, command_id: str) -> tuple[str, SessionEvent] | None:
+        lookup = getattr(self.store, "lookup_command", None)
+        if lookup is not None:
+            found = await lookup(root_id, command_id)
+            return (found[0], found[1].event) if found is not None else None
         for header in await self._tree_headers(root_id):
             for item in await self._journal(header.id):
                 event = item.event
@@ -680,6 +685,13 @@ class Runtime:
                     if getattr(event, "command_id", None) == command_id:
                         return header.id, event
         return None
+
+    async def _actor_finished(self, agent_id: str) -> AgentFinished | None:
+        lookup = getattr(self.store, "lookup_finished", None)
+        if lookup is not None:
+            found = await lookup(agent_id)
+            return found.event if found is not None else None
+        return self._finished(await self._journal(agent_id))
 
     async def _recover_locked(self, root_id: str, ownership: Ownership) -> None:
         assert self.coordinator is not None
@@ -1124,7 +1136,6 @@ class Runtime:
             if target.root_id != root_id or not (sender.parent_id == target_id or target.parent_id == sender.id):
                 raise TantraError("send is allowed only across a direct parent-child edge")
             self._agent_for(target.agent)
-            journal = await self._journal(target_id)
             existing = await self._tree_command(root_id, command.hex)
             if existing is not None:
                 if existing != (target_id, queued):
@@ -1133,7 +1144,7 @@ class Runtime:
                 self._activations[target_id] = self._activations.get(target_id, 0) + 1
                 self._activate(target_id, root_id)
                 return {"command_id": str(command), "duplicate": True}
-            if self._finished(journal) is not None:
+            if await self._actor_finished(target_id) is not None:
                 raise TantraError(f"agent {target_uuid} is finished")
             accepted = await self._enqueue(target_id, queued)
             await self._notify(target_id)
@@ -1448,10 +1459,33 @@ class Runtime:
                     raise CoordinatorUnavailable(f"root {envelope.root_id} has no recovered owner")
                 await self._recover_locked(envelope.root_id, ownership)
                 self._unrecovered.discard(envelope.root_id)
-            headers = await self._tree_headers(envelope.root_id)
-            journals = {header.id: await self._journal(header.id) for header in headers}
+            headers: list[SessionHeader] = []
+            if isinstance(envelope.payload, CancelPayload) or (
+                isinstance(envelope.payload, SendPayload | AnswerPayload)
+                and (
+                    not isinstance(self.coordinator, PostgresCoordinator)
+                    or getattr(self.store, "lookup_command", None) is None
+                    or isinstance(envelope.payload, SendPayload)
+                    and getattr(self.store, "lookup_finished", None) is None
+                )
+            ):
+                headers = await self._tree_headers(envelope.root_id)
+            fallback_journals = (
+                {header.id: await self._journal(header.id) for header in headers}
+                if not isinstance(self.coordinator, PostgresCoordinator)
+                else {}
+            )
 
             async def apply(request: CommandEnvelope, store: CoordinatedStoreProtocol) -> CommandReply:
+                journals = fallback_journals
+
+                async def find_command(command_id: str) -> tuple[str, SessionEvent] | None:
+                    lookup = getattr(store, "lookup_command", None)
+                    if lookup is None:
+                        return self._find_tree_command(journals, command_id)
+                    found = await lookup(request.root_id, command_id)
+                    return (found[0], found[1].event) if found is not None else None
+
                 try:
                     payload = request.payload
                     result: dict[str, Any]
@@ -1461,18 +1495,25 @@ class Runtime:
                     else:
                         assert request.writer_token is not None
                         await store.validate_writer(request.writer_token)
+                        if isinstance(self.coordinator, PostgresCoordinator):
+                            journals = {header.id: await self._journal(header.id, store=store) for header in headers}
                         if isinstance(payload, ReleaseWriterPayload):
                             result = {"released": await store.release_writer(request.writer_token)}
                         elif isinstance(payload, SendPayload):
                             event = InputQueued(command_id=payload.command_id.hex, input=payload.input)
-                            existing = self._find_tree_command(journals, payload.command_id.hex)
+                            existing = await find_command(payload.command_id.hex)
                             if existing is not None:
                                 if existing != (request.root_id, event):
                                     raise InvalidCommandReuse(payload.command_id.hex)
                                 duplicate = True
                             else:
-                                root_journal = journals[request.root_id]
-                                if self._finished(root_journal) is not None:
+                                lookup = getattr(store, "lookup_finished", None)
+                                finished = (
+                                    await lookup(request.root_id)
+                                    if lookup is not None
+                                    else self._finished(journals[request.root_id])
+                                )
+                                if finished is not None:
                                     raise TantraError(f"agent {UUID(hex=request.root_id)} is finished")
                                 duplicate = (await store.enqueue(request.root_id, event)).duplicate
                             after.append(lambda: self._accepted_input(request.root_id))
@@ -1484,7 +1525,7 @@ class Runtime:
                                 command_id=payload.command_id.hex,
                                 answered_by=request.root_id,
                             )
-                            existing = self._find_tree_command(journals, payload.command_id.hex)
+                            existing = await find_command(payload.command_id.hex)
                             if existing is not None:
                                 previous = existing[1]
                                 if (
@@ -1517,7 +1558,7 @@ class Runtime:
                                 duplicate = False
                             result = {"command_id": str(payload.command_id), "duplicate": duplicate}
                         elif isinstance(payload, CancelPayload):
-                            existing = self._find_tree_command(journals, payload.command_id.hex)
+                            existing = await find_command(payload.command_id.hex)
                             if existing is not None:
                                 if existing[0] != request.root_id or not isinstance(existing[1], CancellationRequested):
                                     raise InvalidCommandReuse(payload.command_id.hex)
@@ -1698,7 +1739,7 @@ class Runtime:
                 duplicate = True
             else:
                 await self._root_header(connection._root)
-                if self._finished(await self._journal(connection._root)) is not None:
+                if await self._actor_finished(connection._root) is not None:
                     raise TantraError(f"agent {connection.root_id} is finished")
                 accepted = await self._enqueue(connection._root, event)
                 duplicate = accepted.duplicate

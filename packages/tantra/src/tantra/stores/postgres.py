@@ -18,11 +18,19 @@ from tantra.errors import (
     TantraError,
 )
 from tantra.events import (
+    AgentFinished,
+    AskAnswered,
+    CancellationRequested,
     InputQueued,
     SessionEvent,
     SessionHeader,
     SessionStatus,
     Stamped,
+    TurnCancelled,
+    TurnCompleted,
+    TurnFailed,
+    TurnInterrupted,
+    TurnStarted,
     Usage,
 )
 from tantra.memory import MemoryRecord
@@ -311,6 +319,24 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         $$ LANGUAGE plpgsql
         """,
     ),
+    (
+        """
+        CREATE TABLE {schema}.journal_index (
+            actor_id text NOT NULL,
+            seq bigint NOT NULL,
+            event_type text NOT NULL,
+            command_id bytea,
+            turn_id bytea,
+            PRIMARY KEY (actor_id, seq),
+            FOREIGN KEY (actor_id, seq) REFERENCES {schema}.events (session_id, seq) ON DELETE CASCADE
+        )
+        """,
+        "CREATE INDEX journal_command_idx ON {schema}.journal_index (actor_id, command_id, seq)"
+        " WHERE command_id IS NOT NULL",
+        "CREATE INDEX journal_turn_idx ON {schema}.journal_index (actor_id, turn_id) WHERE turn_id IS NOT NULL",
+        "CREATE INDEX journal_finish_idx ON {schema}.journal_index (actor_id, seq DESC)"
+        " WHERE event_type = 'agent_finished'",
+    ),
 )
 
 
@@ -342,6 +368,8 @@ class PostgresStore:
                         continue
                     for statement in statements:
                         await conn.execute(self._sql(statement))
+                    if version == 5:
+                        await self._backfill_journal_index(conn)
                     await conn.execute(
                         self._sql("INSERT INTO {schema}.schema_version (version) VALUES (%s)"), (version,)
                     )
@@ -466,6 +494,9 @@ class PostgresStore:
                     await cursor.executemany(
                         self._sql("INSERT INTO {schema}.events (session_id, seq, stamped) VALUES (%s, %s, %s)"), rows
                     )
+                    await self._index_events(
+                        conn, [(sid, last_seq + offset, event) for offset, event in enumerate(events, start=1)]
+                    )
                 header = reduce_header(header, events)
                 header.last_seq = seq
                 await conn.execute(
@@ -486,16 +517,10 @@ class PostgresStore:
                 row = await cursor.fetchone()
                 if row is None:
                     raise SessionNotFound(sid)
-                cursor = await conn.execute(
-                    self._sql("SELECT seq, stamped FROM {schema}.events WHERE session_id = %s ORDER BY seq"),
-                    (sid,),
-                )
-                for seq, raw in await cursor.fetchall():
-                    existing = _parse(sid, raw).event
-                    if not isinstance(existing, InputQueued) or existing.command_id != event.command_id:
-                        continue
-                    if existing == event:
-                        return EnqueueResult(seq=seq, duplicate=True)
+                existing = await self._lookup_input(conn, sid, event.command_id)
+                if existing is not None:
+                    if existing.event == event:
+                        return EnqueueResult(seq=existing.seq, duplicate=True)
                     raise InvalidCommandReuse(event.command_id)
                 header = SessionHeader.model_validate(row[0])
                 seq = row[1] + 1
@@ -504,6 +529,7 @@ class PostgresStore:
                     self._sql("INSERT INTO {schema}.events (session_id, seq, stamped) VALUES (%s, %s, %s)"),
                     (sid, seq, _event_json(stamped)),
                 )
+                await self._index_events(conn, [(sid, seq, event)])
                 header = reduce_header(header, [event])
                 header.last_seq = seq
                 await conn.execute(
@@ -511,6 +537,114 @@ class PostgresStore:
                     (_json(header), seq, sid),
                 )
                 return EnqueueResult(seq=seq, duplicate=False)
+
+    async def lookup_command(self, root_id: str, command_id: str) -> tuple[str, Stamped] | None:
+        async with self._lock:
+            return await self._lookup_command(await self._connection(), root_id, command_id)
+
+    async def lookup_finished(self, actor_id: str) -> Stamped | None:
+        async with self._lock:
+            return await self._lookup_finished(await self._connection(), actor_id)
+
+    async def _lookup_command(self, conn: Any, root_id: str, command_id: str) -> tuple[str, Stamped] | None:
+        cursor = await conn.execute(
+            self._sql(
+                "WITH RECURSIVE actors AS ("
+                " SELECT id, created_at, 0 AS depth FROM {schema}.sessions WHERE id = %s"
+                " UNION ALL SELECT s.id, s.created_at, a.depth + 1"
+                " FROM {schema}.sessions s JOIN actors a ON s.parent_id = a.id"
+                ") SELECT c.actor_id, e.stamped FROM (SELECT i.actor_id, i.seq FROM actors a"
+                " JOIN LATERAL ("
+                " SELECT actor_id, seq FROM {schema}.journal_index"
+                " WHERE actor_id = a.id AND command_id = %s ORDER BY seq LIMIT 1"
+                ') i ON true ORDER BY a.depth, a.created_at, a.id COLLATE "C" LIMIT 1) c'
+                " JOIN LATERAL (SELECT stamped FROM {schema}.events"
+                " WHERE session_id = c.actor_id AND seq = c.seq LIMIT 1) e ON true"
+            ),
+            (root_id, command_id.encode()),
+        )
+        row = await cursor.fetchone()
+        return (row[0], _parse(row[0], row[1])) if row is not None else None
+
+    async def _lookup_input(self, conn: Any, sid: str, command_id: str) -> Stamped | None:
+        cursor = await conn.execute(
+            self._sql(
+                "SELECT e.stamped FROM (SELECT actor_id, seq FROM {schema}.journal_index"
+                " WHERE actor_id = %s AND command_id = %s AND event_type = 'input_queued'"
+                " ORDER BY seq LIMIT 1) i JOIN LATERAL (SELECT stamped FROM {schema}.events"
+                " WHERE session_id = i.actor_id AND seq = i.seq LIMIT 1) e ON true"
+            ),
+            (sid, command_id.encode()),
+        )
+        row = await cursor.fetchone()
+        return _parse(sid, row[0]) if row is not None else None
+
+    async def _input_pending(self, conn: Any, sid: str, command_id: str) -> bool:
+        cursor = await conn.execute(
+            self._sql("SELECT NOT EXISTS (SELECT 1 FROM {schema}.journal_index WHERE actor_id = %s AND turn_id = %s)"),
+            (sid, command_id.encode()),
+        )
+        return (await cursor.fetchone())[0]
+
+    async def _lookup_finished(self, conn: Any, actor_id: str) -> Stamped | None:
+        cursor = await conn.execute(
+            self._sql(
+                "SELECT e.stamped FROM (SELECT actor_id, seq FROM {schema}.journal_index"
+                " WHERE actor_id = %s AND event_type = 'agent_finished' ORDER BY seq DESC LIMIT 1) i"
+                " JOIN LATERAL (SELECT stamped FROM {schema}.events"
+                " WHERE session_id = i.actor_id AND seq = i.seq LIMIT 1) e ON true"
+            ),
+            (actor_id,),
+        )
+        row = await cursor.fetchone()
+        return _parse(actor_id, row[0]) if row is not None else None
+
+    async def _index_events(self, conn: Any, items: Sequence[tuple[str, int, SessionEvent]]) -> None:
+        rows = []
+        for actor_id, seq, event in items:
+            command_id = None
+            turn_id = None
+            if isinstance(event, InputQueued | AskAnswered | CancellationRequested):
+                command_id = event.command_id
+                if command_id is None:
+                    continue
+            elif isinstance(event, TurnStarted | TurnCompleted | TurnFailed | TurnCancelled | TurnInterrupted):
+                turn_id = event.turn_id
+            elif not isinstance(event, AgentFinished):
+                continue
+            rows.append(
+                (
+                    actor_id,
+                    seq,
+                    event.type,
+                    command_id.encode() if command_id is not None else None,
+                    turn_id.encode() if turn_id is not None else None,
+                )
+            )
+        if rows:
+            async with conn.cursor() as cursor:
+                await cursor.executemany(
+                    self._sql(
+                        "INSERT INTO {schema}.journal_index (actor_id, seq, event_type, command_id, turn_id)"
+                        " VALUES (%s, %s, %s, %s, %s)"
+                    ),
+                    rows,
+                )
+
+    async def _backfill_journal_index(self, conn: Any) -> None:
+        after: tuple[str, int] | None = None
+        while True:
+            query = "SELECT session_id, seq, stamped FROM {schema}.events"
+            if after is not None:
+                query += " WHERE (session_id, seq) > (%s, %s)"
+            query += " ORDER BY session_id, seq LIMIT 1000"
+            cursor = await conn.execute(self._sql(query), after or ())
+            rows = await cursor.fetchall()
+            if not rows:
+                return
+            items = [(sid, seq, _parse(sid, raw).event) for sid, seq, raw in rows]
+            await self._index_events(conn, items)
+            after = rows[-1][:2]
 
     async def read_page(self, sid: str, *, after: int = 0, limit: int = 1000) -> list[Stamped]:
         async with self._lock:

@@ -52,6 +52,10 @@ Enter a connection with `async with`. Read-only connections iterate events. A wr
 
 Cancelling the local wait for `prompt` does not cancel the accepted turn. Coordinated event readers replay Store pages and use notifications plus bounded catch-up polling, so a reconnect can observe work owned elsewhere without activating it.
 
+`PostgresCoordinator` shares one periodic observation query across all roots watched by a worker. Notifications route immediate hints to the affected root; the shared check recovers missed notifications, expired ownership, actor activity, and transport replies. Journal pages remain independent per consumer, and idle observers do not read journals. Runtime uses this optional PostgreSQL capability when available. Custom coordinators keep the `watch()` fallback and need no new protocol methods.
+
+Runtime reference-counts writable and read-only connections, event generators, and result waits independently. One watcher is retained per interested root and is removed after its last user exits, including cancellation and generator close. A result wait keeps its root subscribed after the originating connection closes. Unsubscribing does not stop accepted work or lease renewal, and reconnecting resumes from the caller's durable cursor.
+
 ## Results and errors
 
 `LoggedEvent` contains `agent_id`, integer `seq`, and `event`. `CommandReceipt` contains the UUID and a `duplicate` flag. `TurnResult.outcome` is `completed`, `failed`, `cancelled`, or `interrupted`.

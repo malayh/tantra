@@ -630,8 +630,7 @@ async def test_blocked_store_connection_does_not_starve_renewal(postgres_dsn: st
     assert ownership is not None
 
     async def block_data_connection():
-        async with pair[0]._lock:
-            conn = await pair[0]._connection()
+        async with pair[0]._connection() as conn:
             await conn.execute("SELECT pg_sleep(0.25)")
 
     try:

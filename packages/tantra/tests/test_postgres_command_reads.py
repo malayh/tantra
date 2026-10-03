@@ -68,23 +68,28 @@ async def test_indexed_reads_and_warm_dispatch_are_bounded(postgres_dsn, pg_sche
 
     monkeypatch.setattr(store, "read", forbidden)
     monkeypatch.setattr(store, "read_page", forbidden)
-    connection = await store._connection()
-    execute = connection.execute
+    execute = postgres.psycopg.AsyncConnection.execute
     queries = []
 
-    async def capture(query, params=None, **kwargs):
+    async def capture(connection, query, params=None, **kwargs):
         if "WITH RECURSIVE actors AS" in query.as_string(connection):
             queries.append((query, params))
-        return await execute(query, params, **kwargs)
+        return await execute(connection, query, params, **kwargs)
 
-    monkeypatch.setattr(connection, "execute", capture)
+    monkeypatch.setattr(postgres.psycopg.AsyncConnection, "execute", capture)
     found = await store.lookup_command(root.hex, completed.hex)
     assert found[0] == root.hex and found[1].seq == 1
     assert await store.lookup_command(root.hex, uuid4().hex) is None
     assert await store.lookup_finished(root.hex) is None
     assert (await store.enqueue(root.hex, InputQueued(command_id=completed.hex, input="done"))).duplicate
     assert len(parsed) == 2
-    cursor = await execute(postgres.sql.SQL("EXPLAIN (ANALYZE, FORMAT JSON) ") + queries[0][0], queries[0][1])
+    monkeypatch.setattr(postgres.psycopg.AsyncConnection, "execute", execute)
+    async with store._connection() as connection:
+        cursor = await execute(
+            connection,
+            postgres.sql.SQL("EXPLAIN (ANALYZE, FORMAT JSON) ") + queries[0][0],
+            queries[0][1],
+        )
     plans = [(await cursor.fetchone())[0][0]["Plan"]]
     event_reads = []
     while plans:
@@ -94,7 +99,6 @@ async def test_indexed_reads_and_warm_dispatch_are_bounded(postgres_dsn, pg_sche
             event_reads.append(plan)
     assert event_reads
     assert all(plan["Actual Rows"] <= 1 and "Index" in plan["Node Type"] for plan in event_reads)
-    monkeypatch.setattr(connection, "execute", execute)
 
     coordinator = PostgresCoordinator(store, lease_ttl=30, catch_up_interval=0.02)
     runtime = Runtime(FakeProvider([]), store, [Bot], default_model="m", coordinator=coordinator)

@@ -293,8 +293,13 @@ def scale(report: dict[str, Any], workers: list[Worker], ids: list[str], args: A
     assert set(roots[: args.active]).issubset(observed), "observer missed active root events"
     assert all(observed[sid] >= watermark for sid, watermark in expected.items()), "observer missed terminal events"
     for index, worker in enumerate(workers):
-        measured(report, worker, f"worker-{index}/unsubscribe", "stop_observers")
+        stopped = measured(report, worker, f"worker-{index}/unsubscribe", "stop_observers")
+        assert not stopped["observer_errors"], stopped["observer_errors"]
+        assert stopped["watchers"] == stopped["subscriptions"] == 0, "observer resources were retained"
         measured(report, worker, f"worker-{index}/after_disconnect", "idle", seconds=3)
+        sample = report["samples"][-1]
+        assert sample["watchers"] == sample["coordinator"]["subscriptions"] == 0
+        assert sample["coordinator_delta"]["observation_checks"] == 0
 
 
 def provider_settings(args: Any) -> dict[str, Any]:

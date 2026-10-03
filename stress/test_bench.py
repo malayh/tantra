@@ -251,6 +251,12 @@ async def test_two_process_baseline_and_recovery(postgres_dsn: str, history_mode
         await asyncio.to_thread(baseline, report, workers, settings, ids, SimpleNamespace(histories=[40], samples=1))
         assert any(sample["label"] == "40/recovery" and not sample["error"] for sample in report["samples"])
         assert len({sample["pid"] for sample in report["samples"]}) == 2
+        assert all(sample["pool"]["pool_max"] == 4 for sample in report["samples"])
+        assert all(
+            {"observation_checks", "observation_ticks", "routed_wakeups", "dispatch_peak"}
+            <= sample["coordinator_delta"].keys()
+            for sample in report["samples"]
+        )
         if history_mode == "compacted":
             assert (
                 next(sample for sample in report["samples"] if sample["label"] == "40/context")["result"]["events"] < 40

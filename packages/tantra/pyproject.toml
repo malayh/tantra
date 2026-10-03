@@ -14,7 +14,7 @@ Homepage = "https://github.com/malayh/tantra"
 Documentation = "https://malayh.github.io/tantra/docs/"
 
 [project.optional-dependencies]
-postgres = ["psycopg[binary]>=3.2"]
+postgres = ["psycopg[binary]>=3.2", "psycopg-pool>=3.2"]
 web = ["curl-cffi>=0.15", "trafilatura>=2.0", "tenacity>=9"]
 doc = ["pypdf>=6", "python-docx>=1.1"]
 telemetry = ["opentelemetry-sdk>=1.30", "opentelemetry-exporter-otlp-proto-http>=1.30"]

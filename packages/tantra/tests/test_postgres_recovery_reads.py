@@ -87,8 +87,7 @@ async def test_recovery_cancel_results_and_shutdown_avoid_historical_reads(
         )
     parsed = []
     original_parse = postgres._parse
-    connection = await store._connection()
-    execute = connection.execute
+    execute = postgres.psycopg.AsyncConnection.execute
     queries = []
 
     def counted(sid, raw):
@@ -96,18 +95,18 @@ async def test_recovery_cancel_results_and_shutdown_avoid_historical_reads(
         parsed.append(item)
         return item
 
-    async def capture(query, params=None, **kwargs):
+    async def capture(connection, query, params=None, **kwargs):
         rendered = query.as_string(connection) if hasattr(query, "as_string") else query
         if rendered.startswith("SELECT") and ".events" in rendered:
             queries.append((query, params))
-        return await execute(query, params, **kwargs)
+        return await execute(connection, query, params, **kwargs)
 
     async def forbidden(*args, **kwargs):
         pytest.fail("operational Runtime path read full history")
 
     activated = []
     monkeypatch.setattr(postgres, "_parse", counted)
-    monkeypatch.setattr(connection, "execute", capture)
+    monkeypatch.setattr(postgres.psycopg.AsyncConnection, "execute", capture)
     monkeypatch.setattr(runtime, "_journal", forbidden)
     monkeypatch.setattr(runtime, "_activate", lambda actor, root_id: activated.append(actor))
     try:
@@ -155,14 +154,15 @@ async def test_recovery_cancel_results_and_shutdown_avoid_historical_reads(
         await runtime.aclose()
         assert len(parsed) < 100
         reads = []
-        for query, params in queries:
-            cursor = await execute(postgres.sql.SQL("EXPLAIN (ANALYZE, FORMAT JSON) ") + query, params)
-            plans = [(await cursor.fetchone())[0][0]["Plan"]]
-            while plans:
-                plan = plans.pop()
-                plans.extend(plan.get("Plans", []))
-                if plan.get("Relation Name") == "events" and plan["Actual Loops"]:
-                    reads.append(plan)
+        async with store._connection() as connection:
+            for query, params in queries:
+                cursor = await execute(connection, postgres.sql.SQL("EXPLAIN (ANALYZE, FORMAT JSON) ") + query, params)
+                plans = [(await cursor.fetchone())[0][0]["Plan"]]
+                while plans:
+                    plan = plans.pop()
+                    plans.extend(plan.get("Plans", []))
+                    if plan.get("Relation Name") == "events" and plan["Actual Loops"]:
+                        reads.append(plan)
         assert reads
         assert all(
             (

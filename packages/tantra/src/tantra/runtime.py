@@ -282,6 +282,7 @@ class Runtime:
         self.active: dict[str, asyncio.Task[None]] = {}
         self.asks: dict[str, _LiveAsk] = {}
         self.conditions: dict[str, _Signal] = {}
+        self._wait_conditions: dict[str, _Signal] = {}
         self.writers: dict[str, int] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._activations: dict[str, int] = {}
@@ -295,6 +296,11 @@ class Runtime:
         self._unrecovered: set[str] = set()
         self._renewals: dict[str, asyncio.Task[None]] = {}
         self._watchers: dict[str, asyncio.Task[None]] = {}
+        self._connection_interests: dict[str, int] = {}
+        self._stream_interests: dict[str, dict[str, int]] = {}
+        self._wait_interests: dict[str, dict[str, int]] = {}
+        self._observations: dict[str, Any] = {}
+        self._observation_errors: dict[str, CoordinatorUnavailable] = {}
         self._connections: dict[UUID, Connection] = {}
         self._maintenance_task: asyncio.Task[None] | None = None
         self._started = coordinator is None
@@ -319,6 +325,9 @@ class Runtime:
     def _signal(self, agent_id: str) -> _Signal:
         return self.conditions.setdefault(agent_id, _Signal())
 
+    def _wait_signal(self, agent_id: str) -> _Signal:
+        return self._wait_conditions.setdefault(agent_id, _Signal())
+
     def _ensure_open(self) -> None:
         if self._closed or self._closing:
             raise TantraError("runtime is closed")
@@ -339,13 +348,20 @@ class Runtime:
         assert self.coordinator is not None
         cleanup = getattr(self.coordinator, "cleanup", None)
         while not self._closed:
-            await asyncio.sleep(60.0)
             try:
-                await cleanup(100)
+                started = asyncio.get_running_loop().time()
+                backlog = False
+                while asyncio.get_running_loop().time() - started < 1.0:
+                    deleted = await cleanup(100)
+                    backlog = deleted == 100
+                    if not backlog:
+                        break
+                    await asyncio.sleep(0)
             except asyncio.CancelledError:
                 raise
             except CoordinatorUnavailable:
-                pass
+                backlog = False
+            await asyncio.sleep(0.1 if backlog else 60.0)
 
     def _ensure_started(self) -> None:
         if self.coordinator is not None and not self._started:
@@ -407,56 +423,196 @@ class Runtime:
             if live.root_id == root_id and not live.future.done():
                 live.future.set_exception(AskExpired(ask_id))
 
+    def _observation_capable(self) -> bool:
+        return (
+            self.coordinator is not None
+            and callable(getattr(self.coordinator, "observe", None))
+            and callable(getattr(self.coordinator, "observation", None))
+        )
+
+    def _current_observation(self, root_id: str) -> Any:
+        observation = self._observations.get(root_id)
+        if observation is None and self._observation_capable():
+            assert self.coordinator is not None
+            observation = self.coordinator.observation(root_id)
+            if observation is not None:
+                self._observations[root_id] = observation
+        return observation
+
     def _watch_root(self, root_id: str) -> None:
-        if self.coordinator is None or root_id in self._watchers or self._closed:
+        if self.coordinator is None or self._closed:
+            return
+        current = self._watchers.get(root_id)
+        if current is not None and not current.done() and not current.cancelling():
             return
         self._watchers[root_id] = asyncio.create_task(self._watch(root_id))
 
+    def _retain_connection_interest(self, root_id: str) -> None:
+        self._connection_interests[root_id] = self._connection_interests.get(root_id, 0) + 1
+        self._watch_root(root_id)
+
+    def _retain_actor_interest(self, interests: dict[str, dict[str, int]], root_id: str, actor_id: str) -> None:
+        actors = interests.setdefault(root_id, {})
+        actors[actor_id] = actors.get(actor_id, 0) + 1
+        self._watch_root(root_id)
+
+    def _interested(self, root_id: str) -> bool:
+        return bool(
+            self._connection_interests.get(root_id)
+            or self._stream_interests.get(root_id)
+            or self._wait_interests.get(root_id)
+        )
+
+    async def _stop_watcher_if_unused(self, root_id: str) -> None:
+        if self._interested(root_id):
+            return
+        task = self._watchers.pop(root_id, None)
+        self._observations.pop(root_id, None)
+        self._observation_errors.pop(root_id, None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _release_connection_interest(self, root_id: str) -> None:
+        count = self._connection_interests.get(root_id, 0)
+        if count <= 1:
+            self._connection_interests.pop(root_id, None)
+        else:
+            self._connection_interests[root_id] = count - 1
+        await self._stop_watcher_if_unused(root_id)
+
+    async def _release_actor_interest(
+        self,
+        interests: dict[str, dict[str, int]],
+        root_id: str,
+        actor_id: str,
+    ) -> None:
+        actors = interests.get(root_id)
+        if actors is not None:
+            count = actors.get(actor_id, 0)
+            if count <= 1:
+                actors.pop(actor_id, None)
+            else:
+                actors[actor_id] = count - 1
+            if not actors:
+                interests.pop(root_id, None)
+        await self._stop_watcher_if_unused(root_id)
+
     async def _watch(self, root_id: str) -> None:
         assert self.coordinator is not None
-        cursor = 0
-        interval = float(getattr(self.coordinator, "catch_up_interval", 2.0))
         try:
-            while not self._closed:
-                iterator = self.coordinator.watch(root_id, after=cursor)
-                pending: asyncio.Task[Any] | None = None
-                try:
-                    await self._refresh_writers(root_id)
-                    pending = asyncio.create_task(anext(iterator))
-                    while not self._closed:
-                        done, _ = await asyncio.wait({pending}, timeout=interval)
-                        if not done:
-                            await self._refresh_writers(root_id)
-                            continue
-                        notice = pending.result()
-                        if notice.kind == "writer":
-                            await self._refresh_writers(root_id)
-                        if notice.actor_id is not None:
-                            await self._notify(notice.actor_id)
-                        else:
-                            for agent_id, known_root in list(self._known_roots.items()):
-                                if known_root == root_id:
-                                    await self._notify(agent_id)
-                        cursor = notice.change_id
-                        pending = asyncio.create_task(anext(iterator))
-                except asyncio.CancelledError:
-                    raise
-                except BaseException:
-                    for agent_id, known_root in list(self._known_roots.items()):
-                        if known_root == root_id:
-                            await self._notify(agent_id)
-                    await asyncio.sleep(interval)
-                finally:
-                    if pending is not None:
-                        pending.cancel()
-                        await asyncio.gather(pending, return_exceptions=True)
-                    close = getattr(iterator, "aclose", None)
-                    if close is not None:
-                        await close()
+            if self._observation_capable():
+                await self._watch_observations(root_id)
+            else:
+                await self._watch_fallback(root_id)
         except asyncio.CancelledError:
             raise
         finally:
-            self._watchers.pop(root_id, None)
+            task = asyncio.current_task()
+            if self._watchers.get(root_id) is task:
+                self._watchers.pop(root_id, None)
+
+    async def _watch_observations(self, root_id: str) -> None:
+        assert self.coordinator is not None
+        interval = float(getattr(self.coordinator, "catch_up_interval", 2.0))
+        while not self._closed:
+            iterator = self.coordinator.observe(root_id)
+            try:
+                async for observation in iterator:
+                    await self._apply_observation(root_id, observation)
+            except asyncio.CancelledError:
+                raise
+            except CoordinatorUnavailable as exc:
+                self._observation_errors[root_id] = exc
+                await self._notify_root_interests(root_id)
+                await asyncio.sleep(interval)
+            finally:
+                close = getattr(iterator, "aclose", None)
+                if close is not None:
+                    await close()
+
+    async def _apply_observation(self, root_id: str, observation: Any) -> None:
+        previous = self._observations.get(root_id)
+        self._observations[root_id] = observation
+        self._observation_errors.pop(root_id, None)
+        await self._refresh_writers_from_observation(root_id, observation)
+        streams = set(self._stream_interests.get(root_id, {}))
+        waiters = set(self._wait_interests.get(root_id, {}))
+        if previous is None:
+            stream_wakes = streams
+            wait_wakes = waiters
+        else:
+            stream_wakes = {
+                actor_id
+                for actor_id in streams
+                if previous.actors.get(actor_id, (None, False))[0] != observation.actors.get(actor_id, (None, False))[0]
+            }
+            root_changed = (
+                previous.owner_instance != observation.owner_instance
+                or previous.owner_generation != observation.owner_generation
+                or previous.owner_valid != observation.owner_valid
+                or previous.recovery != observation.recovery
+                or previous.error != observation.error
+            )
+            wait_wakes = {
+                actor_id
+                for actor_id in waiters
+                if previous.sample != observation.sample
+                or previous.actors.get(actor_id) != observation.actors.get(actor_id)
+                or root_changed
+            }
+        if observation.error is not None:
+            stream_wakes = streams
+            wait_wakes = waiters
+        for actor_id in stream_wakes:
+            await self._notify(actor_id)
+        for actor_id in wait_wakes - stream_wakes:
+            await self._notify_waiter(actor_id)
+
+    async def _notify_root_interests(self, root_id: str) -> None:
+        streams = set(self._stream_interests.get(root_id, {}))
+        waiters = set(self._wait_interests.get(root_id, {}))
+        for actor_id in streams:
+            await self._notify(actor_id)
+        for actor_id in waiters - streams:
+            await self._notify_waiter(actor_id)
+
+    async def _watch_fallback(self, root_id: str) -> None:
+        assert self.coordinator is not None
+        cursor = 0
+        interval = float(getattr(self.coordinator, "catch_up_interval", 2.0))
+        while not self._closed:
+            iterator = self.coordinator.watch(root_id, after=cursor)
+            pending: asyncio.Task[Any] | None = None
+            try:
+                await self._refresh_writers(root_id)
+                pending = asyncio.create_task(anext(iterator))
+                while not self._closed:
+                    done, _ = await asyncio.wait({pending}, timeout=interval)
+                    if not done:
+                        await self._refresh_writers(root_id)
+                        continue
+                    notice = pending.result()
+                    if notice.kind == "writer":
+                        await self._refresh_writers(root_id)
+                    if notice.actor_id is not None:
+                        await self._notify(notice.actor_id)
+                    else:
+                        await self._notify_root_interests(root_id)
+                    cursor = notice.change_id
+                    pending = asyncio.create_task(anext(iterator))
+            except asyncio.CancelledError:
+                raise
+            except BaseException:
+                await self._notify_root_interests(root_id)
+                await asyncio.sleep(interval)
+            finally:
+                if pending is not None:
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+                close = getattr(iterator, "aclose", None)
+                if close is not None:
+                    await close()
 
     async def _refresh_writers(self, root_id: str) -> None:
         assert self.coordinator is not None
@@ -465,6 +621,21 @@ class Runtime:
             if connection._root != root_id or token is None:
                 continue
             if not await self.coordinator.writer_matches(token):
+                connection._writer_token = None
+                connection._writer_change_id = None
+                await self._notify(root_id)
+
+    async def _refresh_writers_from_observation(self, root_id: str, observation: Any) -> None:
+        if observation.error is not None:
+            return
+        for connection in list(self._connections.values()):
+            token = connection._writer_token
+            if connection._root != root_id or token is None:
+                continue
+            if connection._writer_change_id is not None and observation.change_id < connection._writer_change_id:
+                continue
+            connection._writer_change_id = None
+            if observation.writer_connection != str(token.connection_id):
                 connection._writer_token = None
                 await self._notify(root_id)
 
@@ -498,6 +669,14 @@ class Runtime:
 
     async def _notify(self, agent_id: str) -> None:
         signal = self._signal(agent_id)
+        async with signal.condition:
+            signal.generation += 1
+            signal.condition.notify_all()
+        if agent_id in self._wait_conditions:
+            await self._notify_waiter(agent_id)
+
+    async def _notify_waiter(self, agent_id: str) -> None:
+        signal = self._wait_signal(agent_id)
         async with signal.condition:
             signal.generation += 1
             signal.condition.notify_all()
@@ -885,7 +1064,6 @@ class Runtime:
             raise ValueError("after must be non-negative")
         header = await self._header(sid)
         self._known_roots[sid] = header.root_id or header.id
-        self._watch_root(header.root_id or header.id)
         async for item in self._stream(public_id, sid, after, None):
             yield item
 
@@ -898,36 +1076,44 @@ class Runtime:
     ) -> AsyncIterator[LoggedEvent]:
         cursor = after
         signal = self._signal(sid)
-        while True:
-            if connection is not None:
-                connection._check_iteration()
-            page = await self.store.read_page(sid, after=cursor)
-            if page:
-                for item in page:
-                    if connection is not None:
-                        connection._check_iteration()
-                    cursor = item.seq
-                    yield LoggedEvent(agent_id=public_id, seq=item.seq, event=item.event)
-                continue
-            async with signal.condition:
-                generation = signal.generation
-            page = await self.store.read_page(sid, after=cursor)
-            if page:
-                continue
-            if connection is not None:
-                connection._check_iteration()
-            if self._closed:
-                return
-            async with signal.condition:
-                if signal.generation == generation and not self._closed:
-                    if self.coordinator is None:
-                        await signal.condition.wait()
-                    else:
-                        interval = float(getattr(self.coordinator, "catch_up_interval", 2.0))
-                        try:
-                            await asyncio.wait_for(signal.condition.wait(), interval)
-                        except TimeoutError:
-                            pass
+        root_id = connection._root if connection is not None else self._known_roots.get(sid, sid)
+        self._retain_actor_interest(self._stream_interests, root_id, sid)
+        try:
+            while True:
+                if connection is not None:
+                    connection._check_iteration()
+                page = await self.store.read_page(sid, after=cursor)
+                if page:
+                    for item in page:
+                        if connection is not None:
+                            connection._check_iteration()
+                        cursor = item.seq
+                        yield LoggedEvent(agent_id=public_id, seq=item.seq, event=item.event)
+                    continue
+                async with signal.condition:
+                    generation = signal.generation
+                page = await self.store.read_page(sid, after=cursor)
+                if page:
+                    continue
+                if connection is not None:
+                    connection._check_iteration()
+                if self._closing or self._closed:
+                    return
+                async with signal.condition:
+                    if signal.generation == generation and not self._closing and not self._closed:
+                        if self.coordinator is None or not self._observation_capable():
+                            if self.coordinator is None:
+                                await signal.condition.wait()
+                            else:
+                                interval = float(getattr(self.coordinator, "catch_up_interval", 2.0))
+                                try:
+                                    await asyncio.wait_for(signal.condition.wait(), interval)
+                                except TimeoutError:
+                                    pass
+                        else:
+                            await signal.condition.wait()
+        finally:
+            await self._release_actor_interest(self._stream_interests, root_id, sid)
 
     async def _skill_index(self, agent: type[Agent]) -> list[SkillInfo]:
         if self.skills is None or agent.skills == []:
@@ -1546,6 +1732,9 @@ class Runtime:
                     if isinstance(payload, ClaimWriterPayload):
                         token = await store.claim_writer(payload.connection_id)
                         result = {"writer_token": token.model_dump(mode="json")}
+                        writer_change_id = getattr(store, "writer_change_id", None)
+                        if writer_change_id is not None:
+                            result["writer_change_id"] = writer_change_id
                     else:
                         assert request.writer_token is not None
                         await store.validate_writer(request.writer_token)
@@ -1710,53 +1899,77 @@ class Runtime:
         self._ensure_started()
         header = await self._root_header(connection._root)
         self._known_roots[connection._root] = connection._root
-        self._watch_root(connection._root)
-        if self.coordinator is not None:
+        self._retain_connection_interest(connection._root)
+        connection._watching = True
+        try:
+            if self.coordinator is not None:
+                if connection.writable:
+                    self._agent_for(header.agent)
+                    if await self.coordinator.locate(connection._root) is None:
+                        async with self._lock(connection._root):
+                            if await self.coordinator.locate(connection._root) is None:
+                                await self._ensure_owner_locked(connection._root)
+                    result = await self._request_command(
+                        connection._root,
+                        "claim_writer",
+                        ClaimWriterPayload(connection_id=connection._connection_id),
+                        None,
+                    )
+                    connection._writer_token = WriterToken.model_validate(result["writer_token"])
+                    connection._writer_change_id = result.get("writer_change_id")
+                    self._connections[connection._connection_id] = connection
+                    observation = self._current_observation(connection._root)
+                    if observation is not None:
+                        await self._refresh_writers_from_observation(connection._root, observation)
+                    if connection._writer_token is None:
+                        raise WriterReplaced(f"writer for {connection.root_id} was replaced")
+                connection._entered = True
+                return
             if connection.writable:
                 self._agent_for(header.agent)
-                if await self.coordinator.locate(connection._root) is None:
-                    async with self._lock(connection._root):
-                        if await self.coordinator.locate(connection._root) is None:
-                            await self._ensure_owner_locked(connection._root)
-                result = await self._request_command(
-                    connection._root,
-                    "claim_writer",
-                    ClaimWriterPayload(connection_id=connection._connection_id),
-                    None,
-                )
-                connection._writer_token = WriterToken.model_validate(result["writer_token"])
-                self._connections[connection._connection_id] = connection
+                async with self._lock(connection._root):
+                    self._ensure_open()
+                    generation = self.writers.get(connection._root, 0) + 1
+                    self.writers[connection._root] = generation
+                    connection._generation = generation
+                    connection._entered = True
+                await self._notify(connection._root)
+                return
             connection._entered = True
-            return
-        if connection.writable:
-            self._agent_for(header.agent)
-            async with self._lock(connection._root):
-                self._ensure_open()
-                generation = self.writers.get(connection._root, 0) + 1
-                self.writers[connection._root] = generation
-                connection._generation = generation
-                connection._entered = True
-            await self._notify(connection._root)
-            return
-        connection._entered = True
+        except BaseException:
+            if connection._connection_id in self._connections:
+                try:
+                    await self._release_connection(connection)
+                except BaseException:
+                    pass
+            else:
+                connection._watching = False
+                await self._release_connection_interest(connection._root)
+            raise
 
     async def _release_connection(self, connection: Connection) -> None:
-        self._connections.pop(connection._connection_id, None)
-        if self.coordinator is None or connection._writer_token is None:
-            return
-        token = connection._writer_token
-        connection._writer_token = None
-        if self._closed or getattr(self.coordinator, "_closed", False):
-            return
         try:
-            await self._request_command(
-                connection._root,
-                "release_writer",
-                ReleaseWriterPayload(),
-                token,
-            )
-        except WriterReplaced:
-            pass
+            self._connections.pop(connection._connection_id, None)
+            if self.coordinator is None or connection._writer_token is None:
+                return
+            token = connection._writer_token
+            connection._writer_token = None
+            connection._writer_change_id = None
+            if self._closed or getattr(self.coordinator, "_closed", False):
+                return
+            try:
+                await self._request_command(
+                    connection._root,
+                    "release_writer",
+                    ReleaseWriterPayload(),
+                    token,
+                )
+            except WriterReplaced:
+                pass
+        finally:
+            if connection._watching:
+                connection._watching = False
+                await self._release_connection_interest(connection._root)
 
     def _check_writer(self, connection: Connection) -> None:
         if not connection._entered or not connection.writable:
@@ -1947,11 +2160,92 @@ class Runtime:
             return CommandReceipt(command_id=public_id, duplicate=duplicate)
 
     async def _wait_result(self, agent_id: str, command_id: UUID) -> TurnResult:
-        cid = command_id.hex
-        signal = self._signal(agent_id)
-        inactive = 0
         root_id = self._known_roots.get(agent_id, agent_id)
-        self._watch_root(root_id)
+        self._retain_actor_interest(self._wait_interests, root_id, agent_id)
+        try:
+            if self.coordinator is not None and self._observation_capable():
+                return await self._wait_observed_result(root_id, agent_id, command_id)
+            return await self._wait_polled_result(root_id, agent_id, command_id)
+        finally:
+            await self._release_actor_interest(self._wait_interests, root_id, agent_id)
+
+    async def _wait_observed_result(self, root_id: str, agent_id: str, command_id: UUID) -> TurnResult:
+        cid = command_id.hex
+        signal = self._wait_signal(agent_id)
+        inactive = 0
+        observation = self._current_observation(root_id)
+        seen_observation = observation is not None
+        last_seq = observation.actors.get(agent_id, (None, False))[0] if observation is not None else None
+        last_sample = observation.sample if observation is not None else None
+        result = await self._result(agent_id, command_id)
+        error = self._errors.get(agent_id, {}).get(cid)
+        if error is not None and result is None:
+            raise error
+        if result is not None:
+            return result
+        while True:
+            async with signal.condition:
+                generation = signal.generation
+            if self._closing:
+                await self._close_complete.wait()
+            if self._closed:
+                result = await self._result(agent_id, command_id)
+                error = self._errors.get(agent_id, {}).get(cid)
+                if error is not None and result is None:
+                    raise error
+                if result is not None:
+                    return result
+                raise TantraError(f"runtime closed before command {command_id} finished")
+            observation = self._current_observation(root_id)
+            observed_error = self._observation_errors.get(root_id)
+            if observed_error is not None:
+                if not self._closing and not self._closed:
+                    raise observed_error
+                await self._close_complete.wait()
+                continue
+            if observation is not None:
+                if observation.error is not None:
+                    if not self._closing and not self._closed:
+                        raise observation.error
+                    await self._close_complete.wait()
+                    continue
+                actor = observation.actors.get(agent_id)
+                seq = actor[0] if actor is not None else None
+                if not seen_observation or seq != last_seq:
+                    seen_observation = True
+                    last_seq = seq
+                    result = await self._result(agent_id, command_id)
+                    error = self._errors.get(agent_id, {}).get(cid)
+                    if error is not None and result is None:
+                        raise error
+                    if result is not None:
+                        return result
+                active = actor is not None and actor[1]
+                owner = observation.owner_instance is not None and observation.owner_valid
+                recovered = (
+                    owner
+                    and observation.recovery.get("generation") == observation.owner_generation
+                    and observation.recovery.get("phase") == "complete"
+                )
+                if active or owner and not recovered:
+                    inactive = 0
+                if observation.sample > 0 and observation.sample != last_sample:
+                    last_sample = observation.sample
+                    if not active and (not owner or recovered):
+                        inactive += 1
+                        if inactive >= 2:
+                            raise RemoteExecutionError(f"command {command_id} has no active owner execution")
+            error = self._errors.get(agent_id, {}).get(cid)
+            if error is not None:
+                raise error
+            async with signal.condition:
+                if signal.generation == generation and not self._closed:
+                    await signal.condition.wait()
+
+    async def _wait_polled_result(self, root_id: str, agent_id: str, command_id: UUID) -> TurnResult:
+        cid = command_id.hex
+        signal = self._wait_signal(agent_id)
+        inactive = 0
         while True:
             result = await self._result(agent_id, command_id)
             error = self._errors.get(agent_id, {}).get(cid)
@@ -2015,6 +2309,8 @@ class Runtime:
     async def _close_coordinated(self) -> None:
         assert self.coordinator is not None
         tasks = [task for task in self.active.values() if not task.done()]
+        for root_id in set(self._connection_interests) | set(self._stream_interests) | set(self._wait_interests):
+            await self._notify_root_interests(root_id)
         control_tasks = list(self._watchers.values())
         if self._maintenance_task is not None:
             control_tasks.append(self._maintenance_task)
@@ -2078,6 +2374,11 @@ class Runtime:
         await asyncio.gather(*renewal_tasks, return_exceptions=True)
         self._renewals.clear()
         self._watchers.clear()
+        self._connection_interests.clear()
+        self._stream_interests.clear()
+        self._wait_interests.clear()
+        self._observations.clear()
+        self._observation_errors.clear()
         self._connections.clear()
         self._maintenance_task = None
         await self.coordinator.close()
@@ -2175,8 +2476,10 @@ class Connection:
         self._after = after
         self._connection_id = uuid4()
         self._writer_token: WriterToken | None = None
+        self._writer_change_id: int | None = None
         self._generation: int | None = None
         self._entered = False
+        self._watching = False
         self._iterator: AsyncIterator[LoggedEvent] | None = None
 
     async def __aenter__(self) -> Connection:
@@ -2186,11 +2489,14 @@ class Connection:
         return self
 
     async def __aexit__(self, *_args: Any) -> None:
-        await self.runtime._release_connection(self)
-        self._entered = False
-        if self._iterator is not None:
-            await self._iterator.aclose()
+        try:
+            await self.runtime._release_connection(self)
+        finally:
+            self._entered = False
+            iterator = self._iterator
             self._iterator = None
+            if iterator is not None:
+                await iterator.aclose()
 
     def _check_iteration(self) -> None:
         if not self._entered:

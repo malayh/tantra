@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from typing import Any
 
 from pydantic import ValidationError
@@ -39,6 +40,7 @@ from tantra.stores.base import UNSET, EnqueueResult, HistorySnapshot, Operationa
 
 try:
     import psycopg
+    import psycopg_pool
     from psycopg import sql
     from psycopg.types.json import Jsonb
 
@@ -358,6 +360,18 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         """,
         "CREATE INDEX cancellation_turn_idx ON {schema}.cancellation_targets (actor_id, turn_id)",
     ),
+    (
+        "CREATE INDEX sessions_root_idx ON {schema}.sessions ((COALESCE(NULLIF(header->>'root_id', ''), id)))",
+        'CREATE INDEX sessions_order_idx ON {schema}.sessions (created_at DESC, id COLLATE "C" DESC)',
+        "DROP INDEX {schema}.sessions_parent_idx",
+        'CREATE INDEX sessions_parent_order_idx ON {schema}.sessions (parent_id, created_at DESC, id COLLATE "C" DESC)',
+        "CREATE INDEX coordinator_requests_root_order_idx"
+        " ON {schema}.coordinator_requests (root_id, created_at, request_id) WHERE reply IS NULL",
+        "DROP INDEX {schema}.coordinator_requests_cleanup_idx",
+        "CREATE INDEX coordinator_requests_cleanup_idx"
+        " ON {schema}.coordinator_requests ((COALESCE(completed_at, deadline)), request_id)",
+        "CREATE INDEX coordinator_changes_cleanup_idx ON {schema}.coordinator_changes (created_at, id)",
+    ),
 )
 
 
@@ -369,39 +383,42 @@ class PostgresStore:
         self.schema = schema
         self._ident = sql.Identifier(schema)
         self._key = _advisory_key(schema)
-        self._conn: psycopg.AsyncConnection | None = None
-        self._lock = asyncio.Lock()
+        self._pool = self._new_pool()
+        self._pool_open = False
+        self._setup_lock = asyncio.Lock()
         self._vector: bool | None = None
 
     async def setup(self) -> None:
-        async with self._lock:
-            conn = await self._connection()
-            async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(%s)", (self._key,))
-                await conn.execute(self._sql("CREATE SCHEMA IF NOT EXISTS {schema}"))
-                await conn.execute(
-                    self._sql("CREATE TABLE IF NOT EXISTS {schema}.schema_version (version int NOT NULL)")
-                )
-                cursor = await conn.execute(self._sql("SELECT coalesce(max(version), 0) FROM {schema}.schema_version"))
-                current = (await cursor.fetchone())[0]
-                for version, statements in enumerate(MIGRATIONS, start=1):
-                    if version <= current:
-                        continue
-                    for statement in statements:
-                        await conn.execute(self._sql(statement))
-                    if version == 5:
-                        await self._backfill_journal_index(conn)
-                    elif version == 6:
-                        await self._backfill_operational(conn)
+        async with self._setup_lock:
+            await self._open_pool()
+            async with self._pool.connection() as conn:
+                async with conn.transaction():
+                    await conn.execute("SELECT pg_advisory_xact_lock(%s)", (self._key,))
+                    await conn.execute(self._sql("CREATE SCHEMA IF NOT EXISTS {schema}"))
                     await conn.execute(
-                        self._sql("INSERT INTO {schema}.schema_version (version) VALUES (%s)"), (version,)
+                        self._sql("CREATE TABLE IF NOT EXISTS {schema}.schema_version (version int NOT NULL)")
                     )
-            self._vector = await self._install_vector(conn)
+                    cursor = await conn.execute(
+                        self._sql("SELECT coalesce(max(version), 0) FROM {schema}.schema_version")
+                    )
+                    current = (await cursor.fetchone())[0]
+                    for version, statements in enumerate(MIGRATIONS, start=1):
+                        if version <= current:
+                            continue
+                        for statement in statements:
+                            await conn.execute(self._sql(statement))
+                        if version == 5:
+                            await self._backfill_journal_index(conn)
+                        elif version == 6:
+                            await self._backfill_operational(conn)
+                        await conn.execute(
+                            self._sql("INSERT INTO {schema}.schema_version (version) VALUES (%s)"), (version,)
+                        )
+                self._vector = await self._install_vector(conn)
 
     async def create(self, header: SessionHeader) -> None:
         stored = header.model_copy(deep=True)
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             cursor = await conn.execute(
                 self._sql(
                     "INSERT INTO {schema}.sessions (id, header, metadata, parent_id, created_at, last_seq)"
@@ -420,8 +437,7 @@ class PostgresStore:
                 raise SessionExists(header.id)
 
     async def header(self, sid: str) -> SessionHeader | None:
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             cursor = await conn.execute(
                 self._sql("SELECT header, last_seq FROM {schema}.sessions WHERE id = %s"), (sid,)
             )
@@ -430,8 +446,7 @@ class PostgresStore:
 
     async def put_header(self, h: SessionHeader) -> None:
         stored = h.model_copy(deep=True)
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             async with conn.transaction():
                 await self._guard_session(conn, h.id)
                 cursor = await conn.execute(
@@ -461,12 +476,15 @@ class PostgresStore:
         metadata: dict[str, Any] = UNSET,
         finished: bool = UNSET,
     ) -> SessionHeader:
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             async with conn.transaction():
-                if any(value is not UNSET for value in (status, pending_ask, usage, finished)):
+                root_id = None
+                guarded = any(value is not UNSET for value in (status, pending_ask, usage, finished))
+                if guarded:
                     await self._guard_session(conn, sid)
                 model_root = await self._prepare_model_patch(conn, sid) if model is not UNSET else None
+                if not guarded and model_root is None:
+                    root_id = await self._prepare_header_patch(conn, sid)
                 cursor = await conn.execute(
                     self._sql("SELECT header, last_seq FROM {schema}.sessions WHERE id = %s FOR UPDATE"), (sid,)
                 )
@@ -475,8 +493,10 @@ class PostgresStore:
                     raise SessionNotFound(sid)
                 current = SessionHeader.model_validate(row[0])
                 current.last_seq = row[1]
-                root_id = current.root_id or current.id
-                if model_root is not None and root_id != model_root:
+                current_root = current.root_id or current.id
+                if root_id is not None and root_id != current_root:
+                    raise CoordinatorUnavailable("session root changed while applying header patch")
+                if model_root is not None and current_root != model_root:
                     raise CoordinatorUnavailable("session root changed while applying model patch")
                 stored = apply_patch(
                     current,
@@ -492,12 +512,11 @@ class PostgresStore:
                     self._sql("UPDATE {schema}.sessions SET header = %s, metadata = %s WHERE id = %s"),
                     (_json(stored), Jsonb(stored.metadata), sid),
                 )
-                await self._publish_header_change(conn, root_id, sid)
+                await self._publish_header_change(conn, current_root, sid)
                 return stored
 
     async def append(self, sid: str, events: Sequence[SessionEvent]) -> int:
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             async with conn.transaction():
                 await self._guard_session(conn, sid)
                 cursor = await conn.execute(
@@ -533,8 +552,7 @@ class PostgresStore:
                 return seq
 
     async def enqueue(self, sid: str, event: InputQueued) -> EnqueueResult:
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             async with conn.transaction():
                 await self._guard_session(conn, sid)
                 cursor = await conn.execute(
@@ -570,12 +588,12 @@ class PostgresStore:
                 return EnqueueResult(seq=seq, duplicate=False)
 
     async def lookup_command(self, root_id: str, command_id: str) -> tuple[str, Stamped] | None:
-        async with self._lock:
-            return await self._lookup_command(await self._connection(), root_id, command_id)
+        async with self._connection() as conn:
+            return await self._lookup_command(conn, root_id, command_id)
 
     async def lookup_finished(self, actor_id: str) -> Stamped | None:
-        async with self._lock:
-            return await self._lookup_finished(await self._connection(), actor_id)
+        async with self._connection() as conn:
+            return await self._lookup_finished(conn, actor_id)
 
     async def _lookup_command(self, conn: Any, root_id: str, command_id: str) -> tuple[str, Stamped] | None:
         cursor = await conn.execute(
@@ -790,8 +808,7 @@ class PostgresStore:
         )
 
     async def read_operational(self, actor_id: str) -> OperationalState:
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             async with conn.transaction():
                 await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                 return await self._read_operational(conn, actor_id)
@@ -899,8 +916,8 @@ class PostgresStore:
         return items
 
     async def read_turn(self, actor_id: str, turn_id: str) -> list[Stamped] | None:
-        async with self._lock:
-            return await self._read_turn(await self._connection(), actor_id, turn_id)
+        async with self._connection() as conn:
+            return await self._read_turn(conn, actor_id, turn_id)
 
     async def _read_turn(self, conn: Any, sid: str, turn_id: str) -> list[Stamped] | None:
         cursor = await conn.execute(
@@ -917,8 +934,7 @@ class PostgresStore:
         return await self._read_interval(conn, sid, start if start is not None and start <= end else end, end)
 
     async def read_compacted(self, actor_id: str) -> HistorySnapshot:
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             async with conn.transaction():
                 await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                 return await self._read_compacted(conn, actor_id)
@@ -959,8 +975,7 @@ class PostgresStore:
         return HistorySnapshot(await self._read_interval(conn, sid, begin, last_seq), last_seq)
 
     async def read_page(self, sid: str, *, after: int = 0, limit: int = 1000) -> list[Stamped]:
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             cursor = await conn.execute(
                 self._sql(
                     "SELECT stamped FROM {schema}.events WHERE session_id = %s AND seq > %s ORDER BY seq LIMIT %s"
@@ -971,8 +986,7 @@ class PostgresStore:
         return [_parse(sid, row[0]) for row in rows]
 
     async def read(self, sid: str, *, from_seq: int = 0) -> AsyncIterator[Stamped]:
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             cursor = await conn.execute(
                 self._sql("SELECT stamped FROM {schema}.events WHERE session_id = %s AND seq > %s ORDER BY seq"),
                 (sid, from_seq),
@@ -1010,15 +1024,13 @@ class PostgresStore:
             "SELECT header, last_seq FROM {schema}.sessions WHERE {conditions}"
             ' ORDER BY created_at DESC, id COLLATE "C" DESC LIMIT %(limit)s'
         ).format(schema=self._ident, conditions=sql.SQL(" AND ").join(conditions))
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
         return [_hydrate(row) for row in rows]
 
     async def memory_put(self, row: MemoryRecord) -> None:
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             if await self._has_vector(conn):
                 await conn.execute(
                     self._sql(
@@ -1037,8 +1049,7 @@ class PostgresStore:
             )
 
     async def memory_get(self, mid: str) -> MemoryRecord | None:
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             cursor = await conn.execute(self._sql("SELECT row FROM {schema}.memories WHERE id = %s"), (mid,))
             row = await cursor.fetchone()
         return _parse_row(mid, row[0]) if row is not None else None
@@ -1061,15 +1072,13 @@ class PostgresStore:
         query = sql.SQL("SELECT id, row FROM {schema}.memories WHERE {conditions} ORDER BY id").format(
             schema=self._ident, conditions=sql.SQL(" AND ").join(conditions)
         )
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             cursor = await conn.execute(query, params)
             rows = await cursor.fetchall()
         return [_parse_row(mid, raw) for mid, raw in rows]
 
     async def memory_search(self, vector: list[float], k: int) -> list[tuple[MemoryRecord, float]] | None:
-        async with self._lock:
-            conn = await self._connection()
+        async with self._connection() as conn:
             if not await self._has_vector(conn):
                 return None
             cursor = await conn.execute(
@@ -1086,18 +1095,38 @@ class PostgresStore:
         return [(_parse_row(mid, raw), float(distance)) for mid, raw, distance in rows]
 
     async def close(self) -> None:
-        async with self._lock:
-            if self._conn is not None:
-                await self._conn.close()
-                self._conn = None
+        async with self._setup_lock:
+            if self._pool_open:
+                await self._pool.close()
+            self._pool = self._new_pool()
+            self._pool_open = False
 
     def _sql(self, statement: str) -> Any:
         return sql.SQL(statement).format(schema=self._ident)
 
-    async def _connection(self) -> Any:
-        if self._conn is None or self._conn.closed:
-            self._conn = await psycopg.AsyncConnection.connect(self.dsn, autocommit=True)
-        return self._conn
+    def _new_pool(self) -> Any:
+        return psycopg_pool.AsyncConnectionPool(
+            self.dsn,
+            open=False,
+            min_size=1,
+            max_size=4,
+            kwargs={"autocommit": True},
+            connection_class=psycopg.AsyncConnection,
+        )
+
+    async def _open_pool(self) -> None:
+        if not self._pool_open:
+            await self._pool.open()
+            self._pool_open = True
+
+    @asynccontextmanager
+    async def _connection(self) -> AsyncIterator[Any]:
+        if not self._pool_open:
+            async with self._setup_lock:
+                await self._open_pool()
+        pool = self._pool
+        async with pool.connection() as conn:
+            yield conn
 
     async def _install_vector(self, conn: Any) -> bool:
         try:
@@ -1126,6 +1155,20 @@ class PostgresStore:
         row = await cursor.fetchone()
         root_id = row[0] if row is not None else sid
         await conn.execute(self._sql("SELECT {schema}.assert_coordinated_fence(%s)"), (root_id,))
+
+    async def _prepare_header_patch(self, conn: Any, sid: str) -> str:
+        cursor = await conn.execute(
+            self._sql("SELECT COALESCE(NULLIF(header->>'root_id', ''), id) FROM {schema}.sessions WHERE id = %s"),
+            (sid,),
+        )
+        row = await cursor.fetchone()
+        root_id = row[0] if row is not None else sid
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (root_id,))
+        await conn.execute(
+            self._sql("SELECT 1 FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE"),
+            (root_id,),
+        )
+        return root_id
 
     async def _prepare_model_patch(self, conn: Any, sid: str) -> str:
         cursor = await conn.execute(

@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from types import TracebackType
 from typing import Annotated, Any, Literal, Protocol
@@ -140,6 +141,29 @@ class ChangeNotice(FrozenModel):
     seq: int | None = None
 
 
+@dataclass(frozen=True)
+class RootObservation:
+    root_id: str
+    sample: int
+    change_id: int
+    writer_connection: str | None
+    owner_instance: str | None
+    owner_generation: int
+    owner_valid: bool
+    recovery: dict[str, Any]
+    actors: dict[str, tuple[int, bool]]
+    expires_at: datetime | None = None
+    error: CoordinatorUnavailable | None = None
+
+
+@dataclass
+class _Observation:
+    users: int = 0
+    generation: int = 0
+    snapshot: RootObservation | None = None
+    condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+
+
 class CoordinatedStoreProtocol(Protocol):
     ownership: Ownership
 
@@ -228,7 +252,21 @@ class PostgresCoordinator:
         self._control_lock = asyncio.Lock()
         self._listener_conn: Any = None
         self._listener_task: asyncio.Task[None] | None = None
-        self._condition = asyncio.Condition()
+        self._observations: dict[str, _Observation] = {}
+        self._dirty_roots: set[str] = set()
+        self._observation_event = asyncio.Event()
+        self._observation_task: asyncio.Task[None] | None = None
+        self._observation_sample = 0
+        self._pending_requests: dict[UUID, tuple[str, int]] = {}
+        self._observed_replies: dict[UUID, CommandReply | None] = {}
+        self._dispatch_event = asyncio.Event()
+        self._dispatch_task: asyncio.Task[None] | None = None
+        self._dispatchers: dict[str, asyncio.Task[None]] = {}
+        self._cleanup_first = 0
+        self.observation_checks = 0
+        self.observation_ticks = 0
+        self.routed_wakeups = 0
+        self.dispatch_peak = 0
         self._handler: RequestHandler | None = None
         self._started = False
         self._closed = False
@@ -242,17 +280,21 @@ class PostgresCoordinator:
         self._handler = handler
         self._started = True
         self._listener_task = asyncio.create_task(self._listen())
+        self._observation_task = asyncio.create_task(self._observe())
+        self._dispatch_task = asyncio.create_task(self._dispatch())
 
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         self._started = False
-        task = self._listener_task
-        self._listener_task = None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        tasks = [self._listener_task, self._observation_task, self._dispatch_task, *self._dispatchers.values()]
+        self._listener_task = self._observation_task = self._dispatch_task = None
+        for task in tasks:
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(*(task for task in tasks if task is not None), return_exceptions=True)
+        self._dispatchers.clear()
         if self._listener_conn is not None:
             await self._listener_conn.close()
             self._listener_conn = None
@@ -260,12 +302,14 @@ class PostgresCoordinator:
             if self._control_conn is not None:
                 await self._control_conn.close()
                 self._control_conn = None
-        await self._wake()
+        for state in self._observations.values():
+            async with state.condition:
+                state.generation += 1
+                state.condition.notify_all()
 
     async def locate(self, root_id: str) -> Ownership | None:
         try:
-            async with self._control_lock:
-                conn = await self._control_connection()
+            async with self._data_connection() as conn:
                 cursor = await conn.execute(
                     self._sql(
                         "SELECT root_id, owner_instance, generation, expires_at"
@@ -337,6 +381,7 @@ class PostgresCoordinator:
                 conn = await self._control_connection()
                 async with conn.transaction():
                     await self._configure_transaction(conn)
+                    await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (ownership.root_id,))
                     cursor = await conn.execute(
                         self._sql(
                             "SELECT owner_instance, generation, expires_at"
@@ -379,6 +424,7 @@ class PostgresCoordinator:
                 conn = await self._control_connection()
                 async with conn.transaction():
                     await self._configure_transaction(conn)
+                    await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (ownership.root_id,))
                     cursor = await conn.execute(
                         self._sql(
                             "SELECT owner_instance, generation, expires_at"
@@ -429,6 +475,7 @@ class PostgresCoordinator:
                 conn = await self._control_connection()
                 async with conn.transaction():
                     await self._configure_transaction(conn)
+                    await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (ownership.root_id,))
                     cursor = await conn.execute(
                         self._sql(
                             "SELECT owner_instance, generation, expires_at"
@@ -492,64 +539,110 @@ class PostgresCoordinator:
 
     async def request(self, envelope: CommandEnvelope) -> CommandReply:
         self._ensure_started()
+        existing = self._pending_requests.get(envelope.request_id)
+        if existing is not None and existing[0] != envelope.root_id:
+            raise InvalidCommandReuse(str(envelope.request_id))
+        self._pending_requests[envelope.request_id] = (envelope.root_id, (existing[1] if existing else 0) + 1)
         submitted = False
         destination: tuple[UUID, int] | None = None
         budget = min(
             self.request_timeout,
             max((envelope.deadline.astimezone(UTC) - datetime.now(UTC)).total_seconds(), 0),
         )
+        iterator = self.observe(envelope.root_id)
         try:
             async with asyncio.timeout(budget):
-                while True:
-                    if submitted:
-                        reply = await self._request_reply(envelope.request_id)
-                        if reply is not None:
-                            return reply
-                    ownership = await self.locate(envelope.root_id)
-                    if ownership is None:
+                async for observed in iterator:
+                    if observed.error is not None:
+                        raise observed.error
+                    reply = self._observed_replies.get(envelope.request_id)
+                    if submitted and reply is not None:
+                        return reply
+                    if not observed.owner_valid or observed.owner_instance is None or observed.expires_at is None:
                         if not submitted:
                             raise CoordinatorUnavailable(f"root {envelope.root_id} has no owner")
-                        await asyncio.sleep(self.catch_up_interval)
                         continue
+                    ownership = Ownership(
+                        root_id=envelope.root_id,
+                        instance_id=UUID(observed.owner_instance),
+                        generation=observed.owner_generation,
+                        expires_at=observed.expires_at,
+                    )
                     current = (ownership.instance_id, ownership.generation)
                     if destination != current:
                         try:
                             await self._put_request(envelope, ownership)
                         except LeaseLost:
+                            self._schedule(envelope.root_id)
                             continue
                         submitted = True
                         destination = current
-                    reply = await self._request_reply(envelope.request_id)
-                    if reply is not None:
-                        return reply
-                    async with self._condition:
-                        try:
-                            await asyncio.wait_for(self._condition.wait(), self.catch_up_interval)
-                        except TimeoutError:
-                            pass
+                        reply = await self._request_reply(envelope.request_id)
+                        if reply is not None:
+                            return reply
+                        self._schedule(envelope.root_id, dispatch=True)
+                raise CoordinatorUnavailable("coordinator closed before request completed")
         except TimeoutError as exc:
             raise CommandTimeout(str(envelope.request_id)) from exc
+        finally:
+            await iterator.aclose()
+            root, users = self._pending_requests[envelope.request_id]
+            if users == 1:
+                self._pending_requests.pop(envelope.request_id, None)
+                self._observed_replies.pop(envelope.request_id, None)
+            else:
+                self._pending_requests[envelope.request_id] = (root, users - 1)
+
+    def observation(self, root_id: str) -> RootObservation | None:
+        state = self._observations.get(root_id)
+        return state.snapshot if state is not None else None
+
+    async def observe(self, root_id: str) -> AsyncIterator[RootObservation]:
+        self._ensure_started()
+        state = self._observations.setdefault(root_id, _Observation())
+        state.users += 1
+        self._schedule(root_id)
+        generation = -1
+        try:
+            while not self._closed:
+                async with state.condition:
+                    await state.condition.wait_for(
+                        lambda generation=generation: state.generation != generation or self._closed
+                    )
+                    generation = state.generation
+                    snapshot = state.snapshot
+                if snapshot is not None:
+                    yield snapshot
+        finally:
+            state.users -= 1
+            if state.users == 0 and self._observations.get(root_id) is state:
+                self._observations.pop(root_id, None)
+                self._dirty_roots.discard(root_id)
 
     async def watch(self, root_id: str, *, after: int = 0) -> AsyncIterator[ChangeNotice]:
-        self._ensure_started()
         cursor = max(after, 0)
-        while not self._closed:
-            page = await self._changes(root_id, cursor)
-            if page:
-                for notice in page:
-                    cursor = notice.change_id
-                    yield notice
-                continue
-            async with self._condition:
-                try:
-                    await asyncio.wait_for(self._condition.wait(), self.catch_up_interval)
-                except TimeoutError:
-                    pass
+        iterator = self.observe(root_id)
+        first = True
+        try:
+            async for snapshot in iterator:
+                if snapshot.error is not None:
+                    raise snapshot.error
+                if not first and snapshot.change_id <= cursor:
+                    continue
+                first = False
+                while True:
+                    page = await self._changes(root_id, cursor)
+                    for notice in page:
+                        cursor = notice.change_id
+                        yield notice
+                    if len(page) < 1000:
+                        break
+        finally:
+            await iterator.aclose()
 
     async def active(self, root_id: str, actor_id: str | None = None) -> bool:
         try:
-            async with self._control_lock:
-                conn = await self._control_connection()
+            async with self._data_connection() as conn:
                 condition = "a.root_id = %s AND a.active"
                 params: tuple[Any, ...] = (root_id,)
                 if actor_id is not None:
@@ -572,8 +665,7 @@ class PostgresCoordinator:
 
     async def recovery(self, root_id: str) -> dict[str, Any]:
         try:
-            async with self._control_lock:
-                conn = await self._control_connection()
+            async with self._data_connection() as conn:
                 cursor = await conn.execute(
                     self._sql("SELECT recovery FROM {schema}.coordinator_roots WHERE root_id = %s"),
                     (root_id,),
@@ -585,8 +677,7 @@ class PostgresCoordinator:
 
     async def writer_matches(self, token: WriterToken) -> bool:
         try:
-            async with self._control_lock:
-                conn = await self._control_connection()
+            async with self._data_connection() as conn:
                 cursor = await conn.execute(
                     self._sql("SELECT writer_connection = %s FROM {schema}.coordinator_roots WHERE root_id = %s"),
                     (str(token.connection_id), token.root_id),
@@ -600,37 +691,29 @@ class PostgresCoordinator:
         remaining = max(limit, 0)
         if remaining == 0:
             return 0
+        statements = (
+            "WITH doomed AS (SELECT request_id FROM {schema}.coordinator_requests"
+            " WHERE coalesce(completed_at, deadline) < clock_timestamp() - interval '24 hours'"
+            " ORDER BY coalesce(completed_at, deadline), request_id LIMIT %s FOR UPDATE SKIP LOCKED)"
+            " DELETE FROM {schema}.coordinator_requests r USING doomed d WHERE r.request_id = d.request_id",
+            "WITH doomed AS (SELECT id FROM {schema}.coordinator_changes"
+            " WHERE created_at < clock_timestamp() - interval '24 hours'"
+            " ORDER BY created_at, id LIMIT %s FOR UPDATE SKIP LOCKED)"
+            " DELETE FROM {schema}.coordinator_changes c USING doomed d WHERE c.id = d.id",
+        )
+        first = self._cleanup_first
+        self._cleanup_first = 1 - first
         try:
-            async with self._control_lock:
-                conn = await self._control_connection()
-                async with conn.transaction():
-                    await self._configure_transaction(conn)
-                    requests = await conn.execute(
-                        self._sql(
-                            "WITH doomed AS ("
-                            " SELECT request_id FROM {schema}.coordinator_requests"
-                            " WHERE coalesce(completed_at, deadline) < clock_timestamp() - interval '24 hours'"
-                            " ORDER BY coalesce(completed_at, deadline) LIMIT %s FOR UPDATE SKIP LOCKED"
-                            ") DELETE FROM {schema}.coordinator_requests r USING doomed d"
-                            " WHERE r.request_id = d.request_id"
-                        ),
-                        (remaining,),
-                    )
-                    removed = requests.rowcount
-                    remaining -= removed
-                    if remaining:
-                        changes = await conn.execute(
-                            self._sql(
-                                "WITH doomed AS ("
-                                " SELECT id FROM {schema}.coordinator_changes"
-                                " WHERE created_at < clock_timestamp() - interval '24 hours'"
-                                " ORDER BY id LIMIT %s FOR UPDATE SKIP LOCKED"
-                                ") DELETE FROM {schema}.coordinator_changes c USING doomed d WHERE c.id = d.id"
-                            ),
-                            (remaining,),
-                        )
-                        removed += changes.rowcount
-                    return removed
+            async with self._data_connection() as conn, conn.transaction():
+                await self._configure_transaction(conn)
+                removed = 0
+                for index in (first, 1 - first):
+                    if remaining == 0:
+                        break
+                    result = await conn.execute(self._sql(statements[index]), (remaining,))
+                    removed += result.rowcount
+                    remaining -= result.rowcount
+                return removed
         except psycopg.Error as exc:
             raise CoordinatorUnavailable("coordinator cleanup failed") from exc
 
@@ -641,10 +724,10 @@ class PostgresCoordinator:
     async def _put_request(self, envelope: CommandEnvelope, ownership: Ownership) -> None:
         raw = envelope.model_dump(mode="json")
         try:
-            async with self._control_lock:
-                conn = await self._control_connection()
+            async with self._data_connection() as conn:
                 async with conn.transaction():
                     await self._configure_transaction(conn)
+                    await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (envelope.root_id,))
                     root = await conn.execute(
                         self._sql(
                             "SELECT owner_instance, generation, expires_at"
@@ -703,8 +786,7 @@ class PostgresCoordinator:
 
     async def _request_reply(self, request_id: UUID) -> CommandReply | None:
         try:
-            async with self._control_lock:
-                conn = await self._control_connection()
+            async with self._data_connection() as conn:
                 cursor = await conn.execute(
                     self._sql("SELECT reply FROM {schema}.coordinator_requests WHERE request_id = %s"),
                     (request_id,),
@@ -718,8 +800,7 @@ class PostgresCoordinator:
 
     async def _changes(self, root_id: str, after: int) -> list[ChangeNotice]:
         try:
-            async with self._control_lock:
-                conn = await self._control_connection()
+            async with self._data_connection() as conn:
                 cursor = await conn.execute(
                     self._sql(
                         "SELECT id, root_id, kind, actor_id, seq FROM {schema}.coordinator_changes"
@@ -734,19 +815,33 @@ class PostgresCoordinator:
             ChangeNotice(change_id=row[0], root_id=row[1], kind=row[2], actor_id=row[3], seq=row[4]) for row in rows
         ]
 
+    def _schedule(self, root_id: str, *, dispatch: bool = False) -> None:
+        if root_id in self._observations:
+            self._dirty_roots.add(root_id)
+            self._observation_event.set()
+        if dispatch:
+            self._dispatch_event.set()
+
     async def _listen(self) -> None:
         while not self._closed:
             try:
                 self._listener_conn = await psycopg.AsyncConnection.connect(self.store.dsn, autocommit=True)
                 await self._listener_conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(self._channel)))
+                for root_id in self._observations:
+                    self._schedule(root_id)
+                self._dispatch_event.set()
                 while not self._closed:
-                    await self._process_requests()
-                    await self._wake()
-                    async for _ in self._listener_conn.notifies(
-                        timeout=self.catch_up_interval,
-                        stop_after=1,
-                    ):
-                        break
+                    async for notice in self._listener_conn.notifies(timeout=self.catch_up_interval, stop_after=100):
+                        try:
+                            payload = json.loads(notice.payload)
+                            root_id = payload["root_id"]
+                            if not isinstance(root_id, str):
+                                continue
+                        except (ValueError, KeyError, TypeError):
+                            continue
+                        if root_id in self._observations:
+                            self.routed_wakeups += 1
+                        self._schedule(root_id, dispatch=payload.get("kind") in ("request", "ownership"))
             except asyncio.CancelledError:
                 raise
             except psycopg.Error:
@@ -755,27 +850,137 @@ class PostgresCoordinator:
                     self._listener_conn = None
                 await asyncio.sleep(min(self.catch_up_interval, 1.0))
 
+    async def _observe(self) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.catch_up_interval
+        while not self._closed:
+            try:
+                await asyncio.wait_for(self._observation_event.wait(), max(deadline - loop.time(), 0))
+            except TimeoutError:
+                pass
+            self._observation_event.clear()
+            periodic = loop.time() >= deadline
+            roots = set(self._observations) if periodic else self._dirty_roots.copy()
+            self._dirty_roots.difference_update(roots)
+            if periodic:
+                deadline = loop.time() + self.catch_up_interval
+            if roots:
+                await self._catch_up(roots, periodic=periodic)
+
+    async def _catch_up(self, roots: set[str], *, periodic: bool) -> None:
+        request_ids = [str(key) for key, (root, _) in self._pending_requests.items() if root in roots]
+        try:
+            async with self._data_connection() as conn:
+                self.observation_checks += 1
+                cursor = await conn.execute(
+                    self._sql(
+                        "WITH interested AS (SELECT unnest(%s::text[]) AS root_id)"
+                        " SELECT 'root', i.root_id, NULL::text, jsonb_build_object("
+                        " 'change_id', coalesce(c.id, 0), 'writer', r.writer_connection,"
+                        " 'owner', r.owner_instance, 'generation', coalesce(r.generation, 0),"
+                        " 'valid', coalesce(r.owner_instance IS NOT NULL AND r.expires_at > clock_timestamp(), false),"
+                        " 'expires', r.expires_at, 'recovery', coalesce(r.recovery, '{{}}'::jsonb))"
+                        " FROM interested i LEFT JOIN {schema}.coordinator_roots r ON r.root_id = i.root_id"
+                        " LEFT JOIN LATERAL (SELECT id FROM {schema}.coordinator_changes"
+                        " WHERE root_id = i.root_id ORDER BY id DESC LIMIT 1) c ON true"
+                        " UNION ALL SELECT 'actor', i.root_id, s.id, jsonb_build_array(s.last_seq,"
+                        " coalesce(a.active AND r.owner_instance IS NOT NULL"
+                        " AND r.expires_at > clock_timestamp(), false))"
+                        " FROM interested i JOIN {schema}.sessions s"
+                        " ON COALESCE(NULLIF(s.header->>'root_id', ''), s.id) = i.root_id"
+                        " LEFT JOIN {schema}.coordinator_activity a ON a.root_id = i.root_id AND a.actor_id = s.id"
+                        " LEFT JOIN {schema}.coordinator_roots r ON r.root_id = i.root_id"
+                        " UNION ALL SELECT 'reply', request_id::text, NULL::text, reply"
+                        " FROM {schema}.coordinator_requests WHERE request_id = ANY(%s::uuid[])"
+                    ),
+                    (sorted(roots), request_ids),
+                )
+                rows = await cursor.fetchall()
+            if periodic:
+                self._observation_sample += 1
+                self.observation_ticks += 1
+            headers: dict[str, dict[str, Any]] = {}
+            actors: dict[str, dict[str, tuple[int, bool]]] = {root: {} for root in roots}
+            for kind, key, actor, data in rows:
+                if kind == "root":
+                    headers[key] = data
+                elif kind == "actor":
+                    actors[key][actor] = (int(data[0]), bool(data[1]))
+                elif UUID(key) in self._pending_requests:
+                    self._observed_replies[UUID(key)] = CommandReply.model_validate(data) if data else None
+            for root_id, data in headers.items():
+                state = self._observations.get(root_id)
+                if state is None:
+                    continue
+                snapshot = RootObservation(
+                    root_id=root_id,
+                    sample=self._observation_sample,
+                    change_id=int(data["change_id"]),
+                    writer_connection=data["writer"],
+                    owner_instance=data["owner"],
+                    owner_generation=int(data["generation"]),
+                    owner_valid=bool(data["valid"]),
+                    recovery=dict(data["recovery"]),
+                    actors=actors[root_id],
+                    expires_at=datetime.fromisoformat(data["expires"]) if data["expires"] else None,
+                )
+                async with state.condition:
+                    state.snapshot = snapshot
+                    state.generation += 1
+                    state.condition.notify_all()
+        except psycopg.Error as exc:
+            error = CoordinatorUnavailable("cannot catch up coordinator observations")
+            error.__cause__ = exc
+            for root_id in roots:
+                state = self._observations.get(root_id)
+                if state is None:
+                    continue
+                snapshot = state.snapshot or RootObservation(
+                    root_id, self._observation_sample, 0, None, None, 0, False, {}, {}
+                )
+                async with state.condition:
+                    state.snapshot = replace(snapshot, error=error)
+                    state.generation += 1
+                    state.condition.notify_all()
+
+    async def _dispatch(self) -> None:
+        while not self._closed:
+            try:
+                await asyncio.wait_for(self._dispatch_event.wait(), self.catch_up_interval)
+            except TimeoutError:
+                pass
+            self._dispatch_event.clear()
+            await self._process_requests()
+
     async def _process_requests(self) -> None:
         if self._handler is None:
             return
-        for _ in range(100):
+        while not self._closed and len(self._dispatchers) < 4:
             candidate = await self._next_request()
             if candidate is None:
                 return
             envelope, ownership = candidate
-            try:
-                await self._handler(
-                    envelope,
-                    lambda operation, envelope=envelope, ownership=ownership: self._apply_request(
-                        envelope, ownership, operation
-                    ),
-                )
-                if await self._request_reply(envelope.request_id) is None:
-                    await self._infrastructure_reply(envelope, ownership)
-            except LeaseLost:
-                continue
-            except Exception:
+            task = asyncio.create_task(self._dispatch_request(envelope, ownership))
+            self._dispatchers[envelope.root_id] = task
+            self.dispatch_peak = max(self.dispatch_peak, len(self._dispatchers))
+
+    async def _dispatch_request(self, envelope: CommandEnvelope, ownership: Ownership) -> None:
+        try:
+            assert self._handler is not None
+            await self._handler(
+                envelope,
+                lambda operation: self._apply_request(envelope, ownership, operation),
+            )
+            if await self._request_reply(envelope.request_id) is None:
                 await self._infrastructure_reply(envelope, ownership)
+        except LeaseLost:
+            pass
+        except Exception:
+            await self._infrastructure_reply(envelope, ownership)
+        finally:
+            if self._dispatchers.get(envelope.root_id) is asyncio.current_task():
+                self._dispatchers.pop(envelope.root_id, None)
+            self._dispatch_event.set()
 
     async def _apply_request(
         self,
@@ -795,19 +1000,19 @@ class PostgresCoordinator:
 
     async def _next_request(self) -> tuple[CommandEnvelope, Ownership] | None:
         try:
-            async with self._control_lock:
-                conn = await self._control_connection()
+            async with self._data_connection() as conn:
                 cursor = await conn.execute(
                     self._sql(
                         "SELECT q.envelope, r.root_id, r.owner_instance, r.generation, r.expires_at"
                         " FROM {schema}.coordinator_requests q"
                         " JOIN {schema}.coordinator_roots r ON r.root_id = q.root_id"
                         " WHERE q.reply IS NULL AND q.deadline > clock_timestamp()"
+                        " AND NOT (q.root_id = ANY(%s::text[]))"
                         " AND q.destination_instance = %s AND q.destination_generation = r.generation"
                         " AND r.owner_instance = %s AND r.expires_at > clock_timestamp()"
                         " ORDER BY q.created_at, q.request_id LIMIT 1"
                     ),
-                    (str(self.instance_id), str(self.instance_id)),
+                    (list(self._dispatchers), str(self.instance_id), str(self.instance_id)),
                 )
                 row = await cursor.fetchone()
         except psycopg.Error:
@@ -857,9 +1062,11 @@ class PostgresCoordinator:
         await conn.execute("SELECT pg_notify(%s, %s)", (self._channel, payload))
         return change_id
 
-    async def _wake(self) -> None:
-        async with self._condition:
-            self._condition.notify_all()
+    @asynccontextmanager
+    async def _data_connection(self) -> AsyncIterator[Any]:
+        self._ensure_started()
+        async with self.store._connection() as conn:
+            yield conn
 
     async def _control_connection(self) -> Any:
         self._ensure_started()
@@ -886,18 +1093,20 @@ class _TransactionContext:
         self.coordinator = coordinator
         self.ownership = ownership
         self._transaction: Any = None
-        self._locked = False
+        self._transaction_entered = False
+        self._checkout: Any = None
         self._store: CoordinatedStore | None = None
 
     async def __aenter__(self) -> CoordinatedStore:
         self.coordinator._ensure_started()
-        await self.coordinator.store._lock.acquire()
-        self._locked = True
+        self._checkout = self.coordinator.store._connection()
+        conn = await self._checkout.__aenter__()
         try:
-            conn = await self.coordinator.store._connection()
             self._transaction = conn.transaction()
             await self._transaction.__aenter__()
+            self._transaction_entered = True
             await self.coordinator._configure_transaction(conn)
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (self.ownership.root_id,))
             cursor = await conn.execute(
                 self.coordinator._sql(
                     "SELECT owner_instance, generation, expires_at"
@@ -918,10 +1127,11 @@ class _TransactionContext:
             self._store = CoordinatedStore(self.coordinator, self.ownership, conn)
             return self._store
         except BaseException as exc:
-            if self._transaction is not None:
-                await self._transaction.__aexit__(type(exc), exc, exc.__traceback__)
-            self.coordinator.store._lock.release()
-            self._locked = False
+            try:
+                if self._transaction_entered:
+                    await self._transaction.__aexit__(type(exc), exc, exc.__traceback__)
+            finally:
+                await self._checkout.__aexit__(type(exc), exc, exc.__traceback__)
             raise
 
     async def __aexit__(
@@ -935,9 +1145,7 @@ class _TransactionContext:
         try:
             await self._transaction.__aexit__(exc_type, exc, traceback)
         finally:
-            if self._locked:
-                self.coordinator.store._lock.release()
-                self._locked = False
+            await self._checkout.__aexit__(exc_type, exc, traceback)
 
 
 class CoordinatedStore:
@@ -946,6 +1154,7 @@ class CoordinatedStore:
         self.ownership = ownership
         self.conn = conn
         self._active = True
+        self.writer_change_id: int | None = None
 
     async def create(self, header: SessionHeader) -> None:
         self._ensure_active()
@@ -1175,7 +1384,7 @@ class CoordinatedStore:
             (str(connection_id), self.ownership.root_id),
         )
         token = WriterToken(root_id=self.ownership.root_id, connection_id=connection_id)
-        await self.change("writer")
+        self.writer_change_id = await self.change("writer")
         return token
 
     async def release_writer(self, token: WriterToken) -> bool:

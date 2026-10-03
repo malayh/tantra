@@ -385,17 +385,21 @@ async def test_writer_revalidation_recovers_from_transient_failure(
     try:
         async with owner.connect(root_id, writable=True) as stale:
             assert owner.coordinator is not None
-            original = owner.coordinator.writer_matches
+            original = owner._apply_observation
             failed = asyncio.Event()
 
-            async def flaky(token: Any) -> bool:
-                matches = await original(token)
-                if not matches and not failed.is_set():
+            async def flaky(observed_root: str, observation: Any) -> None:
+                token = stale._writer_token
+                if (
+                    token is not None
+                    and observation.writer_connection != str(token.connection_id)
+                    and not failed.is_set()
+                ):
                     failed.set()
                     raise CoordinatorUnavailable("transient writer validation failure")
-                return matches
+                await original(observed_root, observation)
 
-            monkeypatch.setattr(owner.coordinator, "writer_matches", flaky)
+            monkeypatch.setattr(owner, "_apply_observation", flaky)
             second_store, second = await _runtime(postgres_dsn, pg_schema)
             async with second.connect(root_id, writable=True):
                 await asyncio.wait_for(failed.wait(), 1)
@@ -1191,7 +1195,12 @@ async def test_remote_prompt_bounds_owner_local_execution_failure(postgres_dsn: 
         events = [item.event async for item in owner_store.read(root_id.hex)]
         assert sum(isinstance(event, InputQueued) and event.command_id == command_id.hex for event in events) == 1
         assert not any(isinstance(event, TurnStarted) and event.turn_id == command_id.hex for event in events)
-        assert await owner.coordinator.locate(root_id.hex) is None
+        ownership = await owner.coordinator.locate(root_id.hex)
+        deadline = time.monotonic() + 1
+        while ownership is not None and time.monotonic() < deadline:
+            await asyncio.sleep(0.005)
+            ownership = await owner.coordinator.locate(root_id.hex)
+        assert ownership is None
 
         recovery_store, recovery = await _runtime(postgres_dsn, pg_schema)
         async with recovery.connect(root_id, writable=True):
@@ -1678,8 +1687,7 @@ async def test_multiple_failed_markers_preserve_started_work_then_release_queued
         assert root_header is not None and root_header.status == "interrupted"
         assert child_header is not None and child_header.status == "queued"
         assert not await runtime.coordinator.active(root.id)
-        async with store._lock:
-            conn = await store._connection()
+        async with store._connection() as conn:
             cursor = await conn.execute(
                 store._sql(
                     "SELECT owner_instance, generation, expires_at > clock_timestamp(),"
@@ -1702,7 +1710,7 @@ async def test_multiple_failed_markers_preserve_started_work_then_release_queued
         await store.close()
 
 
-@pytest.mark.parametrize("stage", ["active", "locate", "recovery"])
+@pytest.mark.parametrize("stage", ["snapshot", "iterator"])
 @pytest.mark.parametrize("shutdown", [True, False])
 async def test_result_wait_racing_coordinator_close_preserves_terminal_or_outage(
     postgres_dsn, pg_schema, monkeypatch, stage, shutdown
@@ -1721,25 +1729,34 @@ async def test_result_wait_racing_coordinator_close_preserves_terminal_or_outage
     await runtime.start()
     sid = await runtime.create(Bot)
     waiter = None
-    method = getattr(coordinator, stage)
-    active = coordinator.active
+    original_apply = runtime._apply_observation
+    original_observe = coordinator.observe
 
-    async def delayed(*args):
-        if asyncio.current_task() is waiter:
+    async def delayed_apply(root_id: str, observation: Any) -> None:
+        if waiter is not None:
             entered.set()
             await release.wait()
             if not shutdown:
                 raise CoordinatorUnavailable("injected outage")
-        return await method(*args)
+        await original_apply(root_id, observation)
 
-    async def inactive_for_waiter(*args):
-        if asyncio.current_task() is waiter:
-            return False
-        return await active(*args)
+    async def delayed_observe(root_id: str) -> AsyncIterator[Any]:
+        iterator = original_observe(root_id)
+        try:
+            async for observation in iterator:
+                if waiter is not None and asyncio.current_task() is runtime._watchers.get(root_id):
+                    entered.set()
+                    await release.wait()
+                    if not shutdown:
+                        raise CoordinatorUnavailable("injected outage")
+                yield observation
+        finally:
+            await iterator.aclose()
 
-    if stage == "recovery":
-        monkeypatch.setattr(coordinator, "active", inactive_for_waiter)
-    monkeypatch.setattr(coordinator, stage, delayed)
+    if stage == "snapshot":
+        monkeypatch.setattr(runtime, "_apply_observation", delayed_apply)
+    else:
+        monkeypatch.setattr(coordinator, "observe", delayed_observe)
     try:
         async with runtime.connect(sid, writable=True) as connection:
             command = uuid4()

@@ -423,14 +423,14 @@ async def test_memory_through_tools_and_repair(store: Store) -> None:
         "body": "ORBIT-7741 keys the seventh orbit ledger",
         "entities": ["orbit"],
     }
-    policy = by_model(
-        {
-            MODEL_LEAD: batch_policy(
-                ("memory_write", written),
-                ("memory_recall", {"query": "orbit ledger key", "k": 3}),
-            )
-        }
-    )
+    wanted = (("memory_write", written), ("memory_recall", {"query": "orbit ledger key", "k": 3}))
+
+    def policy(req: SampleRequest, state: PolicyState) -> Sample:
+        step = turn_step(req)
+        if step < len(wanted):
+            return calls(state, [wanted[step]])
+        return Sample(text="filed")
+
     runtime, provider = build(store, policy, memory=memory)
     sid = (await runtime.create(Lead)).hex
 

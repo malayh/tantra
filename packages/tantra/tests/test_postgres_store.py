@@ -8,6 +8,7 @@ import pytest
 from tantra.errors import CorruptLog
 from tantra.events import SessionHeader, Stamped, TextPart
 from tantra.memory import BuiltinMemory, MemoryRecord, MemoryWrite
+from tantra.stores import postgres
 from tantra.stores.base import select_headers
 from tantra.stores.postgres import PostgresStore
 
@@ -116,7 +117,7 @@ async def test_setup_is_versioned_and_running_it_twice_leaves_the_version_unchan
 ) -> None:
     store = await _store(postgres_dsn, pg_schema)
     versions = _query(postgres_dsn, pg_schema, "SELECT version FROM {schema}.schema_version ORDER BY version")
-    assert versions == [(1,), (2,), (3,), (4,), (5,), (6,)]
+    assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]
 
     await store.setup()
     await PostgresStore(postgres_dsn, schema=pg_schema).setup()
@@ -128,7 +129,121 @@ async def test_setup_is_versioned_and_running_it_twice_leaves_the_version_unchan
         (4,),
         (5,),
         (6,),
+        (7,),
     ]
+
+
+async def test_pool_is_lazy_bounded_autocommit_and_uses_the_configured_connection_class(
+    postgres_dsn: str, pg_schema: str, monkeypatch
+) -> None:
+    base = postgres.psycopg.AsyncConnection
+
+    class MeasuredConnection(base):
+        pass
+
+    monkeypatch.setattr(postgres.psycopg, "AsyncConnection", MeasuredConnection)
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    assert store._pool.closed
+    assert store._pool.min_size == 1
+    assert store._pool.max_size == 4
+    assert store._pool.connection_class is MeasuredConnection
+
+    await store.setup()
+
+    assert not store._pool.closed
+    async with store._connection() as conn:
+        assert isinstance(conn, MeasuredConnection)
+        assert conn.autocommit
+    await store.close()
+    assert store._pool.closed
+    await store.setup()
+    assert not store._pool.closed
+    await store.close()
+
+
+async def test_a_blocked_root_does_not_block_an_unrelated_root(postgres_dsn: str, pg_schema: str, monkeypatch) -> None:
+    store = await _store(postgres_dsn, pg_schema)
+    blocked = SessionHeader(id=uuid.uuid4().hex, agent="build")
+    other = SessionHeader(id=uuid.uuid4().hex, agent="build")
+    await store.create(blocked)
+    await store.create(other)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    guard = store._guard_session
+
+    async def gated(conn, sid):
+        if sid == blocked.id:
+            entered.set()
+            await release.wait()
+        return await guard(conn, sid)
+
+    monkeypatch.setattr(store, "_guard_session", gated)
+    waiting = asyncio.create_task(store.append(blocked.id, [TextPart(sample_id="blocked", text="one")]))
+    await asyncio.wait_for(entered.wait(), 2)
+    try:
+        assert await asyncio.wait_for(store.append(other.id, [TextPart(sample_id="other", text="two")]), 2) == 1
+    finally:
+        release.set()
+        await waiting
+        await store.close()
+
+
+async def test_cancellation_and_broken_connections_release_pool_capacity(postgres_dsn: str, pg_schema: str) -> None:
+    store = await _store(postgres_dsn, pg_schema)
+    entered = [asyncio.Event() for _ in range(4)]
+
+    async def hold(signal):
+        async with store._connection():
+            signal.set()
+            await asyncio.Future()
+
+    holders = [asyncio.create_task(hold(signal)) for signal in entered]
+    await asyncio.wait_for(asyncio.gather(*(signal.wait() for signal in entered)), 2)
+
+    async def checkout():
+        async with store._connection() as conn:
+            return conn.info.backend_pid
+
+    waiter = asyncio.create_task(checkout())
+    await asyncio.sleep(0)
+    assert not waiter.done()
+    holders[0].cancel()
+    await asyncio.gather(holders[0], return_exceptions=True)
+    assert await asyncio.wait_for(waiter, 2)
+
+    for holder in holders[1:]:
+        holder.cancel()
+    await asyncio.gather(*holders[1:], return_exceptions=True)
+    async with store._connection() as conn:
+        broken_pid = conn.info.backend_pid
+        await conn.close()
+    async with store._connection() as conn:
+        assert not conn.closed
+        assert conn.info.backend_pid != broken_pid
+    await store.close()
+
+
+async def test_migration_seven_installs_only_the_query_shape_indexes(postgres_dsn: str, pg_schema: str) -> None:
+    store = await _store(postgres_dsn, pg_schema)
+    definitions = dict(
+        _query(
+            postgres_dsn,
+            pg_schema,
+            "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = %s",
+            (pg_schema,),
+        )
+    )
+
+    assert "COALESCE(NULLIF((header ->> 'root_id'::text), ''::text), id)" in definitions["sessions_root_idx"]
+    assert '(created_at DESC, id COLLATE "C" DESC)' in definitions["sessions_order_idx"]
+    assert '(parent_id, created_at DESC, id COLLATE "C" DESC)' in definitions["sessions_parent_order_idx"]
+    assert "sessions_parent_idx" not in definitions
+    assert (
+        "(root_id, created_at, request_id) WHERE (reply IS NULL)" in definitions["coordinator_requests_root_order_idx"]
+    )
+    assert "COALESCE(completed_at, deadline), request_id" in definitions["coordinator_requests_cleanup_idx"]
+    assert "(created_at, id)" in definitions["coordinator_changes_cleanup_idx"]
+    await store.close()
 
 
 async def test_a_second_store_instance_sees_the_first_ones_writes(postgres_dsn: str, pg_schema: str) -> None:
@@ -291,6 +406,7 @@ async def test_racing_setups_on_a_fresh_schema_all_succeed(postgres_dsn: str, pg
         (4,),
         (5,),
         (6,),
+        (7,),
     ]
 
 

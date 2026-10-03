@@ -403,7 +403,7 @@ async def test_migration_backfills_legacy_and_current_pages_and_setup_is_idempot
         postgres_dsn,
         pg_schema,
         "SELECT version FROM {schema}.schema_version ORDER BY version",
-    ) == [(1,), (2,), (3,), (4,), (5,), (6,)]
+    ) == [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]
     assert _query(
         postgres_dsn,
         pg_schema,
@@ -413,7 +413,8 @@ async def test_migration_backfills_legacy_and_current_pages_and_setup_is_idempot
     assert await store.lookup_command(root.id, command) == (root.id, Stamped(seq=1, event=queued))
     assert await store.lookup_command(root.id, answer_command) == (root.id, Stamped(seq=1001, event=answered))
     assert await store.lookup_finished(root.id) == Stamped(seq=1003, event=AgentFinished(result="done"))
-    assert not await store._input_pending(await store._connection(), root.id, command)
+    async with store._connection() as conn:
+        assert not await store._input_pending(conn, root.id, command)
 
 
 async def test_nul_command_identifiers_preserve_append_and_deduplication(postgres_dsn: str, pg_schema: str) -> None:
@@ -424,7 +425,8 @@ async def test_nul_command_identifiers_preserve_append_and_deduplication(postgre
     await store.append(root.id, [event])
     assert await store.lookup_command(root.id, event.command_id) == (root.id, Stamped(seq=1, event=event))
     assert (await store.enqueue(root.id, event)).duplicate
-    assert await store._input_pending(await store._connection(), root.id, event.command_id)
+    async with store._connection() as conn:
+        assert await store._input_pending(conn, root.id, event.command_id)
 
 
 async def test_corrupt_backfill_rolls_back_the_migration_and_restart_succeeds(
@@ -464,7 +466,7 @@ async def test_corrupt_backfill_rolls_back_the_migration_and_restart_succeeds(
         postgres_dsn,
         pg_schema,
         "SELECT version FROM {schema}.schema_version ORDER BY version",
-    )[-1] == (6,)
+    )[-1] == (7,)
 
 
 async def test_interrupted_backfill_rolls_back_the_migration_and_restart_succeeds(

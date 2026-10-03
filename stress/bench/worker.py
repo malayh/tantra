@@ -266,6 +266,26 @@ def rss_mb() -> float:
     return resident * os.sysconf("SC_PAGE_SIZE") / 1_048_576
 
 
+def pool_stats(runtime: Runtime) -> dict[str, int | float]:
+    return dict(runtime.store._pool.get_stats())
+
+
+def coordinator_stats(runtime: Runtime) -> dict[str, int]:
+    coordinator = runtime.coordinator
+    return {
+        "observation_checks": coordinator.observation_checks,
+        "observation_ticks": coordinator.observation_ticks,
+        "routed_wakeups": coordinator.routed_wakeups,
+        "dispatch_peak": coordinator.dispatch_peak,
+        "busy_roots": len(coordinator._dispatchers),
+        "subscriptions": len(coordinator._observations),
+    }
+
+
+def metric_delta(after: dict[str, int | float], before: dict[str, int | float]) -> dict[str, int | float]:
+    return {key: value - before.get(key, 0) for key, value in after.items()}
+
+
 async def loop_probe() -> None:
     while True:
         started = time.perf_counter()
@@ -393,7 +413,15 @@ class WorkerState:
                 task.cancel()
             await asyncio.gather(*self.observers, return_exceptions=True)
             self.observers.clear()
-            return {"observer_errors": self.observer_errors, "observed": dict(self.observed)}
+            async with asyncio.timeout(30):
+                while self.runtime._watchers or self.runtime.coordinator._observations:
+                    await asyncio.sleep(0.01)
+            return {
+                "observer_errors": self.observer_errors,
+                "observed": dict(self.observed),
+                "watchers": len(self.runtime._watchers),
+                "subscriptions": len(self.runtime.coordinator._observations),
+            }
         if op == "backlog":
             conn = await psycopg.AsyncConnection.connect(self.runtime.store.dsn, autocommit=True)
             try:
@@ -448,6 +476,8 @@ async def serve(pipe: Any, settings: dict[str, Any]) -> None:
             if request["op"] == "close":
                 break
             METRICS.clear()
+            pool_before = pool_stats(runtime)
+            coordinator_before = coordinator_stats(runtime)
             started, cpu = time.perf_counter(), time.process_time()
             try:
                 async with asyncio.timeout(180):
@@ -455,6 +485,8 @@ async def serve(pipe: Any, settings: dict[str, Any]) -> None:
                 error = None
             except Exception as exc:
                 result, error = {}, f"{type(exc).__name__}: {exc}"
+            pool_after = pool_stats(runtime)
+            coordinator_after = coordinator_stats(runtime)
             reply = {
                 "operation": request["op"],
                 "result": result,
@@ -470,6 +502,10 @@ async def serve(pipe: Any, settings: dict[str, Any]) -> None:
                 "loop_lag_ms": list(METRICS.loop_lag_ms),
                 "watchers": len(runtime._watchers),
                 "known_roots": len(runtime._known_roots),
+                "pool": pool_after,
+                "pool_delta": metric_delta(pool_after, pool_before),
+                "coordinator": coordinator_after,
+                "coordinator_delta": metric_delta(coordinator_after, coordinator_before),
             }
             pipe.send(reply)
     finally:

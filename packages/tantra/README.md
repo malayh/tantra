@@ -63,9 +63,11 @@ Subagents are independent actors. Models use the injected `spawn`, `status`, `se
 
 Compaction is opt-in with `Runtime(compactor=PruneThenSummarize())`. Configured runtimes budget the complete provider request, preserve system and tool definitions, and compact each actor independently.
 
-For multi-process deployments, Tantra 1.2 can pair `PostgresStore` with the optional `PostgresCoordinator` for leased execution ownership, fenced writes, command forwarding, and takeover recovery. The default remains single-process.
+For multi-process deployments, pair `PostgresStore` with the optional `PostgresCoordinator` for leased execution ownership, fenced writes, command forwarding, and takeover recovery. The default remains single-process.
 
-See the [documentation](https://malayh.github.io/tantra/docs/) and the [1.2 migration and coordinator guide](https://malayh.github.io/tantra/docs/guides/migration-1.2/). The [1.1 migration guide](https://malayh.github.io/tantra/docs/guides/migration-1.1/) remains available.
+Tantra 1.3 adds indexed command lookup, operational checkpoints, pooled PostgreSQL access, and shared observer catch-up. `Runtime(history_mode="compacted")` can load the latest summary and retained history; full history remains the default, and public replay stays complete. Stop PostgreSQL writers before upgrading an existing database.
+
+See the [documentation](https://malayh.github.io/tantra/docs/), the [1.3 upgrade guide](https://malayh.github.io/tantra/docs/guides/migration-1.3/), and the [coordinator setup guide](https://malayh.github.io/tantra/docs/guides/migration-1.2/).
 
 ## Reference app
 

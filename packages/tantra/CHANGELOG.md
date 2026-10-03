@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.3.0
+
+Added:
+
+- PostgreSQL command and lifecycle indexes, transactional operational checkpoints, and targeted completed-turn reads. Command retries and recovery no longer require full-journal scans when projections are current.
+- Optional `Runtime(history_mode="compacted")` loading of the latest summary and retained event window. Full history remains the default for hooks, callable prompts, and custom compactors.
+- A repository Runtime bench with isolated durable Compose PostgreSQL, two workers, synthetic scale/fault campaigns, fresh OpenRouter behavioral tests, exact recorded replay, persistent token budgeting, and JSON/HTML reports.
+
+Changed:
+
+- PostgreSQL uses the official Psycopg pool with up to four data connections per worker, separate control/LISTEN connections, and bounded concurrent dispatch across unrelated roots. The `[postgres]` extra now includes `psycopg-pool`.
+- Observers share batched catch-up queries and receive routed notification hints. Unused watchers are released, and expired transport records drain in bounded batches without removing lifetime command identity.
+
+Fixed:
+
+- Recovery and result-wait races around queued work, child notifications, shutdown, writer replacement, and stale ownership observations.
+- Broken control connections reconnect before lease transactions; database cleanup failures no longer retain local drain tasks. Lease transactions are not automatically replayed.
+
+Compatibility and upgrade:
+
+- Stop all PostgreSQL writers before running `PostgresStore.setup()` with 1.3. It applies migrations 5–7 and backfills journal projections; mixed-version writers are unsupported. Original event bodies, sequences, and replay cursors remain unchanged.
+- Required Store/Coordinator interfaces remain unchanged; custom implementations retain full-read fallbacks. Non-PostgreSQL stores keep their existing formats. Compacted mode changes turn context only; public replay remains complete.
+- See the [1.3 migration guide](https://malayh.github.io/tantra/docs/guides/migration-1.3/). Serial latency regressions and full-history decoding costs remain documented follow-up work.
+
 ## 1.2.0
 
 Added:

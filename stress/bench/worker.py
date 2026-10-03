@@ -7,7 +7,7 @@ import os
 import resource
 import time
 from collections import Counter
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,15 +16,21 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 import psycopg
 from psycopg import sql
 
+from stress.bench.behavior import BEHAVIOR_AGENTS, COMPACTION, BehaviorState, prepare_behavior_skills
+from stress.bench.faults import FAULT_AGENTS, FaultState
 from stress.bench.providers import RecordedProvider, live_provider
 from stress.driver import SyntheticProvider, call_policy
 from stress.invariants import check_log, check_pairs, pairs_intact
 from tantra import (
     Agent,
     Context,
+    FileSystemSkills,
+    Hook,
+    LoggedEvent,
     ModelLimits,
     PostgresCoordinator,
     PostgresStore,
+    PruneThenSummarize,
     Runtime,
     WriterReplaced,
     WriterRequired,
@@ -47,7 +53,10 @@ from tantra.events import (
     ToolCallDelta,
     ToolCallRequested,
     ToolCallStarted,
+    TurnCancelled,
     TurnCompleted,
+    TurnFailed,
+    TurnInterrupted,
     TurnStarted,
 )
 from tantra.providers.base import ProviderEvent, SampleRequest
@@ -78,21 +87,88 @@ class Metrics:
     sql_ms: float = 0
     notifications: Counter[str] = field(default_factory=Counter)
     loop_lag_ms: list[float] = field(default_factory=list)
+    journal_queries: int = 0
+    journal_rows: int = 0
+    result_queries: int = 0
 
     def clear(self) -> None:
         self.sql_calls = self.fetched_rows = 0
         self.sql_ms = 0
         self.notifications.clear()
         self.loop_lag_ms.clear()
+        self.journal_queries = self.journal_rows = 0
+        self.result_queries = 0
 
 
 METRICS = Metrics()
+
+
+class RuntimeTimings(Hook):
+    def __init__(self, clock: Callable[[], float] = time.perf_counter) -> None:
+        self.clock = clock
+        self.completed: list[dict[str, Any]] = []
+        self.samples: dict[tuple[str, str], str] = {}
+        self.tools: dict[tuple[str, str], tuple[str, str]] = {}
+        self.tool_started: dict[tuple[str, str], float] = {}
+        self.post_provider_started: dict[tuple[str, str], float] = {}
+
+    async def on_event(self, emitted: LoggedEvent) -> None:
+        actor = str(emitted.agent_id)
+        event = emitted.event
+        if isinstance(event, SampleStarted):
+            self.samples[(actor, event.sample_id)] = event.turn_id
+        elif isinstance(event, ToolCallRequested):
+            turn = self.samples.get((actor, event.sample_id))
+            if turn is not None:
+                self.tools[(actor, event.call_id)] = (turn, event.name)
+        elif isinstance(event, ToolCallStarted):
+            self.tool_started[(actor, event.call_id)] = self.clock()
+        elif isinstance(event, ToolCallCompleted):
+            key = (actor, event.call_id)
+            started = self.tool_started.pop(key, None)
+            tool = self.tools.pop(key, None)
+            if started is not None and tool is not None:
+                self.completed.append(
+                    {
+                        "kind": "tool",
+                        "boundary": "committed_tool_started_to_committed_tool_completed",
+                        "elapsed_ms": (self.clock() - started) * 1_000,
+                        "actor_id": actor,
+                        "turn_id": tool[0],
+                        "tool": tool[1],
+                    }
+                )
+        elif isinstance(event, SampleCompleted):
+            turn = self.samples.pop((actor, event.sample_id), None)
+            if turn is not None:
+                self.post_provider_started[(actor, turn)] = self.clock()
+        elif isinstance(event, TurnCompleted | TurnFailed | TurnCancelled | TurnInterrupted):
+            key = (actor, event.turn_id)
+            started = self.post_provider_started.pop(key, None)
+            if started is not None:
+                self.completed.append(
+                    {
+                        "kind": "post_provider",
+                        "boundary": "committed_sample_completed_to_committed_turn_terminal",
+                        "elapsed_ms": (self.clock() - started) * 1_000,
+                        "actor_id": actor,
+                        "turn_id": event.turn_id,
+                    }
+                )
 
 
 class MeasuredCursor(psycopg.AsyncCursor):
     async def execute(self, *args: Any, **kwargs: Any) -> Any:
         started = time.perf_counter()
         METRICS.sql_calls += 1
+        query = args[0]
+        try:
+            rendered = query.as_string(self.connection) if isinstance(query, sql.Composable) else str(query)
+        except Exception:
+            rendered = ""
+        self._bench_journal_query = rendered.lstrip().upper().startswith(("SELECT", "WITH")) and ".events" in rendered
+        METRICS.journal_queries += int(self._bench_journal_query)
+        METRICS.result_queries += int(rendered.lstrip().upper().startswith("SELECT REPLY FROM"))
         try:
             return await super().execute(*args, **kwargs)
         finally:
@@ -110,11 +186,14 @@ class MeasuredCursor(psycopg.AsyncCursor):
     async def fetchone(self) -> Any:
         result = await super().fetchone()
         METRICS.fetched_rows += int(result is not None)
+        METRICS.journal_rows += int(result is not None and getattr(self, "_bench_journal_query", False))
         return result
 
     async def fetchall(self) -> Any:
         result = await super().fetchall()
         METRICS.fetched_rows += len(result)
+        if getattr(self, "_bench_journal_query", False):
+            METRICS.journal_rows += len(result)
         return result
 
 
@@ -239,14 +318,16 @@ class GatedProvider:
                 Path(settings["recordings"]),
                 settings["endpoint"],
                 ModelLimits(context_window=settings["context_window"], max_output=4_096),
+                require_usage=True,
             )
         else:
             self.source = SyntheticProvider(call_policy("fixture_total", {}, answer="60"))
         self.requests: list[SampleRequest] = []
         self.request_times: list[float] = []
+        self.limit_override: ModelLimits | None = None
 
     def limits(self, model: str) -> ModelLimits:
-        return self.source.limits(model)
+        return self.limit_override or self.source.limits(model)
 
     async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
         self.requests.append(req)
@@ -301,6 +382,8 @@ class WorkerState:
         self.observers: list[asyncio.Task[None]] = []
         self.observed: Counter[str] = Counter()
         self.observer_errors: list[str] = []
+        self.behavior = BehaviorState(runtime, provider)
+        self.faults = FaultState(runtime, provider)
 
     async def operation(self, request: dict[str, Any]) -> dict[str, Any]:
         op = request["op"]
@@ -435,6 +518,12 @@ class WorkerState:
                 return {"expired_changes": row[0], "expired_requests": row[1]}
             finally:
                 await conn.close()
+        behavior = await self.behavior.operation(request)
+        if behavior is not None:
+            return behavior
+        faults = await self.faults.operation(request)
+        if faults is not None:
+            return faults
         raise ValueError(f"unknown worker operation: {op}")
 
     async def observe(self, sid: str) -> None:
@@ -457,14 +546,19 @@ async def serve(pipe: Any, settings: dict[str, Any]) -> None:
     store = PostgresStore(settings["dsn"], schema=settings["schema"])
     provider = GatedProvider(settings)
     slots = asyncio.Semaphore(4)
+    behavioral = settings.get("suite") == "behavioral"
+    runtime_timings = RuntimeTimings()
     runtime = Runtime(
         provider,
         store,
-        [BenchAgent],
+        [BenchAgent, *BEHAVIOR_AGENTS, *FAULT_AGENTS],
         default_model=settings["model"],
         deps_factory=lambda _: (settings["dsn"], settings["schema"], slots),
         coordinator=PostgresCoordinator(store, **COORDINATOR_SETTINGS),
+        hooks=[runtime_timings] if behavioral else (),
         history_mode=settings.get("history_mode", "full"),
+        skills=FileSystemSkills(prepare_behavior_skills(settings["schema"])) if behavioral else None,
+        compactor=PruneThenSummarize(COMPACTION) if behavioral else None,
     )
     state = WorkerState(runtime, provider)
     probe = asyncio.create_task(loop_probe())
@@ -476,6 +570,10 @@ async def serve(pipe: Any, settings: dict[str, Any]) -> None:
             if request["op"] == "close":
                 break
             METRICS.clear()
+            provider_before = len(provider.requests)
+            timings = getattr(provider.source, "timings", [])
+            timing_before = len(timings)
+            runtime_timing_before = len(runtime_timings.completed)
             pool_before = pool_stats(runtime)
             coordinator_before = coordinator_stats(runtime)
             started, cpu = time.perf_counter(), time.process_time()
@@ -498,7 +596,13 @@ async def serve(pipe: Any, settings: dict[str, Any]) -> None:
                 "sql_calls": METRICS.sql_calls,
                 "fetched_rows": METRICS.fetched_rows,
                 "sql_ms": METRICS.sql_ms,
+                "journal_queries": METRICS.journal_queries,
+                "journal_rows": METRICS.journal_rows,
+                "result_queries": METRICS.result_queries,
                 "notifications": dict(METRICS.notifications),
+                "provider_requests": len(provider.requests) - provider_before,
+                "provider_samples": list(timings[timing_before:]),
+                "runtime_timings": list(runtime_timings.completed[runtime_timing_before:]),
                 "loop_lag_ms": list(METRICS.loop_lag_ms),
                 "watchers": len(runtime._watchers),
                 "known_roots": len(runtime._known_roots),
@@ -509,6 +613,8 @@ async def serve(pipe: Any, settings: dict[str, Any]) -> None:
             }
             pipe.send(reply)
     finally:
+        await state.behavior.close()
+        await state.faults.close()
         await state.operation({"op": "stop_observers"})
         await runtime.aclose()
         await provider.aclose()

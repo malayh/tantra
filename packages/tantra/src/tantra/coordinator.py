@@ -550,6 +550,7 @@ class PostgresCoordinator:
             max((envelope.deadline.astimezone(UTC) - datetime.now(UTC)).total_seconds(), 0),
         )
         iterator = self.observe(envelope.root_id)
+        located = False
         try:
             async with asyncio.timeout(budget):
                 async for observed in iterator:
@@ -560,7 +561,24 @@ class PostgresCoordinator:
                         return reply
                     if not observed.owner_valid or observed.owner_instance is None or observed.expires_at is None:
                         if not submitted:
-                            raise CoordinatorUnavailable(f"root {envelope.root_id} has no owner")
+                            if located:
+                                raise CoordinatorUnavailable(f"root {envelope.root_id} has no owner")
+                            located = True
+                            ownership = await self.locate(envelope.root_id)
+                            if ownership is None:
+                                raise CoordinatorUnavailable(f"root {envelope.root_id} has no owner")
+                            current = (ownership.instance_id, ownership.generation)
+                            try:
+                                await self._put_request(envelope, ownership)
+                            except LeaseLost:
+                                self._schedule(envelope.root_id)
+                                continue
+                            submitted = True
+                            destination = current
+                            reply = await self._request_reply(envelope.request_id)
+                            if reply is not None:
+                                return reply
+                            self._schedule(envelope.root_id, dispatch=True)
                         continue
                     ownership = Ownership(
                         root_id=envelope.root_id,
@@ -1070,6 +1088,15 @@ class PostgresCoordinator:
 
     async def _control_connection(self) -> Any:
         self._ensure_started()
+        if self._control_conn is not None and not self._control_conn.closed:
+            try:
+                await self._control_conn.execute("SELECT 1")
+            except psycopg.Error:
+                try:
+                    await self._control_conn.close()
+                except psycopg.Error:
+                    pass
+                self._control_conn = None
         if self._control_conn is None or self._control_conn.closed:
             self._control_conn = await psycopg.AsyncConnection.connect(self.store.dsn, autocommit=True)
         return self._control_conn

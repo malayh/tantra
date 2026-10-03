@@ -1622,7 +1622,7 @@ class Runtime:
             async with self._lock(root_id):
                 try:
                     await self._set_active(root_id, agent_id, False)
-                except LeaseLost:
+                except Exception:
                     pass
                 if self.active.get(agent_id) is task:
                     del self.active[agent_id]
@@ -1634,7 +1634,10 @@ class Runtime:
                 if failed_prestart and not reactivate:
                     marker = None if failed_prestart_unknown else current
                     self._failed_prestarts.setdefault(root_id, {})[agent_id] = marker
-                await self._release_if_idle_locked(root_id)
+                try:
+                    await self._release_if_idle_locked(root_id)
+                except Exception:
+                    pass
 
     async def _request_command(
         self,

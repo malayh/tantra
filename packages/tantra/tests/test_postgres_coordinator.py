@@ -487,6 +487,66 @@ async def test_request_acceptance_reply_and_duplicate_are_one_transaction(postgr
         await _close(owner, sender)
 
 
+async def test_request_rechecks_a_cached_no_owner_observation(postgres_dsn: str, pg_schema: str) -> None:
+    async def handler(envelope, apply):
+        async def accept(locked, store):
+            return CommandReply(request_id=locked.request_id, result={"accepted": True})
+
+        await apply(accept)
+
+    owner = await _coordinator(postgres_dsn, pg_schema, handler=handler)
+    sender = await _coordinator(postgres_dsn, pg_schema)
+    root = uuid.uuid4().hex
+    await owner[0].create(SessionHeader(id=root, agent="build"))
+    stale = sender[1].observe(root)
+    try:
+        observed = await asyncio.wait_for(anext(stale), 1)
+        assert not observed.owner_valid
+        assert await owner[1].acquire(root) is not None
+        envelope = CommandEnvelope(
+            request_id=uuid.uuid4(),
+            root_id=root,
+            operation="claim_writer",
+            payload=ClaimWriterPayload(connection_id=uuid.uuid4()),
+            deadline=datetime.now(UTC) + timedelta(seconds=2),
+        )
+
+        reply = await sender[1].request(envelope)
+
+        assert reply.result == {"accepted": True}
+    finally:
+        await stale.aclose()
+        await _close(owner, sender)
+
+
+async def test_lease_transaction_reconnects_after_stale_control_connection_preflight(
+    postgres_dsn: str, pg_schema: str
+) -> None:
+    pair = await _coordinator(postgres_dsn, pg_schema)
+    root = uuid.uuid4().hex
+    await pair[0].create(SessionHeader(id=root, agent="build"))
+
+    class StaleConnection:
+        closed = False
+
+        async def execute(self, query):
+            raise psycopg.OperationalError("server restarted")
+
+        async def close(self):
+            self.closed = True
+
+    stale = StaleConnection()
+    pair[1]._control_conn = stale
+    try:
+        ownership = await pair[1].acquire(root)
+
+        assert ownership is not None
+        assert stale.closed
+        assert pair[1]._control_conn is not stale
+    finally:
+        await _close(pair)
+
+
 async def test_expired_request_never_runs(postgres_dsn: str, pg_schema: str) -> None:
     called = False
 

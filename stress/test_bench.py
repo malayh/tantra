@@ -135,7 +135,7 @@ async def test_live_transport_accounts_raw_usage_and_bypasses_existing_recording
     client = httpx.AsyncClient(transport=transport, headers={"X-OpenRouter-Cache": "false"})
     source = OpenAICompatible(base_url="https://test.invalid/api/v1", api_key="test-key", http_client=client)
     provider = RecordedProvider(
-        source, tmp_path / "recordings", "test", ModelLimits(context_window=10_000, max_output=4096)
+        source, tmp_path / "recordings", "test", ModelLimits(context_window=10_000, max_output=4096), budget=budget
     )
     req = SampleRequest(model="test", messages=[UserMessage(content="total")])
     try:
@@ -146,6 +146,10 @@ async def test_live_transport_accounts_raw_usage_and_bypasses_existing_recording
         assert len(calls) == 2 and summary["requests"] == 2
         assert summary["reported_tokens"] == 44 and summary["cached_input_tokens"] == 30
         assert summary["unknown_reserved_tokens"] == 0 and summary["reported_cost"] == 0.002
+        recording = json.loads(next((tmp_path / "recordings").glob("*.json")).read_text())
+        assert len(recording["usage_requests"]) == 1
+        assert len(list((tmp_path / "recordings" / "archive").glob("*.json"))) == 2
+        assert all(row["generation"] == "generation" and row["tokens"] == 22 for row in recording["usage_requests"])
     finally:
         await provider.aclose()
 

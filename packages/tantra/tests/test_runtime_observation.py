@@ -391,6 +391,37 @@ async def test_connection_exit_cleans_state_when_remote_release_fails(monkeypatc
     await runtime.aclose()
 
 
+async def test_drain_cleanup_records_unknown_prestart_when_database_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_id = uuid4().hex
+    coordinator = ObservationCoordinator()
+    runtime = Runtime(FakeProvider([]), MemoryStore(), [Bot], default_model="m", coordinator=coordinator)
+    await runtime.start()
+
+    async def set_active(root: str, agent: str, active: bool) -> None:
+        if not active:
+            raise CoordinatorUnavailable("database unavailable")
+
+    async def header(agent: str) -> None:
+        raise CoordinatorUnavailable("database unavailable")
+
+    async def release(root: str) -> None:
+        raise CoordinatorUnavailable("database unavailable")
+
+    monkeypatch.setattr(runtime, "_set_active", set_active)
+    monkeypatch.setattr(runtime, "_header", header)
+    monkeypatch.setattr(runtime, "_release_if_idle_locked", release)
+    task = asyncio.create_task(runtime._drain(root_id, root_id, 0))
+    runtime.active[root_id] = task
+
+    await asyncio.wait_for(task, 1)
+
+    assert root_id not in runtime.active
+    assert runtime._failed_prestarts == {root_id: {root_id: None}}
+    await runtime.aclose()
+
+
 async def test_writer_observation_respects_claim_commit_watermark_and_errors() -> None:
     root_id = uuid4().hex
     coordinator = ObservationCoordinator()

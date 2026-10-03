@@ -216,15 +216,87 @@ Verified on 2026-10-03:
 - [721 package/bench tests](../stress/bench/artifacts/p3-checks/package-bench.txt) and [96 stress tests](../stress/bench/artifacts/p3-checks/stress.txt) passed with zero PostgreSQL skips. Focused checks cover 1/64/1,000 shared subscriptions, unchanged journal/result read bounds, routing/reconnect/expiry, writer replacement, watcher teardown, SQL plans at 10,000 chats, and bounded alternating cleanup preserving command identity. The memory stress fixture now issues dependent write/recall calls in successive provider steps; parallel tools remain unchanged. Failed gate logs are retained in `p3-checks`.
 - Ruff lint/format and `git diff --check` passed. One independent review completed, with material fixes re-reviewed and no remaining findings. Malformed notification kinds cannot kill LISTEN; claim watermarks reject stale writer snapshots; result waits ignore cached inactivity and reset on active/recovering hints while preserving bounded recovered-owner failure. The release test requires eventual ownership release before recovery because error delivery and relinquishment commit separately. Owned workers, Compose containers, and volumes were removed. No paid inference ran; full history and custom-coordinator fallbacks remain unchanged. Stop after P3.
 
-### P4 — Live campaign and final comparison · deps: P3 · —
+### P4 — Live campaign and final comparison · deps: P3 · ✅ DONE
 
-Deliver fresh SQL read/write, skills, approvals, structured output, child completion, and compacted recall workflows; 1,000 observers/100 active turns; and automated writer replacement, reconnect, process death, cancellation boundaries, lost replies/notifications, slow readers, and database interruption.
+Extend the existing CLI/Compose bench. Prove fresh-model behavior and run deterministic failure/load campaigns. The user deferred P3 latency optimization; preserve its regressions as follow-up evidence, with no serial latency gate. Preserve public APIs, journal/checkpoint formats, replay, and fencing. Paid requests run only for explicit fresh-model scenarios; load and fault tests use deterministic providers.
 
-Verify machine-checkable outcomes and database effects; strict campaign ceiling; before/after report; and no provider replay presented as a live pass.
+Deliverables, in order:
 
-- [ ] Fresh-model workflows
-- [ ] Failure and scale campaign
-- [ ] Final comparison, checks, and review
+1. **Add a reproducible behavioral runner — `stress/bench/worker.py`, `__main__.py`, scenario fixtures.**
+   - Reuse two Runtime processes, Compose ownership, `check_log`, `check_pairs`, typed results, and independent SQL evidence. Add only the scenario definitions and worker operations this campaign needs; no general workflow engine.
+   - Make `live`/`replay` default to the behavioral suite; retain the current total-tool smoke as `--suite smoke`. Add repeatable `--scenario NAME` filtering. Preserve `baseline` and default synthetic `scale`; `scale --faults` selects the separate deterministic failure suite and records a distinct workload identity.
+   - The worker pipe currently executes one operation at a time. Add background start/wait and named gate operations so approvals and fault control remain responsive while a turn runs. Gates wait for committed journal/database evidence, not guessed sleeps.
+   - Derive session and command IDs from the scenario/version/trial. Existing child IDs derive from durable call identity. Keep SQL results and approval replies stable; replay must match actual prepared requests without removing IDs or normalizing payloads.
+   - Keep fixture writes in parameterized, bounded tools on separate fixture tables. Commit an audit record and an operation-key uniqueness constraint with each write. This tests recoverable idempotent effects; arbitrary external tools do not acquire an exactly-once guarantee from Tantra.
+
+   Fresh scenarios and oracles:
+
+   | Scenario | Required evidence |
+   |---|---|
+   | SQL read | Tool reads the seeded three-row fixture; returned total is 60 and agrees with an independent query. |
+   | Approved write | An ask is durable before execution; a scripted public `answer` allows one bounded write. Same-command retry leaves one audited logical effect. |
+   | Denied write | Scripted denial produces a tool error, no write, and a completed safe response. An unanswered approval never performs the write. |
+   | Skill | `FileSystemSkills` loads the named fixture skill; the model uses a rule present only in its body. Assert load evidence and the exact rule-derived result. |
+   | Structured result | Existing `Agent.output_schema` produces a typed total/count result matching SQL evidence, rather than merely parseable JSON. |
+   | Child completion | One declared child reads the fixture and explicitly finishes; its parent consumes the result. Assert child finish, one parent lifecycle notification, and the final total. |
+   | Compacted recall | Built-in `PruneThenSummarize` makes a metered fresh summary, then a restarted compacted-mode Runtime recalls an old marker absent from the new prompt. Assert summary/retained-window evidence, tool pairing, skill content, and unchanged complete public replay. |
+
+   - Trigger compaction with a bench-only smaller context budget and short history, while billing reservations still use verified OpenRouter capacity. Replay the resulting workflow in full and compacted modes to check request/result parity; do not substitute a seeded summary for fresh summarization verification.
+   - Every agent retains six steps and a 4,096-token output cap. Bound each scenario and mark timeouts, unmet behavior, provider errors, and runtime failures separately. No LLM judge and no automatic rerun until success.
+
+2. **Finish campaign accounting and recordings — `stress/bench/providers.py`.**
+   - Resume the existing `journal-scaling` ledger outside Docker volumes; enforce 5,000,000 total tokens across all runs. Include retries, compaction, cached input, and reasoning. Reasoning/cache detail fields are subsets of completion/prompt totals, not extra tokens to double-count.
+   - Verify current model context/output limits and supported request parameters before inference. Reserve context capacity plus the bounded completion allowance atomically before every HTTP attempt. SDK retries stay off; unknown usage keeps its full reservation.
+   - Run fresh scenarios serially by default, with a campaign-wide maximum of four in-flight paid attempts across both workers, including children and summarization. Reduce admission when remaining budget cannot cover another reservation. Target less than 250,000 reported tokens; the hard ceiling remains five million.
+   - Keep stable prompts and allow provider prompt caching. Fresh mode always calls OpenRouter with `X-OpenRouter-Cache: false`; reject any reported response-cache hit as fresh evidence. Provider prompt-cache hits remain valid fresh inference ([response caching contract](https://openrouter.ai/docs/guides/features/response-caching)). Report actual cache reads/writes, reasoning, cost availability, and remaining/unknown-reserved budget. Use the official [usage accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting) and [prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching) contracts.
+   - Persist generation IDs and expose bounded reconciliation of unknown reservations through OpenRouter's generation metadata. Settle only complete authoritative native-token usage; unavailable or incomplete evidence never releases a reservation.
+   - Add scenario fixture identity to recording keys: prompts, schemas, skills, seed data, and parameters. Retain exact requests, events, provider timing, and usage linkage. Incomplete recordings remain unusable. Replay misses fail without network inference, and fresh runs always bypass recordings.
+
+3. **Run faults without paid inference — worker gates and controller.**
+   - Reuse process-gate and cancellation patterns from `test_postgres_runtime.py` and observation patterns from `test_postgres_observation.py`. Use synthetic providers for fault positions; exact compatible recorded workflows also replay against real PostgreSQL.
+   - Replace the writer and reconnect with `after=cursor`; deny the old writer and compare contiguous committed replay/digests. Disconnect observers while accepted work continues.
+   - Kill an owner with an unfinished turn, pending ask, and queued input. Takeover interrupts abandoned started work, expires asks, reconciles child notices once, and drains unstarted work. It does not replay abandoned side effects.
+   - Inject cancellation before commit and a lost reply after commit. Retry the same command; verify rollback or original stored targets, with later work spared. Drop notification hints and expire transport records; durable command retries and observation still recover from authoritative state.
+   - Delay readers with bounded consumer queues; later cursor catch-up must remain complete and unrelated roots must progress. Measure retained memory and release all watchers/subscriptions after closure.
+   - Pause/restart only the owned Compose database, including an outage spanning lease expiry. Bound errors, reject stale writers, reconnect, and recover committed work. Verify rollback/unknown commit outcomes by journal and fixture evidence; retry commands with their original IDs.
+   - Inject oracle violations and confirm nonzero exit plus a failed report. Expected fault outcomes count as passed only when all postconditions hold. Continue independent scenarios after a classified failure, but never turn a missing prerequisite or skipped scenario into a pass.
+
+4. **Measure full scale and publish comparisons — existing reports and `stress/README.md`.**
+   - Run the unchanged 10,000-chat, 4,000/100,000-event baseline. Rerun the preserved 64-observer/16-turn concurrency workload for a compatible P2/P3 comparison.
+   - Run three independent 1,000-observer/100-active synthetic campaigns across two workers. Preserve default scale identity; `--samples` does not silently become concurrent repetitions. Report run count, throughput, completion distributions, idle SQL/rows, pool/dispatcher peaks, catch-up/hint checks, memory, and cleanup backlog.
+   - Require one shared scheduled observation query per healthy worker interval, zero unchanged journal/result pages, no unrelated root wake-ups, four data connections/dispatchers per worker, separate control/LISTEN connections, and zero watchers/subscriptions after disconnect. Fixed dispatcher fallback polling remains separately visible.
+   - Add scenario outcomes and evidence to JSON, CLI, and HTML. Time provider waits, tool work, acceptance, and post-provider completion separately. Do not label overlapping wall-time subtraction as runtime CPU or recorded runs as fresh inference.
+   - Compare identical synthetic or exact recorded workloads on the same environment. Use existing phase reports for the final P0→P3/P4 picture; fresh-model results have no earlier fresh baseline and are behavioral evidence. Preserve regressions, failed runs, unknown usage, and remaining full-context/replay costs.
+
+Verify:
+
+- Focused tests prove each oracle rejects wrong results/effects, denied writes, duplicate lifecycle delivery, cursor gaps, strict replay misses, incomplete recordings, budget races/unknown usage, global inference admission, and resilient worker control.
+- Run fresh `z-ai/glm-5.3-flash` workflows through public Runtime APIs with the environment key and owned durable PostgreSQL. Each required scenario must have a fresh pass; missing key/model/budget leaves verification pending. Never change models or reset the ledger automatically.
+- Replay every completed compatible recording with zero inference requests and compare typed outcomes, database effects, and journal invariants. Exercise deterministic fault cases across two processes and the full observer/load campaign.
+- Pass behavioral correctness and bounded observation/resource gates. Preserve latency regressions in comparisons; latency optimization does not gate P4 completion.
+- Run focused checks, `just lint`, package/bench tests, PostgreSQL stress tests with zero skips, `git diff --check`, and one independent Ponytail review. Re-review only material behavior fixes. Remove owned processes/Compose resources; retain reports, recordings, and ledger.
+
+Checklist:
+
+- [x] Behavioral runner and machine-checkable oracles
+- [x] Campaign admission, usage reconciliation, and exact recordings
+- [x] Fresh-model workflows and strict replay
+- [x] Failure campaign and 1,000-observer/100-turn scale
+- [x] Final comparisons, repository checks, and independent review
+
+Verification evidence on 2026-10-03:
+
+- [Final campaign report](../stress/bench/artifacts/p4-campaign-final/report.html) assembles fresh passes, exact replay, fault and scale evidence, compatible comparisons, budget, and retained failures. [Repository check logs](../stress/bench/artifacts/p4-checks/) retain final tests, lint, and the independent review. One independent Ponytail review completed with no remaining blockers; material behavior fixes received bounded follow-up review. P4 is complete; stop here.
+- All seven fresh `z-ai/glm-5.3-flash` scenarios passed through OpenRouter: SQL read, approved/denied writes, skill, typed output, explicit child completion, and fresh compaction followed by recall after restart. Fresh passes span retained scenario runs; their source and fixture identities remain recorded. The child oracle checks successful SQL evidence and one lifecycle delivery, accepts exactly `60` or its JSON string representation, and waits for the matching committed parent terminal. Wrong committed answers fail promptly. Failed attempts and fixture corrections remain in their original reports.
+- [Full strict replay](../stress/bench/artifacts/p4-replay-final/report.html) passed all seven scenarios using 28 recorded provider streams; the campaign ledger was unchanged. [Compacted-mode replay](../stress/bench/artifacts/p4-replay-compacted/report.html) also passed. Exact prepared requests, tool results, child identities, complete usage linkage, public replay digests, retained tool pairs, and skill content remain required. No replay miss triggers inference.
+- The persistent ledger records 67 paid attempts and **136,581 reported tokens**, including failed attempts and fresh summaries, against the five-million ceiling. Unknown reservations are zero; 4,863,419 tokens remain. Reported cost is **$0.01573927046**, with 12,672 cached input tokens and 4,806 reasoning tokens already included in the totals. Shared admission, atomic reservations, unknown usage, reconciliation, incomplete recordings, and replay identity have regression coverage.
+- [Six deterministic fault scenarios](../stress/bench/artifacts/p4-faults-final/report.html) passed: writer replacement/reconnect, owner death, cancellation commit boundaries, lost notifications/expired transport, slow readers, and an owned-database outage exceeding the lease TTL followed by restart. The bounded slow reader retained about 0.004 MiB after closure; cursor catch-up and unrelated-root progress passed. [Deliberate oracle injection](../stress/bench/artifacts/p4-oracle-failure/report.html) produced a failed report and exit 1 as required.
+- [Scale run 1](../stress/bench/artifacts/p4-scale-1/report.html), [run 2](../stress/bench/artifacts/p4-scale-2/report.html), and [run 3](../stress/bench/artifacts/p4-scale-3/report.html) each passed with 10,000 stored chats, 1,000 observers, and 100 active turns across two workers. Active completion took 9.51/9.58/10.12 seconds. Each settled worker performed 15 shared checks for 15 healthy intervals, zero unchanged journal/result reads, and zero routed wake-ups. Pool and dispatcher peaks were four; watchers/subscriptions and expired transport backlog returned to zero. Fixed dispatcher polling remains visible separately.
+- The unchanged [baseline](../stress/bench/artifacts/p4-baseline-final/report.html) passed 166 observations. [P3/P4 baseline](../stress/bench/artifacts/p4-comparison/report.html), [P0/P4 baseline](../stress/bench/artifacts/p4-total-comparison/report.html), [P3/P4 concurrency](../stress/bench/artifacts/p4-scale-comparison/report.html), and [P2/P4 concurrency](../stress/bench/artifacts/p4-p2-scale-comparison/report.html) compare matching workloads and environments. At 100,000 events, P0/P4 median claim/send/recovery fell from 3,256/4,726/3,149 ms to 39/46/49 ms; their median fetched rows fell from roughly 300,000/400,000/300,000 to 65/73/63, including background activity. Full context/playback still fetch about 100,000 rows and consume roughly 815/791 ms median Python CPU. P4 preserves P3 regressions and records additional changes, including 4,000-event claim/release p95 increases of 7.2/7.6 ms and a 40 ms concurrency increase on one worker. Five baseline samples do not establish causal attribution; latency tuning remains deferred.
+- Narrow campaign-discovered runtime fixes refresh an initially stale ownership observation before sending, reopen a broken control connection before a lease transaction, and prevent best-effort drain cleanup failures from retaining local tasks. Lease transactions are never automatically replayed. The liveness preflight adds a `SELECT 1`; its SQL cost remains measured. Compose waits for TCP readiness rather than the image's temporary initialization socket, and keeps its selected ephemeral port through restart. Public contracts and journal formats remain unchanged.
+- 712 package tests and 120 stress/bench tests passed against durable PostgreSQL with zero skips. Ruff lint/format and `git diff --check` passed. Tool and post-provider timing use committed-event hooks in behavioral workers only; provider waits and worker CPU/SQL are separate. Gate measurements include bench oracle reads and are not isolated runtime overhead. Owned workers, Compose containers, and volumes were removed; reports, exact recordings, and the ledger remain outside Docker volumes.
+
+Boundaries: implement P4 only after approval, then stop. No Sarathi/Osuite changes, journal deletion, codec changes, buffering, public pool configuration, or arbitrary-SQL tool. Runtime changes are limited to correctness defects required by these gates; public contract changes require an updated approved design.
 
 ### Conventions and keeping this spec current
 

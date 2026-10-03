@@ -9,6 +9,7 @@ import multiprocessing
 import os
 import platform
 import shutil
+import socket
 import statistics
 import subprocess
 import sys
@@ -38,6 +39,9 @@ class Database(AbstractContextManager):
         self.project = f"tantra-bench-{uuid4().hex[:12]}"
         self.dsn = ""
         self.metadata: dict[str, Any] = {}
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            self.port = listener.getsockname()[1]
 
     def command(self, *args: str) -> str:
         result = subprocess.run(
@@ -45,6 +49,7 @@ class Database(AbstractContextManager):
             capture_output=True,
             text=True,
             timeout=180,
+            env={**os.environ, "TANTRA_BENCH_PORT": str(self.port)},
         )
         if result.returncode:
             raise RuntimeError(f"Docker Compose {' '.join(args)} failed: {result.stderr.strip()}")
@@ -180,7 +185,76 @@ def write_report(report: dict[str, Any], directory: Path) -> None:
         if changes
         else ""
     )
-    status = "FAILED" if report.get("error") or any(row["errors"] for row in report["summary"]) else "PASSED"
+    scenarios = report.get("scenarios", [])
+    scenario_rows = "".join(
+        f"<tr><td>{html.escape(row['name'])}</td><td>{html.escape(row['status'])}</td>"
+        f"<td>{html.escape(row.get('classification', ''))}</td><td>{html.escape(row.get('error', ''))}"
+        f"<details><summary>Evidence</summary><pre>{html.escape(json.dumps(row.get('evidence', {}), indent=2))}"
+        "</pre></details></td></tr>"
+        for row in scenarios
+    )
+    behavior = (
+        "<h2>Behavioral evidence</h2><div class='scroll'><table><thead><tr><th>Scenario</th>"
+        "<th>Status</th><th>Classification</th><th>Evidence / error</th></tr></thead>"
+        f"<tbody>{scenario_rows}</tbody></table></div>"
+        if scenarios
+        else ""
+    )
+    failed = (
+        report.get("error")
+        or any(row["errors"] for row in report["summary"])
+        or any(row["status"] != "passed" for row in scenarios)
+    )
+    status = "FAILED" if failed else "PASSED"
+    budget = report.get("budget")
+    accounting = f"<h2>Campaign budget</h2><pre>{html.escape(json.dumps(budget, indent=2))}</pre>" if budget else ""
+    provider_rows = "".join(
+        f"<tr><td>{html.escape(sample['label'])}</td><td>{timing['provider_ms']:.1f}</td>"
+        f"<td>{'fresh' if timing['fresh'] else 'recorded replay'}</td>"
+        f"<td>{html.escape(timing['request_key'][:16])}</td></tr>"
+        for sample in report.get("samples", [])
+        for timing in sample.get("provider_samples", [])
+    )
+    provider = (
+        "<h2>Provider timing</h2><p>Time waiting for provider events, reported separately from worker CPU. "
+        "Background turns can span multiple worker operations.</p><div class='scroll'><table><thead>"
+        "<tr><th>Observed during</th><th>Provider ms</th><th>Source</th><th>Request</th></tr></thead>"
+        f"<tbody>{provider_rows}</tbody></table></div>"
+        if provider_rows
+        else ""
+    )
+    runtime_rows = "".join(
+        f"<tr><td>{html.escape(sample['label'])}</td><td>{html.escape(timing['kind'])}</td>"
+        f"<td>{html.escape(timing.get('tool', ''))}</td><td>{timing['elapsed_ms']:.2f}</td></tr>"
+        for sample in report.get("samples", [])
+        for timing in sample.get("runtime_timings", [])
+    )
+    runtime_timing = (
+        "<h2>Runtime timing boundaries</h2><p>Committed tool start to completion, and the last committed "
+        "sample completion to its turn terminal. These intervals include persistence and callbacks; "
+        "they are wall time, separate from provider waits and worker CPU.</p><div class='scroll'><table>"
+        "<thead><tr><th>Observed during</th><th>Boundary</th><th>Tool</th><th>ms</th></tr></thead>"
+        f"<tbody>{runtime_rows}</tbody></table></div>"
+        if runtime_rows
+        else ""
+    )
+    resource_rows = "".join(
+        f"<tr><td>{html.escape(sample['label'])}</td>"
+        f"<td>{sample['coordinator_delta']['observation_ticks']}</td>"
+        f"<td>{sample['coordinator_delta']['observation_checks']}</td>"
+        f"<td>{sample['journal_queries']} / {sample['journal_rows']}</td>"
+        f"<td>{sample['result_queries']}</td><td>{sample['pool']['pool_size']}</td>"
+        f"<td>{sample['coordinator']['dispatch_peak']}</td></tr>"
+        for sample in report.get("resource_checks", [])
+    )
+    resources = (
+        "<h2>Settled resource checks</h2><div class='scroll'><table><thead><tr><th>Worker</th>"
+        "<th>Periodic ticks</th><th>Observation queries</th><th>Journal queries / rows</th>"
+        "<th>Result reads</th><th>Data connections</th><th>Dispatcher peak</th></tr></thead>"
+        f"<tbody>{resource_rows}</tbody></table></div>"
+        if resource_rows
+        else ""
+    )
     document = (
         "<!doctype html><html lang='en'><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
         "<title>Tantra benchmark</title><style>body{font:16px system-ui;background:#111827;color:#e5e7eb;"
@@ -190,11 +264,13 @@ def write_report(report: dict[str, Any], directory: Path) -> None:
         f"<h1>Tantra bench — {html.escape(report['mode'])} — {status}</h1>"
         f"<p>{html.escape(report.get('error') or 'Runtime and database evidence recorded.')}</p>"
         "<p>SQL counts include background work during each measurement. Peak RSS is process lifetime. "
-        "Fixture setup and verification are reported separately. Replay is not fresh inference.</p>"
+        "Fixture setup and verification are reported separately. Behavioral gates also include bench oracle reads. "
+        "Replay is not fresh inference.</p>"
         "<div class='scroll'><table><thead><tr><th>Operation</th><th>N</th><th>Errors</th>"
         "<th>Median ms</th><th>P95 ms</th><th>Median SQL</th><th>Median fetched rows</th>"
         f"<th>Median CPU ms</th><th>Max RSS MB</th></tr></thead><tbody>{rows}</tbody></table></div>"
-        f"{comparison}<details><summary>Raw evidence and environment</summary>"
+        f"{behavior}{provider}{runtime_timing}{resources}{accounting}{comparison}"
+        "<details><summary>Raw evidence and environment</summary>"
         f"<pre>{html.escape(encoded)}</pre></details></html>"
     )
     (directory / "report.html").write_text(document)
@@ -292,6 +368,15 @@ def scale(report: dict[str, Any], workers: list[Worker], ids: list[str], args: A
         observed.update(result["observed"])
     assert set(roots[: args.active]).issubset(observed), "observer missed active root events"
     assert all(observed[sid] >= watermark for sid, watermark in expected.items()), "observer missed terminal events"
+    report["resource_checks"] = []
+    for index, worker in enumerate(workers):
+        sample = worker.call("idle", seconds=3)
+        sample.update({"label": f"worker-{index}/unchanged", "pid": worker.pid})
+        report["resource_checks"].append(sample)
+        verify_idle_resources(sample)
+    for sample in report["samples"]:
+        assert sample["pool"]["pool_size"] <= 4, "data connection capacity exceeded"
+        assert sample["coordinator"]["dispatch_peak"] <= 4, "dispatcher capacity exceeded"
     for index, worker in enumerate(workers):
         stopped = measured(report, worker, f"worker-{index}/unsubscribe", "stop_observers")
         assert not stopped["observer_errors"], stopped["observer_errors"]
@@ -300,6 +385,16 @@ def scale(report: dict[str, Any], workers: list[Worker], ids: list[str], args: A
         sample = report["samples"][-1]
         assert sample["watchers"] == sample["coordinator"]["subscriptions"] == 0
         assert sample["coordinator_delta"]["observation_checks"] == 0
+
+
+def verify_idle_resources(sample: dict[str, Any]) -> None:
+    assert not sample["error"], sample["error"]
+    assert sample["journal_queries"] == sample["journal_rows"] == sample["result_queries"] == 0
+    delta = sample["coordinator_delta"]
+    assert delta["observation_ticks"] > 0, "shared observation did not run"
+    assert delta["observation_checks"] == delta["observation_ticks"], "unchanged roots caused extra observation"
+    assert delta["routed_wakeups"] == 0, "unchanged roots were woken"
+    assert sample["pool"]["pool_size"] <= 4 and sample["coordinator"]["dispatch_peak"] <= 4
 
 
 def provider_settings(args: Any) -> dict[str, Any]:
@@ -319,19 +414,38 @@ def provider_settings(args: Any) -> dict[str, Any]:
         key = os.environ.get("OPENROUTER_API_KEY")
         if not key:
             raise RuntimeError("live requires OPENROUTER_API_KEY in the environment")
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=10, headers={"Authorization": f"Bearer {key}"}) as client:
             response = client.get(f"{ENDPOINT}/models", headers={"Authorization": f"Bearer {key}"})
             response.raise_for_status()
+            settings["reconciled"] = Budget(Path(settings["ledger"]), args.campaign).reconcile(client, ENDPOINT)
         model = next((item for item in response.json()["data"] if item["id"] == args.model), None)
         if model is None or type(model.get("context_length")) is not int or model["context_length"] < OUTPUT_LIMIT:
             raise RuntimeError("model has no verified context limit; refusing inference")
+        output_limit = (model.get("top_provider") or {}).get("max_completion_tokens")
+        supported = model.get("supported_parameters") or []
+        if type(output_limit) is not int or output_limit < OUTPUT_LIMIT:
+            raise RuntimeError("model has no verified output limit; refusing inference")
+        required = {"tools", "max_tokens", "temperature"}
+        if getattr(args, "suite", "behavioral") == "behavioral":
+            required.add("response_format")
+        if not required.issubset(supported):
+            raise RuntimeError(f"model lacks required parameters: {sorted(required - set(supported))}")
         settings["context_window"] = model["context_length"]
         settings["api_key"] = key
         budget = Budget(Path(settings["ledger"]), args.campaign)
         if budget.summary()["remaining_tokens"] < settings["context_window"] + OUTPUT_LIMIT:
             raise RuntimeError("campaign budget cannot cover one verified request reservation")
         metadata_path.parent.mkdir(parents=True, exist_ok=True)
-        metadata_path.write_text(json.dumps({"model": args.model, "context_window": settings["context_window"]}))
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "model": args.model,
+                    "context_window": settings["context_window"],
+                    "max_output": output_limit,
+                    "supported_parameters": supported,
+                }
+            )
+        )
     else:
         if not metadata_path.is_file():
             raise RuntimeError("replay requires recorded model metadata; run live explicitly to record it")
@@ -339,6 +453,7 @@ def provider_settings(args: Any) -> dict[str, Any]:
         if metadata["model"] != args.model:
             raise RuntimeError("recorded model identity differs")
         settings["context_window"] = metadata["context_window"]
+    settings["inference_slots"] = multiprocessing.get_context("spawn").BoundedSemaphore(4)
     return settings
 
 
@@ -384,6 +499,10 @@ def parser() -> argparse.ArgumentParser:
     made.add_argument("--active", type=int, default=100)
     made.add_argument("--campaign", default="journal-scaling")
     made.add_argument("--model", default=MODEL)
+    made.add_argument("--suite", choices=("behavioral", "smoke"), default="behavioral")
+    made.add_argument("--scenario", action="append", help="run only the named behavioral or fault scenario")
+    made.add_argument("--faults", action="store_true", help="run deterministic fault scenarios in scale mode")
+    made.add_argument("--inject-oracle-failure", action="store_true", help="prove the fault oracle fails the run")
     made.add_argument("--output", type=Path)
     made.add_argument("--before", type=Path)
     made.add_argument("--after", type=Path)
@@ -413,8 +532,26 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("require positive samples, history sizes >=15, and enough sessions")
         if args.mode == "scale" and not (1 <= args.active <= args.observers <= args.sessions - len(args.histories)):
             raise ValueError("scale requires 1 <= active <= observers <= sessions minus history roots")
+        if args.faults and args.mode != "scale":
+            raise ValueError("--faults requires scale mode")
+        if args.inject_oracle_failure and not args.faults:
+            raise ValueError("--inject-oracle-failure requires --faults")
+        behavioral = args.mode in ("live", "replay") and args.suite == "behavioral"
+        if args.scenario and not (behavioral or args.faults):
+            raise ValueError("--scenario requires the behavioral or fault suite")
+        if behavioral:
+            from stress.bench.behavior import SCENARIOS, behavior_fixture_identity, run_behavior, seed_behavior
+
+            if args.scenario and set(args.scenario) - set(SCENARIOS):
+                raise ValueError("unknown behavioral scenario")
+        if args.faults:
+            from stress.bench.faults import FAULT_SCENARIOS
+
+            if args.scenario and set(args.scenario) - set(FAULT_SCENARIOS):
+                raise ValueError("unknown fault scenario")
         settings = provider_settings(args)
         settings["history_mode"] = args.history_mode
+        settings["suite"] = args.suite if behavioral else "smoke"
         live = args.mode in ("live", "replay")
         commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
         report.update(
@@ -425,6 +562,9 @@ def main(argv: list[str] | None = None) -> int:
                 "coordinator": COORDINATOR_SETTINGS,
                 "runtime_sha256": hashlib.sha256(
                     b"".join(path.read_bytes() for path in sorted((ROOT / "packages/tantra/src").rglob("*.py")))
+                ).hexdigest(),
+                "bench_sha256": hashlib.sha256(
+                    b"".join(path.read_bytes() for path in sorted((ROOT / "stress/bench").glob("*.py")))
                 ).hexdigest(),
                 "workload": {
                     "mode": args.mode,
@@ -441,6 +581,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.history_mode == "compacted":
             report["workload"]["history_mode"] = "compacted"
+        if behavioral:
+            identities = {name: behavior_fixture_identity(name) for name in SCENARIOS}
+            settings["fixture_identity"] = hashlib.sha256(json.dumps(identities, sort_keys=True).encode()).hexdigest()
+            report["workload"].update(
+                {
+                    "suite": "behavioral",
+                    "scenarios": args.scenario or list(SCENARIOS),
+                    "behavior_fixture_identity": settings["fixture_identity"],
+                }
+            )
+        if args.faults:
+            report["workload"].update({"suite": "faults", "scenarios": args.scenario})
+        if settings.get("reconciled"):
+            report["budget_reconciliation"] = settings["reconciled"]
         with Database() as database:
             report["database"] = database.metadata
             settings.update({"dsn": database.dsn, "schema": "bench"})
@@ -456,6 +610,8 @@ def main(argv: list[str] | None = None) -> int:
                     compacted=args.history_mode == "compacted",
                 )
             )
+            if behavioral:
+                asyncio.run(seed_behavior(database.dsn, "bench"))
             report["fixture_ms"] = (time.perf_counter() - started) * 1_000
             print(f"seeded {len(ids)} sessions in {report['fixture_ms']:.1f} ms", flush=True)
             try:
@@ -464,8 +620,14 @@ def main(argv: list[str] | None = None) -> int:
                 report["worker_pids"] = [worker.pid for worker in workers]
                 if args.mode == "baseline":
                     baseline(report, workers, settings, ids, args)
+                elif args.faults:
+                    from stress.bench.faults import fault_campaign
+
+                    fault_campaign(report, workers, settings, ids, args, database, measured, Worker)
                 elif args.mode == "scale":
                     scale(report, workers, ids, args)
+                elif behavioral:
+                    run_behavior(report, workers, settings, args, measured, Worker)
                 else:
                     a, b = workers
                     sid, command = ids[0], uuid5(UUID(hex=ids[0]), "live-turn").hex
@@ -477,6 +639,8 @@ def main(argv: list[str] | None = None) -> int:
                     measured(report, b, "playback", "playback", sid=sid)
                 for index, worker in enumerate(workers):
                     measured(report, worker, f"worker-{index}/backlog", "backlog")
+                if any(row["status"] != "passed" for row in report.get("scenarios", [])):
+                    raise RuntimeError("required scenarios failed; see behavioral evidence")
                 if args.stress:
                     result = subprocess.run(
                         [sys.executable, "-m", "pytest", "stress", "-q", "-rs"],

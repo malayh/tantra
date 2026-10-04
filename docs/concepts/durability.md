@@ -8,6 +8,8 @@ Every mutation through a writable `Connection` is idempotent by UUID `command_id
 
 Journal sequence numbers start at 1. Cursor 0 means replay from the beginning. Readers save the last consumed `seq` and reconnect with `after=seq`.
 
+The built-in PostgreSQL path batches provider text, reasoning and tool-argument deltas for at most 25 ms, 32 events or 64 KiB before starting a commit. Events keep their individual bodies and sequences and are delivered only after commit. Process death, cancellation, deletion, shutdown or ownership loss can discard received but uncommitted buffered output; the journal retains the committed prefix. Custom event hooks and other storage paths retain immediate commits. See the [1.4 upgrade guide](../guides/migration-1.4.md) for timing and compatibility details.
+
 ## Accepted work survives readers
 
 A writable connection can call `send()` and disconnect immediately. The execution owner continues. Event readers replay from storage and do not buffer or throttle execution. Without a coordinator they wait on a process-local notification; `PostgresCoordinator` also publishes cross-process notices and performs bounded catch-up reads.

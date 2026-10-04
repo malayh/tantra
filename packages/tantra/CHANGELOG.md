@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+## 1.4.0
+
+Added:
+
+- `just bench cpu` with deterministic streaming, reader fan-out, long-history and compaction workloads; per-worker Python CPU, PostgreSQL CPU/SQL/WAL, delivery timing, independent commit/replay evidence, and JSON/HTML comparisons.
+
+Changed:
+
+- Built-in PostgreSQL provider deltas commit in bounded batches: 25 ms, 32 events, or 64 KiB of serialized payload, whichever comes first. Each event retains its original body, sequence and replay cursor, and reaches readers only after commit. Tool progress and lifecycle events remain immediate.
+- Journal-only observation hints coalesce for 25 ms; control changes remain immediate. Result waits use indexed terminal evidence instead of checking after every delta, with authoritative periodic catch-up for missed notifications.
+- PostgreSQL combines transaction settings and ownership checks, updates delta-only headers without Python hydration, and uses a generated root key for indexed session lookup.
+- Runtime streams share bounded recent committed pages with independent cursors and event copies. Internal observation reads only interested actors; public root-wide observers retain their existing behavior.
+- The built-in compactor reuses unchanged request projections within one invocation. Full history remains the default; direct and custom compactors retain their existing path.
+
+Fixed:
+
+- Closing public event generators immediately releases underlying streams, watchers and cache interest. Deletion and shutdown discard cached evidence and prevent older in-flight reads from repopulating it.
+- Streaming flush-boundary handling preserves the committed prefix during cancellation, ownership loss, database failure and uncertain commit acknowledgments, without blindly retrying a possibly committed batch.
+
+Compatibility and upgrade:
+
+- Stop all PostgreSQL writers before running `PostgresStore.setup()` with 1.4. Migration 10 adds a terminal-event index; migration 11 adds stored `sessions.root_key` and replaces the root expression index. Migration 11 rewrites session rows, so allow a maintenance window; journal bodies and sequences remain unchanged. Mixed-version writers are unsupported during migration.
+- Public Runtime APIs and required Store/Coordinator interfaces remain unchanged. SQLite, memory, custom stores and custom coordination paths retain immediate delta commits. A custom `Hook.on_event` implementation disables batching; inheriting the base no-op remains eligible.
+- Received but uncommitted buffered deltas can be lost on process death, cancellation, deletion, shutdown or ownership loss. The journal retains the committed prefix, and published events remain durable. Batching and observation can each add 25 ms before database and scheduler delay.
+- Nine primary repository PostgreSQL streaming benchmarks, with five warmed trials each, reduced median Python CPU by **72.8–93.3%** and PostgreSQL CPU by **58.0–94.1%** against the pre-optimization baseline. These measure runtime overhead with deterministic providers. Incremental P4 results are mixed: eight-reader delivery P95 increased **42.19 → 73.77 ms**, and one 1,000-observer campaign increased active Python CPU **9.6%** versus P3. Full-history/replay costs and individual regressions remain documented follow-ups.
+- The final package/bench/durable PostgreSQL stress suite passed **1,090 tests with zero skips**, alongside lint, an independent Ponytail review, and both scale workloads. See the [1.4 migration guide](https://malayh.github.io/tantra/docs/guides/migration-1.4/).
+
 ## 1.3.0
 
 Added:

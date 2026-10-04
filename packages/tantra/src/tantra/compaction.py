@@ -16,7 +16,7 @@ from tantra.events import (
     TurnStarted,
     Usage,
 )
-from tantra.providers.base import ModelLimits, SampleRequest, StreamEnd, UserMessage
+from tantra.providers.base import Message, ModelLimits, SampleRequest, StreamEnd, UserMessage
 from tantra.skills import SKILL_TOOL
 from tantra.tracing import current_span
 
@@ -89,9 +89,12 @@ class Compactor(Protocol):
         """
 
 
-def _rough(events: Sequence[SessionEvent], summary: str = "") -> int:
-    messages = assemble_messages(summary, events)
+def _rough_messages(messages: Sequence[Message]) -> int:
     return sum(len(json.dumps(message.model_dump(), default=str)) for message in messages) // 4
+
+
+def _rough(events: Sequence[SessionEvent], summary: str = "") -> int:
+    return _rough_messages(assemble_messages(summary, events))
 
 
 def _reported(usage: Usage) -> int:
@@ -103,7 +106,7 @@ def estimate_request_tokens(request: SampleRequest) -> int:
     return (len(payload) + 3) // 4
 
 
-def estimate_tokens(events: Sequence[SessionEvent], summary: str = "") -> int:
+def _estimate_tokens(events: Sequence[SessionEvent], rough: int) -> int:
     base = 0
     base_index = -1
     for index, event in enumerate(events):
@@ -112,7 +115,7 @@ def estimate_tokens(events: Sequence[SessionEvent], summary: str = "") -> int:
         elif isinstance(event, CompactionApplied):
             base, base_index = 0, -1
     if base_index < 0:
-        return _rough(events, summary)
+        return rough
     counted = {
         event.call_id: len(_as_content(event.result))
         for event in events[:base_index]
@@ -126,7 +129,11 @@ def estimate_tokens(events: Sequence[SessionEvent], summary: str = "") -> int:
             content = _as_content(event.result)
             added += len(content) - counted.get(event.call_id, 0)
             counted[event.call_id] = len(content)
-    return max(base + added // 4, _rough(events, summary))
+    return max(base + added // 4, rough)
+
+
+def estimate_tokens(events: Sequence[SessionEvent], summary: str = "") -> int:
+    return _estimate_tokens(events, _rough(events, summary))
 
 
 def _stub(name: str, content: str) -> str:
@@ -175,11 +182,21 @@ class PruneThenSummarize:
     async def _force_compact(self, ctx: TurnContext) -> list[SessionEvent]:
         return await self._compact(ctx, forced=True)
 
-    async def _compact(self, ctx: TurnContext, *, forced: bool) -> list[SessionEvent]:
+    async def _compact(
+        self,
+        ctx: TurnContext,
+        *,
+        forced: bool,
+        prepared: SampleRequest | None = None,
+    ) -> list[SessionEvent]:
         trigger = self.config.usable(ctx.limits)
         summary, window = compaction_window(ctx.history)
-        reported = estimate_tokens(window, summary)
-        projected = _projected(ctx, summary, window)
+        if prepared is None:
+            reported = estimate_tokens(window, summary)
+            projected = _projected(ctx, summary, window)
+        else:
+            reported = _estimate_tokens(window, _rough_messages(prepared.messages))
+            projected = estimate_request_tokens(prepared)
         before = max(reported, projected)
         if not forced and before < trigger:
             return []
@@ -206,7 +223,7 @@ class PruneThenSummarize:
         prefix = window[:boundary]
         tail = [*window[boundary:], *stubs]
         floor = next((event.turn_id for event in window[boundary:] if isinstance(event, TurnStarted)), None)
-        after_prune = _projected(ctx, summary, effective)
+        after_prune = _projected(ctx, summary, effective) if stubs else projected
         if stubs and after_prune <= target:
             return stubs
         if floor is None or not any(isinstance(event, TurnStarted) for event in prefix):

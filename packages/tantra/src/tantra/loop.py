@@ -701,7 +701,7 @@ class TurnEngine:
                 return finished
         return output
 
-    async def _compact(self, *, forced: bool = False) -> bool:
+    async def _compact(self, *, forced: bool = False, prepared: SampleRequest | None = None) -> bool:
         if self.compactor is None:
             return False
         span = self.tracer.start_compaction(self.turn_span)
@@ -711,7 +711,12 @@ class TurnEngine:
         error: BaseException | None = None
         try:
             assert self.turn is not None
-            if forced:
+            if prepared is not None:
+                from tantra.compaction import PruneThenSummarize
+
+            if prepared is not None and type(self.compactor) is PruneThenSummarize:
+                events = await self.compactor._compact(self.turn, forced=forced, prepared=prepared)
+            elif forced:
                 force = getattr(self.compactor, "_force_compact", None)
                 events = await force(self.turn) if force is not None else await self.compactor.compact(self.turn)
             else:
@@ -726,8 +731,8 @@ class TurnEngine:
         await self._append(events)
         return bool(events)
 
-    async def _recover_overflow(self, prompt: str) -> SampleRequest | None:
-        compacted = await self._compact(forced=True)
+    async def _recover_overflow(self, prompt: str, prepared: SampleRequest) -> SampleRequest | None:
+        compacted = await self._compact(forced=True, prepared=prepared)
         if not compacted:
             return None
         req = build_sample_request(
@@ -757,7 +762,7 @@ class TurnEngine:
                 child_lifecycle=self.terminal_tool == "finish",
             )
             self.turn.sample_request = req
-            compacted = await self._compact()
+            compacted = await self._compact(prepared=req)
             if compacted:
                 req = build_sample_request(
                     model=self.model,
@@ -774,7 +779,7 @@ class TurnEngine:
                 req,
                 sample_id,
                 compacted,
-                lambda prompt=prompt: self._recover_overflow(prompt),
+                lambda prompt=prompt, prepared=req: self._recover_overflow(prompt, prepared),
             )
             parts, calls, invalid = self._parts(sample_id, end)
             await self._append(parts)

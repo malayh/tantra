@@ -276,7 +276,13 @@ async def test_runtime_routes_actor_changes_without_idle_journal_reads(
     try:
         await eventually(lambda: len(coordinator._observations) == 2)
         await eventually(lambda: all(coordinator.observation(root.hex) is not None for root in (first, second)))
-        await eventually(lambda: reads[first.hex] >= 2 and reads[second.hex] >= 2)
+        await eventually(
+            lambda: all(
+                coordinator.observation(root.hex).actor_coverage == frozenset({root.hex})
+                and runtime._pages.readers[root.hex].flight is None
+                for root in (first, second)
+            )
+        )
         for _ in range(5):
             baseline = reads.copy()
             tick = coordinator.observation_ticks

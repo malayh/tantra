@@ -1730,7 +1730,7 @@ async def test_result_wait_racing_coordinator_close_preserves_terminal_or_outage
     sid = await runtime.create(Bot)
     waiter = None
     original_apply = runtime._apply_observation
-    original_observe = coordinator.observe
+    original_observe = coordinator._observe_actors
 
     async def delayed_apply(root_id: str, observation: Any) -> None:
         if waiter is not None:
@@ -1756,7 +1756,7 @@ async def test_result_wait_racing_coordinator_close_preserves_terminal_or_outage
     if stage == "snapshot":
         monkeypatch.setattr(runtime, "_apply_observation", delayed_apply)
     else:
-        monkeypatch.setattr(coordinator, "observe", delayed_observe)
+        monkeypatch.setattr(coordinator, "_observe_actors", delayed_observe)
     try:
         async with runtime.connect(sid, writable=True) as connection:
             command = uuid4()

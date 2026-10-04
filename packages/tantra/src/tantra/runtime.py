@@ -11,6 +11,7 @@ from uuid import UUID, uuid4, uuid5
 
 from pydantic import TypeAdapter
 
+from tantra._pages import CommittedPages
 from tantra.agent import Agent, agent_name, build_name_table
 from tantra.ask import ApprovalResponse, AskResponse
 from tantra.cleanup import (
@@ -176,6 +177,11 @@ class _LiveAsk:
     future: asyncio.Future[AskResponse]
 
 
+def _covers(observation: Any, actor_id: str) -> bool:
+    coverage = getattr(observation, "actor_coverage", None)
+    return coverage is None or actor_id in coverage
+
+
 def _id(value: UUID, label: str) -> tuple[UUID, str]:
     if not isinstance(value, UUID):
         raise TypeError(f"{label} must be a UUID")
@@ -311,6 +317,7 @@ class Runtime:
         self._connection_interests: dict[str, int] = {}
         self._stream_interests: dict[str, dict[str, int]] = {}
         self._wait_interests: dict[str, dict[str, int]] = {}
+        self._pages = CommittedPages(lambda sid, **kwargs: self.store.read_page(sid, **kwargs))
         self._observations: dict[str, Any] = {}
         self._observation_errors: dict[str, CoordinatorUnavailable] = {}
         self._connections: dict[UUID, Connection] = {}
@@ -459,13 +466,20 @@ class Runtime:
             return
         self._watchers[root_id] = asyncio.create_task(self._watch(root_id))
 
+    def _sync_actor_interests(self, root_id: str) -> None:
+        setter = getattr(self.coordinator, "_set_actor_interests", None)
+        if setter is not None:
+            setter(root_id, set(self._stream_interests.get(root_id, {})) | set(self._wait_interests.get(root_id, {})))
+
     def _retain_connection_interest(self, root_id: str) -> None:
         self._connection_interests[root_id] = self._connection_interests.get(root_id, 0) + 1
+        self._sync_actor_interests(root_id)
         self._watch_root(root_id)
 
     def _retain_actor_interest(self, interests: dict[str, dict[str, int]], root_id: str, actor_id: str) -> None:
         actors = interests.setdefault(root_id, {})
         actors[actor_id] = actors.get(actor_id, 0) + 1
+        self._sync_actor_interests(root_id)
         self._watch_root(root_id)
 
     def _interested(self, root_id: str) -> bool:
@@ -481,11 +495,13 @@ class Runtime:
         task = self._watchers.pop(root_id, None)
         self._observations.pop(root_id, None)
         self._observation_errors.pop(root_id, None)
-        if task is asyncio.current_task():
-            return
-        if task is not None:
+        if task is not None and task is not asyncio.current_task():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        if not self._interested(root_id) and root_id not in self._watchers:
+            setter = getattr(self.coordinator, "_set_actor_interests", None)
+            if setter is not None:
+                setter(root_id, None)
 
     async def _release_connection_interest(self, root_id: str) -> None:
         count = self._connection_interests.get(root_id, 0)
@@ -510,6 +526,7 @@ class Runtime:
                 actors[actor_id] = count - 1
             if not actors:
                 interests.pop(root_id, None)
+        self._sync_actor_interests(root_id)
         await self._stop_watcher_if_unused(root_id)
 
     async def _watch(self, root_id: str) -> None:
@@ -530,7 +547,8 @@ class Runtime:
         assert self.coordinator is not None
         interval = float(getattr(self.coordinator, "catch_up_interval", 2.0))
         while not self._closed:
-            iterator = self.coordinator.observe(root_id)
+            observe = getattr(self.coordinator, "_observe_actors", self.coordinator.observe)
+            iterator = observe(root_id)
             try:
                 async for observation in iterator:
                     await self._apply_observation(root_id, observation)
@@ -566,6 +584,7 @@ class Runtime:
                 actor_id
                 for actor_id in streams
                 if previous.actors.get(actor_id, (None, False))[0] != observation.actors.get(actor_id, (None, False))[0]
+                or _covers(previous, actor_id) != _covers(observation, actor_id)
             }
             root_changed = (
                 previous.owner_instance != observation.owner_instance
@@ -579,6 +598,7 @@ class Runtime:
                 for actor_id in waiters
                 if previous.sample != observation.sample
                 or previous.actors.get(actor_id) != observation.actors.get(actor_id)
+                or _covers(previous, actor_id) != _covers(observation, actor_id)
                 or (getattr(previous, "terminal_sequences", None) or {}).get(actor_id)
                 != (getattr(observation, "terminal_sequences", None) or {}).get(actor_id)
                 or root_changed
@@ -727,6 +747,10 @@ class Runtime:
             last = await self.store.append(agent_id, events)
         first = last - len(events) + 1
         stamped = [Stamped(seq=first + index, event=event) for index, event in enumerate(events)]
+        if store is None:
+            self._pages.advance(agent_id, last)
+            if type(self.store) is PostgresStore and agent_id in self._pages.readers:
+                self._pages.publish(agent_id, [Stamped.model_validate_json(item.model_dump_json()) for item in stamped])
         await self._notify(agent_id)
         return stamped
 
@@ -1204,6 +1228,8 @@ class Runtime:
 
     async def _finish_deletion(self, root_id: str, ids: list[str], tasks: Sequence[asyncio.Task[None]] = ()) -> None:
         ids = list(set(ids) | {actor for actor, root in self._known_roots.items() if root == root_id})
+        for actor_id in ids:
+            self._pages.invalidate(actor_id)
         self._deleting.add(root_id)
         pending = list(tasks)
         for actor_id in ids:
@@ -1293,8 +1319,12 @@ class Runtime:
             raise ValueError("after must be non-negative")
         header = await self._header(sid)
         self._known_roots[sid] = header.root_id or header.id
-        async for item in self._stream(public_id, sid, after, None):
-            yield item
+        iterator = self._stream(public_id, sid, after, None)
+        try:
+            async for item in iterator:
+                yield item
+        finally:
+            await iterator.aclose()
 
     async def _stream(
         self,
@@ -1308,6 +1338,16 @@ class Runtime:
         root_id = connection._root if connection is not None else self._known_roots.get(sid, sid)
         self._retain_actor_interest(self._stream_interests, root_id, sid)
         try:
+            if type(self.store) is PostgresStore and type(self.coordinator) is PostgresCoordinator:
+                self._pages.retain(sid)
+                iterator = self._stream_committed(public_id, sid, cursor, connection, root_id)
+                try:
+                    async for item in iterator:
+                        yield item
+                finally:
+                    await iterator.aclose()
+                    await self._pages.release(sid)
+                return
             while True:
                 if connection is not None:
                     connection._check_iteration()
@@ -1345,6 +1385,53 @@ class Runtime:
                             await signal.condition.wait()
         finally:
             await self._release_actor_interest(self._stream_interests, root_id, sid)
+
+    async def _stream_committed(
+        self, public_id: UUID, sid: str, cursor: int, connection: Connection | None, root_id: str
+    ) -> AsyncIterator[LoggedEvent]:
+        signal = self._signal(sid)
+        header = await self._header(sid)
+        self._pages.advance(sid, header.last_seq)
+        fallback_generation: int | None = None
+        while True:
+            generation = signal.generation
+            self._pages.check(sid)
+            if connection is not None:
+                connection._check_iteration()
+            if self._closing or self._closed:
+                return
+            observation = self._current_observation(root_id)
+            error = self._observation_errors.get(root_id)
+            if error is not None:
+                raise error
+            if observation is not None:
+                if observation.deleted:
+                    raise SessionNotFound(sid)
+                if observation.error is not None:
+                    raise observation.error
+                if _covers(observation, sid):
+                    self._pages.advance(sid, observation.actors.get(sid, (0, False))[0])
+            covered = observation is not None and _covers(observation, sid)
+            if cursor < self._pages.high_water(sid) or not covered and fallback_generation != generation:
+                page = await self._pages.page(sid, after=cursor)
+                if page:
+                    for item in page:
+                        self._pages.check(sid)
+                        if connection is not None:
+                            connection._check_iteration()
+                        cursor = item.seq
+                        yield LoggedEvent(agent_id=public_id, seq=item.seq, event=item.event)
+                    continue
+                header = await self._header(sid)
+                self._pages.advance(sid, header.last_seq)
+                fallback_generation = generation
+                if cursor < header.last_seq:
+                    continue
+            if self._closing or self._closed:
+                return
+            async with signal.condition:
+                if signal.generation == generation and not self._closing and not self._closed:
+                    await signal.condition.wait()
 
     async def _skill_index(self, agent: type[Agent]) -> list[SkillInfo]:
         if self.skills is None or agent.skills == []:
@@ -2491,6 +2578,8 @@ class Runtime:
         signal = self._wait_signal(agent_id)
         inactive = 0
         observation = self._current_observation(root_id)
+        if observation is not None and not _covers(observation, agent_id):
+            observation = None
         seen_observation = observation is not None
         last_seq = observation.actors.get(agent_id, (None, False))[0] if observation is not None else None
         terminals = getattr(observation, "terminal_sequences", None)
@@ -2529,6 +2618,11 @@ class Runtime:
                     if not self._closing and not self._closed:
                         raise observation.error
                     await self._close_complete.wait()
+                    continue
+                if not _covers(observation, agent_id):
+                    async with signal.condition:
+                        if signal.generation == generation and not self._closed:
+                            await signal.condition.wait()
                     continue
                 actor = observation.actors.get(agent_id)
                 seq = actor[0] if actor is not None else None
@@ -2725,6 +2819,7 @@ class Runtime:
             finally:
                 self._closed = True
                 self._closing = False
+                await self._pages.close()
                 self._close_complete.set()
             return
         self._closing = True
@@ -2733,6 +2828,7 @@ class Runtime:
             await self._close_local()
         finally:
             self._closing = False
+            await self._pages.close()
             self._close_complete.set()
 
     async def _close_local(self) -> None:

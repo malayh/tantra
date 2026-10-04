@@ -184,7 +184,8 @@ async def test_shared_observation_uses_terminal_index_without_event_body_reads(
                 body = observed_sql[0].as_string(conn)
                 assert ".events" not in body and "stamped" not in body
                 cursor = await conn.execute(
-                    sql.SQL("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ") + observed_sql[0], ([header.id], [])
+                    sql.SQL("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ") + observed_sql[0],
+                    ([header.id], [header.id], [], [], []),
                 )
                 plan = (await cursor.fetchone())[0]
             serialized = json.dumps(plan)

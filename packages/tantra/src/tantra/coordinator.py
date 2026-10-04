@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -164,11 +164,14 @@ class RootObservation:
     error: CoordinatorUnavailable | None = None
     deleted: bool = False
     terminal_sequences: dict[str, int] | None = None
+    actor_coverage: frozenset[str] | None = None
 
 
 @dataclass
 class _Observation:
     users: int = 0
+    full_users: int = 0
+    interest_epoch: int = 0
     generation: int = 0
     snapshot: RootObservation | None = None
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
@@ -263,6 +266,7 @@ class PostgresCoordinator:
         self._listener_conn: Any = None
         self._listener_task: asyncio.Task[None] | None = None
         self._observations: dict[str, _Observation] = {}
+        self._actor_interests: dict[str, frozenset[str]] = {}
         self._dirty_roots: set[str] = set()
         self._journal_deadlines: dict[str, float] = {}
         self._observation_event = asyncio.Event()
@@ -306,6 +310,7 @@ class PostgresCoordinator:
                 task.cancel()
         await asyncio.gather(*(task for task in tasks if task is not None), return_exceptions=True)
         self._dispatchers.clear()
+        self._actor_interests.clear()
         self._dirty_roots.clear()
         self._journal_deadlines.clear()
         if self._listener_conn is not None:
@@ -636,9 +641,44 @@ class PostgresCoordinator:
         return state.snapshot if state is not None else None
 
     async def observe(self, root_id: str) -> AsyncIterator[RootObservation]:
+        iterator = self._observe_scope(root_id, full=True)
+        try:
+            async for snapshot in iterator:
+                yield snapshot
+        finally:
+            await iterator.aclose()
+
+    def _set_actor_interests(self, root_id: str, actors: Collection[str] | None) -> None:
+        if actors is None:
+            if root_id not in self._actor_interests:
+                return
+            self._actor_interests.pop(root_id)
+        else:
+            interests = frozenset(actors)
+            if self._actor_interests.get(root_id) == interests and root_id in self._actor_interests:
+                return
+            self._actor_interests[root_id] = interests
+        state = self._observations.get(root_id)
+        if state is not None:
+            state.interest_epoch += 1
+            self._schedule(root_id)
+
+    async def _observe_actors(self, root_id: str) -> AsyncIterator[RootObservation]:
+        iterator = self._observe_scope(root_id, full=False)
+        try:
+            async for snapshot in iterator:
+                yield snapshot
+        finally:
+            await iterator.aclose()
+
+    async def _observe_scope(self, root_id: str, *, full: bool) -> AsyncIterator[RootObservation]:
         self._ensure_started()
         state = self._observations.setdefault(root_id, _Observation())
         state.users += 1
+        if full:
+            if state.full_users == 0:
+                state.interest_epoch += 1
+            state.full_users += 1
         self._schedule(root_id)
         generation = -1
         try:
@@ -649,14 +689,20 @@ class PostgresCoordinator:
                     )
                     generation = state.generation
                     snapshot = state.snapshot
-                if snapshot is not None:
+                if snapshot is not None and (snapshot.error is not None or not full or snapshot.actor_coverage is None):
                     yield snapshot
         finally:
             state.users -= 1
+            if full:
+                state.full_users -= 1
+                if state.full_users == 0:
+                    state.interest_epoch += 1
             if state.users == 0 and self._observations.get(root_id) is state:
                 self._observations.pop(root_id, None)
                 self._dirty_roots.discard(root_id)
                 self._journal_deadlines.pop(root_id, None)
+            elif full and state.full_users == 0 and self._observations.get(root_id) is state:
+                self._schedule(root_id)
 
     async def watch(self, root_id: str, *, after: int = 0) -> AsyncIterator[ChangeNotice]:
         cursor = max(after, 0)
@@ -930,6 +976,22 @@ class PostgresCoordinator:
                 await self._catch_up(roots, periodic=periodic)
 
     async def _catch_up(self, roots: set[str], *, periodic: bool) -> None:
+        scopes = {
+            root: (
+                state,
+                state.interest_epoch,
+                None if state.full_users > 0 or root not in self._actor_interests else self._actor_interests[root],
+            )
+            for root in roots
+            if (state := self._observations.get(root)) is not None
+        }
+        roots = set(scopes)
+        if not roots:
+            return
+        full_roots = sorted(root for root, (_, _, actors) in scopes.items() if actors is None)
+        actor_pairs = sorted(
+            (root, actor) for root, (_, _, actors) in scopes.items() if actors is not None for actor in actors
+        )
         request_ids = [str(key) for key, (root, _) in self._pending_requests.items() if root in roots]
         try:
             async with self._data_connection() as conn:
@@ -937,6 +999,9 @@ class PostgresCoordinator:
                 cursor = await conn.execute(
                     self._sql(
                         "WITH interested AS (SELECT unnest(%s::text[]) AS root_id)"
+                        ", full_roots AS (SELECT unnest(%s::text[]) AS root_id)"
+                        ", actor_interests AS (SELECT * FROM unnest(%s::text[], %s::text[])"
+                        " AS interests(root_id, actor_id))"
                         " SELECT 'root', i.root_id, NULL::text, jsonb_build_object("
                         " 'change_id', coalesce(c.id, 0), 'writer', r.writer_connection,"
                         " 'owner', r.owner_instance, 'generation', coalesce(r.generation, 0),"
@@ -947,13 +1012,17 @@ class PostgresCoordinator:
                         " LEFT JOIN {schema}.deleted_sessions d ON d.actor_id = i.root_id"
                         " LEFT JOIN LATERAL (SELECT id FROM {schema}.coordinator_changes"
                         " WHERE root_id = i.root_id ORDER BY id DESC LIMIT 1) c ON true"
-                        " UNION ALL SELECT 'actor', i.root_id, s.id, jsonb_build_array(s.last_seq,"
+                        " UNION ALL SELECT 'actor', s.root_id, s.id, jsonb_build_array(s.last_seq,"
                         " coalesce(a.active AND r.owner_instance IS NOT NULL"
                         " AND r.expires_at > clock_timestamp(), false), coalesce(t.seq, 0))"
-                        " FROM interested i JOIN {schema}.sessions s"
-                        " ON s.root_key = i.root_id"
-                        " LEFT JOIN {schema}.coordinator_activity a ON a.root_id = i.root_id AND a.actor_id = s.id"
-                        " LEFT JOIN {schema}.coordinator_roots r ON r.root_id = i.root_id"
+                        " FROM (SELECT f.root_id, actor.id, actor.last_seq"
+                        " FROM full_roots f JOIN {schema}.sessions actor ON actor.root_key = f.root_id"
+                        " UNION ALL SELECT i.root_id, actor.id, actor.last_seq"
+                        " FROM actor_interests i JOIN LATERAL (SELECT actor.id, actor.last_seq, actor.root_key"
+                        " FROM {schema}.sessions actor WHERE actor.id = i.actor_id OFFSET 0) actor"
+                        " ON actor.root_key = i.root_id) s"
+                        " LEFT JOIN {schema}.coordinator_activity a ON a.root_id = s.root_id AND a.actor_id = s.id"
+                        " LEFT JOIN {schema}.coordinator_roots r ON r.root_id = s.root_id"
                         " LEFT JOIN LATERAL (SELECT seq FROM {schema}.journal_index"
                         " WHERE actor_id = s.id AND seq <= s.last_seq AND event_type IN"
                         " ('turn_completed', 'turn_failed', 'turn_cancelled', 'turn_interrupted')"
@@ -961,7 +1030,13 @@ class PostgresCoordinator:
                         " UNION ALL SELECT 'reply', request_id::text, NULL::text, reply"
                         " FROM {schema}.coordinator_requests WHERE request_id = ANY(%s::uuid[])"
                     ),
-                    (sorted(roots), request_ids),
+                    (
+                        sorted(roots),
+                        full_roots,
+                        [root for root, _ in actor_pairs],
+                        [actor for _, actor in actor_pairs],
+                        request_ids,
+                    ),
                 )
                 rows = await cursor.fetchall()
             if periodic:
@@ -979,8 +1054,9 @@ class PostgresCoordinator:
                 elif UUID(key) in self._pending_requests:
                     self._observed_replies[UUID(key)] = CommandReply.model_validate(data) if data else None
             for root_id, data in headers.items():
-                state = self._observations.get(root_id)
-                if state is None:
+                state, epoch, coverage = scopes[root_id]
+                if self._observations.get(root_id) is not state or state.interest_epoch != epoch:
+                    self._schedule(root_id)
                     continue
                 snapshot = RootObservation(
                     root_id=root_id,
@@ -995,6 +1071,7 @@ class PostgresCoordinator:
                     expires_at=datetime.fromisoformat(data["expires"]) if data["expires"] else None,
                     deleted=bool(data["deleted"]),
                     terminal_sequences=terminals[root_id],
+                    actor_coverage=coverage,
                 )
                 async with state.condition:
                     state.snapshot = snapshot
@@ -1004,11 +1081,21 @@ class PostgresCoordinator:
             error = CoordinatorUnavailable("cannot catch up coordinator observations")
             error.__cause__ = exc
             for root_id in roots:
-                state = self._observations.get(root_id)
-                if state is None:
+                state, epoch, coverage = scopes[root_id]
+                if self._observations.get(root_id) is not state or state.interest_epoch != epoch:
+                    self._schedule(root_id)
                     continue
                 snapshot = state.snapshot or RootObservation(
-                    root_id, self._observation_sample, 0, None, None, 0, False, {}, {}
+                    root_id,
+                    self._observation_sample,
+                    0,
+                    None,
+                    None,
+                    0,
+                    False,
+                    {},
+                    {},
+                    actor_coverage=coverage,
                 )
                 async with state.condition:
                     state.snapshot = replace(snapshot, error=error)

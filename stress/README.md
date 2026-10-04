@@ -25,6 +25,8 @@ just bench baseline --stress
 just bench baseline --sessions 12 --histories 40 400 --samples 1
 just bench baseline --history-mode compacted --output stress/bench/artifacts/compacted
 just bench scale
+just bench cpu --stress
+just bench cpu --scenario text-1024-readers-8 --sessions 12 --samples 1
 just bench live
 just bench live --scenario sql_read
 just bench live --suite smoke
@@ -51,3 +53,15 @@ The stable `journal-scaling` campaign has a 5,000,000-token ceiling across rerun
 The approved [scaling spec](../design/013_journal_scaling_and_live_bench.md) defines phase gates. Current stress tests remain useful deterministic regression coverage; `baseline --stress` runs them against the bench database and rejects skips.
 
 P3 serial latency regressions remain a documented follow-up. P4 gates behavioral correctness and bounded database/resource use; it does not require latency tuning. Reports separate provider waits, worker CPU/SQL, committed tool and post-provider timing boundaries, and model behavior failures. Behavioral gate measurements include oracle reads; they are not isolated runtime overhead. Performance regressions remain visible.
+
+## Active-stream CPU bench
+
+`just bench cpu` records a pre-optimization baseline for [spec 016](../design/016_active_runtime_cpu.md). It uses two Runtime worker processes, 10,000 unrelated stored sessions, normal PostgreSQL durability, and CPU-only Compose instrumentation. Existing baseline/scale fixtures and database configuration remain unchanged. No event hooks or inference requests run.
+
+Nine primary cases emit the same 16 KiB output in 64/256/1,024 unique ordered fragments, with 0/1/8 extra readers. Each primary case gets a warm-up and five measured trials by default; execution order rotates and reverses. Extended cases get a warm-up and one measured trial: paced output, an 8,192-fragment 128 KiB stream, reasoning, tool arguments, tool progress, a slow reader, 100 children, 4,000/100,000-event full/compacted histories, and an every-delta commit audit. These single-trial costs are exploratory, not improvement claims. Repeat `--scenario` to filter the fixed cases; `--samples` sets primary repetitions. A filtered/small run is not marked baseline-eligible.
+
+Each report distinguishes owner/reader Python process CPU and database cgroup CPU, top-level/nested SQL, WAL, memory, event-loop delay, observation/notification activity, and emission-to-reader delivery delay. Process windows include control IPC and commit probes; PostgreSQL CPU includes background work and counter probes. SQL statements include nested guards with planning instrumentation consistently disabled. Fixture seeding, warm-ups, full database audits, and cleanup are outside measured windows.
+
+Reader sequence/content digests are compared against independently decoded SQL journal rows. First/middle/last delta probes check committed watermarks; the dedicated commit-audit case checks every delta. `--cpu-failure order|duplicate|drop|premature` deliberately fails the relevant oracle, writes a FAILED report, and exits nonzero. CPU comparison rejects incompatible instrumentation, fixture/trial identities, failed evidence, and changed replay digests.
+
+`cpu --stress` runs package, bench, and PostgreSQL stress tests against its owned durable database and rejects skipped cases. Reports and records stay under ignored `stress/bench/artifacts/`; the owned workers, Compose project, and volume are removed afterward. P0 changes benchmark code only. Runtime CPU reductions and matched before/after comparisons belong to the following phases.

@@ -18,6 +18,7 @@ from psycopg import sql
 
 from stress.bench.behavior import BEHAVIOR_AGENTS, COMPACTION, BehaviorState, prepare_behavior_skills
 from stress.bench.cleanup import CleanupState
+from stress.bench.cpu_workload import CPUAgent, CPUProvider, CPUState
 from stress.bench.faults import FAULT_AGENTS, FaultState
 from stress.bench.providers import RecordedProvider, live_provider
 from stress.driver import SyntheticProvider, call_policy
@@ -93,6 +94,8 @@ class Metrics:
     event_body_queries: int = 0
     event_body_rows: int = 0
     result_queries: int = 0
+    turn_boundary_queries: int = 0
+    header_queries: int = 0
 
     def clear(self) -> None:
         self.sql_calls = self.fetched_rows = 0
@@ -101,7 +104,7 @@ class Metrics:
         self.loop_lag_ms.clear()
         self.journal_queries = self.journal_rows = 0
         self.event_body_queries = self.event_body_rows = 0
-        self.result_queries = 0
+        self.result_queries = self.turn_boundary_queries = self.header_queries = 0
 
 
 METRICS = Metrics()
@@ -175,6 +178,8 @@ class MeasuredCursor(psycopg.AsyncCursor):
         METRICS.journal_queries += int(self._bench_journal_query)
         METRICS.event_body_queries += int(self._bench_event_body_query)
         METRICS.result_queries += int(rendered.lstrip().upper().startswith("SELECT REPLY FROM"))
+        METRICS.turn_boundary_queries += int(rendered.lstrip().upper().startswith("SELECT MIN(SEQ) FILTER"))
+        METRICS.header_queries += int(rendered.lstrip().upper().startswith("SELECT HEADER, LAST_SEQ FROM"))
         try:
             return await super().execute(*args, **kwargs)
         finally:
@@ -319,7 +324,9 @@ class GatedProvider:
     def __init__(self, settings: dict[str, Any]) -> None:
         self.gate = asyncio.Event()
         self.gate.set()
-        if settings["mode"] == "live":
+        if settings["mode"] == "cpu":
+            self.source = CPUProvider()
+        elif settings["mode"] == "live":
             self.source = live_provider(settings)
         elif settings["mode"] == "replay":
             self.source = RecordedProvider(
@@ -394,8 +401,13 @@ class WorkerState:
         self.behavior = BehaviorState(runtime, provider)
         self.faults = FaultState(runtime, provider)
         self.cleanup = CleanupState(runtime, BenchAgent)
+        self.cpu = CPUState(runtime, provider) if isinstance(provider.source, CPUProvider) else None
 
     async def operation(self, request: dict[str, Any]) -> dict[str, Any]:
+        if self.cpu is not None:
+            result = await self.cpu.operation(request)
+            if result is not None:
+                return result
         op = request["op"]
         sid = request.get("sid", "")
         if op == "claim":
@@ -564,7 +576,7 @@ async def serve(pipe: Any, settings: dict[str, Any]) -> None:
     runtime = Runtime(
         provider,
         store,
-        [BenchAgent, *BEHAVIOR_AGENTS, *FAULT_AGENTS],
+        [BenchAgent, *BEHAVIOR_AGENTS, *FAULT_AGENTS, *([CPUAgent] if settings["mode"] == "cpu" else [])],
         default_model=settings["model"],
         deps_factory=lambda _: (settings["dsn"], settings["schema"], slots),
         coordinator=PostgresCoordinator(store, **COORDINATOR_SETTINGS),
@@ -582,7 +594,8 @@ async def serve(pipe: Any, settings: dict[str, Any]) -> None:
             request = await asyncio.to_thread(pipe.recv)
             if request["op"] == "close":
                 break
-            METRICS.clear()
+            if state.cpu is None or not state.cpu.measuring:
+                METRICS.clear()
             provider_before = len(provider.requests)
             timings = getattr(provider.source, "timings", [])
             timing_before = len(timings)
@@ -628,6 +641,8 @@ async def serve(pipe: Any, settings: dict[str, Any]) -> None:
             }
             pipe.send(reply)
     finally:
+        if state.cpu is not None:
+            await state.cpu.close()
         await state.behavior.close()
         await state.cleanup.close()
         await state.faults.close()

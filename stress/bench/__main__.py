@@ -35,7 +35,8 @@ MODEL = "z-ai/glm-5.3-flash"
 
 
 class Database(AbstractContextManager):
-    def __init__(self) -> None:
+    def __init__(self, *, cpu: bool = False) -> None:
+        self.cpu = cpu
         self.project = f"tantra-bench-{uuid4().hex[:12]}"
         self.dsn = ""
         self.metadata: dict[str, Any] = {}
@@ -44,8 +45,11 @@ class Database(AbstractContextManager):
             self.port = listener.getsockname()[1]
 
     def command(self, *args: str) -> str:
+        files = ["-f", str(COMPOSE)]
+        if self.cpu:
+            files += ["-f", str(COMPOSE.with_name("cpu.compose.yaml"))]
         result = subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE), "-p", self.project, *args],
+            ["docker", "compose", *files, "-p", self.project, *args],
             capture_output=True,
             text=True,
             timeout=180,
@@ -162,6 +166,13 @@ def summarize(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def write_report(report: dict[str, Any], directory: Path) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     report["summary"] = summarize(report.get("samples", []))
+    cpu_section = ""
+    if report["mode"] == "cpu" or report.get("cpu_changes"):
+        from stress.bench.cpu import cpu_html, cpu_summary
+
+        if report["mode"] == "cpu":
+            report["cpu_summary"] = cpu_summary(report.get("samples", []))
+        cpu_section = cpu_html(report)
     encoded = json.dumps(report, indent=2, default=str)
     (directory / "report.json").write_text(encoded)
     rows = "".join(
@@ -202,6 +213,7 @@ def write_report(report: dict[str, Any], directory: Path) -> None:
     )
     failed = (
         report.get("error")
+        or report.get("complete") is False
         or any(row["errors"] for row in report["summary"])
         or any(row["status"] != "passed" for row in scenarios)
     )
@@ -269,7 +281,7 @@ def write_report(report: dict[str, Any], directory: Path) -> None:
         "<div class='scroll'><table><thead><tr><th>Operation</th><th>N</th><th>Errors</th>"
         "<th>Median ms</th><th>P95 ms</th><th>Median SQL</th><th>Median fetched rows</th>"
         f"<th>Median CPU ms</th><th>Max RSS MB</th></tr></thead><tbody>{rows}</tbody></table></div>"
-        f"{behavior}{provider}{runtime_timing}{resources}{accounting}{comparison}"
+        f"{cpu_section}{behavior}{provider}{runtime_timing}{resources}{accounting}{comparison}"
         "<details><summary>Raw evidence and environment</summary>"
         f"<pre>{html.escape(encoded)}</pre></details></html>"
     )
@@ -485,12 +497,17 @@ def compare(before: Path, after: Path) -> dict[str, Any]:
                 "p95_change_ms": row["elapsed_ms"]["p95"] - previous["elapsed_ms"]["p95"],
             }
         )
-    return {"mode": "compare", "samples": [], "before": str(before), "after": str(after), "changes": changes}
+    report = {"mode": "compare", "samples": [], "before": str(before), "after": str(after), "changes": changes}
+    if left.get("mode") == "cpu" or right.get("mode") == "cpu":
+        from stress.bench.cpu import compare_cpu
+
+        report["cpu_changes"] = compare_cpu(left, right)
+    return report
 
 
 def parser() -> argparse.ArgumentParser:
     made = argparse.ArgumentParser(description="Compose-backed Tantra Runtime bench; only live makes paid requests")
-    made.add_argument("mode", choices=("baseline", "live", "replay", "scale", "compare"))
+    made.add_argument("mode", choices=("baseline", "live", "replay", "scale", "cpu", "compare"))
     made.add_argument("--sessions", type=int, default=10_000)
     made.add_argument("--histories", type=int, nargs="+", default=[4_000, 100_000])
     made.add_argument("--samples", type=int, default=5)
@@ -503,6 +520,7 @@ def parser() -> argparse.ArgumentParser:
     made.add_argument("--scenario", action="append", help="run only the named behavioral or fault scenario")
     made.add_argument("--faults", action="store_true", help="run deterministic fault scenarios in scale mode")
     made.add_argument("--inject-oracle-failure", action="store_true", help="prove the fault oracle fails the run")
+    made.add_argument("--cpu-failure", choices=("order", "duplicate", "drop", "premature"))
     made.add_argument("--output", type=Path)
     made.add_argument("--before", type=Path)
     made.add_argument("--after", type=Path)
@@ -518,6 +536,13 @@ def main(argv: list[str] | None = None) -> int:
     report: dict[str, Any] = {"mode": args.mode, "samples": [], "created_at": datetime.now(UTC).isoformat()}
     workers: list[Worker] = []
     try:
+        if args.mode == "cpu":
+            from stress.bench.cpu import cpu_campaign
+
+            cpu_campaign(report, args, Database, Worker)
+            return 0
+        if args.cpu_failure:
+            raise ValueError("--cpu-failure requires cpu mode")
         if args.mode == "compare":
             if args.before is None or args.after is None:
                 raise ValueError("compare requires --before and --after report.json paths")

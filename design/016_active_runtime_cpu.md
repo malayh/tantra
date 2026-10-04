@@ -46,13 +46,16 @@ Reduce Python and PostgreSQL CPU during streaming, observation, and reader fan-o
 - The CLI comparator self-check passed with identical input reports; this verifies reporting, not an optimization gain. Failed/superseded runs remain retained; `016-p0-baseline-final` is the authoritative baseline.
 - Owned workers, Compose container, and volume were removed; watcher/subscription counts and expired transport backlog returned to zero. No paid inference ran. Stop after P0; matched optimization comparisons begin in P1.
 
-### P1 — Reduce observation and result amplification · deps: P0 · —
+### P1 — Reduce observation and result amplification · deps: P0 · DONE
 
 **Deliver**
 - Debounce journal-only notification hints by 25 ms using a fixed first-dirty deadline. Keep writer, ownership, activity, recovery, deletion, request, and reply handling immediate.
 - Retain periodic authoritative catch-up and distinct samples for inactive-owner detection.
 - Add migration 10 with a partial index for the latest terminal event. Extend optional observation metadata with journal-authoritative terminal sequences; retain existing actor tuple shapes.
 - Check results initially and when terminal evidence advances, rather than after every delta. A later completed turn must still wake a waiter for an older command. Custom coordinators retain existing fallback behavior.
+- Use the existing observation scheduler for fixed per-root journal deadlines; control hints preempt their own root without delaying unrelated control work. Remove deadlines when interest ends or the coordinator closes.
+- Optional `terminal_sequences` metadata defaults to unavailable; actor tuples remain `(sequence, active)`. PostgreSQL obtains terminal evidence in the shared observation statement without reading event bodies.
+- Capture a fresh unchanged before campaign, then run the identical after campaign and compare with both it and the retained P0 baseline. Preserve bench identities and instrumentation.
 
 **Verify**
 - Exercise missed notifications, successive terminals before wake-up, prestart cancellation, owner expiry, deletion, and shutdown.
@@ -60,8 +63,15 @@ Reduce Python and PostgreSQL CPU during streaming, observation, and reader fan-o
 - Run matching before/after CPU benchmarks and report observation and result-read reductions.
 
 **Checklist**
-- [ ] Debounce and terminal-aware waits
-- [ ] Migration, correctness, and comparison evidence
+- [x] Debounce and terminal-aware waits
+- [x] Migration, correctness, and comparison evidence
+
+**Verification — 2026-10-04**
+- [Fresh before](../stress/bench/artifacts/016-p1-before/report.html), [after](../stress/bench/artifacts/016-p1-after/report.html), [matched comparison](../stress/bench/artifacts/016-p1-comparison/report.html), and [retained P0 comparison](../stress/bench/artifacts/016-p1-vs-p0/report.html) passed. Each CPU campaign retained 21 warmed scenarios and 57 measured trials; benchmark source, instrumentation, database image/settings, and workload identities match. All matching replay digests and independent commit probes passed.
+- On five-trial 1,024-fragment cases with 0/1/8 extra readers, median total Python CPU fell **22.2%/41.0%/51.2%**, PostgreSQL CPU fell **37.7%/52.1%/59.4%**, and observation queries fell **77.4–77.7%**. Turn-boundary queries fell from **1,029 to 2**; median wall time fell **11.9–14.0%**.
+- Remote-reader first delivery increased from roughly **8–10 ms to 21–23 ms**; delivery P95 increased from **12–17 ms to 29–34 ms**. The 64-fragment/no-extra-reader wall P95 rose **45.04 ms** despite a lower median; cause is not isolated. Retained-P0 4,000-event full/compacted cases rose **4.37/25.68 ms**, each one exploratory trial. Primary nested write-statement counts are unchanged; WAL rose **0.04–1.76%**. Individual commits, reader duplication, full-context costs, and the previously deferred P3 latency findings remain for later work.
+- **37 focused checks** and **1,010 package/bench/durable PostgreSQL stress tests passed, zero skips**; `just lint` and one independent Ponytail review passed. Migration rollback/retry preserves journal bodies and sequences. Actual shared-observation plans use `journal_terminal_idx` with one index-only result at 4,000 and 100,000 events, without event-body reads. Plans and review evidence are retained under `016-p1-checks`.
+- Owned workers, Compose databases, and volumes were removed; watcher/subscription counts and expired transport backlog returned to zero. No paid inference or application changes. Stop after P1; P2 remains unstarted.
 
 ### P2 — Bounded durable delta batching · deps: P1 · —
 

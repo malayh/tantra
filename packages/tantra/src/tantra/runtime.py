@@ -578,6 +578,8 @@ class Runtime:
                 for actor_id in waiters
                 if previous.sample != observation.sample
                 or previous.actors.get(actor_id) != observation.actors.get(actor_id)
+                or (getattr(previous, "terminal_sequences", None) or {}).get(actor_id)
+                != (getattr(observation, "terminal_sequences", None) or {}).get(actor_id)
                 or root_changed
             }
         if observation.error is not None:
@@ -2488,6 +2490,8 @@ class Runtime:
         observation = self._current_observation(root_id)
         seen_observation = observation is not None
         last_seq = observation.actors.get(agent_id, (None, False))[0] if observation is not None else None
+        terminals = getattr(observation, "terminal_sequences", None)
+        last_terminal = terminals.get(agent_id, 0) if terminals is not None else None
         last_sample = observation.sample if observation is not None else None
         result = await self._result(agent_id, command_id)
         error = self._errors.get(agent_id, {}).get(cid)
@@ -2525,9 +2529,17 @@ class Runtime:
                     continue
                 actor = observation.actors.get(agent_id)
                 seq = actor[0] if actor is not None else None
-                if not seen_observation or seq != last_seq:
-                    seen_observation = True
-                    last_seq = seq
+                terminals = getattr(observation, "terminal_sequences", None)
+                terminal = terminals.get(agent_id, 0) if terminals is not None else None
+                changed = (
+                    not seen_observation or seq != last_seq
+                    if terminal is None
+                    else last_terminal is None or terminal > last_terminal
+                )
+                seen_observation = True
+                last_seq = seq
+                last_terminal = terminal
+                if changed:
                     result = await self._result(agent_id, command_id)
                     error = self._errors.get(agent_id, {}).get(cid)
                     if error is not None and result is None:

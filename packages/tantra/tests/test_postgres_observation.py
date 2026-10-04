@@ -11,7 +11,16 @@ from uuid import uuid4
 import pytest
 
 from tantra import Agent, PostgresCoordinator, PostgresStore, Runtime, SessionHeader
-from tantra.events import InputQueued, SessionCreated
+from tantra.coordinator import _Observation
+from tantra.events import (
+    InputQueued,
+    SessionCreated,
+    TextDelta,
+    TurnCancelled,
+    TurnCompleted,
+    TurnFailed,
+    TurnInterrupted,
+)
 from tantra.providers.base import ModelLimits, ProviderEvent, SampleRequest, StreamEnd
 from tantra.providers.fake import FAKE_LIMITS
 
@@ -39,6 +48,149 @@ async def eventually(predicate: Any, timeout: float = 5) -> None:
 
 async def close_all(iterators: list[Any]) -> None:
     await asyncio.gather(*(iterator.aclose() for iterator in iterators))
+
+
+async def test_journal_hint_deadline_does_not_slide_under_continuous_notifications(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = PostgresStore("unused")
+    coordinator = PostgresCoordinator(store, catch_up_interval=10)
+    coordinator._observations["root"] = _Observation()
+    refreshed = asyncio.Event()
+
+    async def catch_up(roots: set[str], *, periodic: bool) -> None:
+        assert roots == {"root"} and not periodic
+        refreshed.set()
+
+    monkeypatch.setattr(coordinator, "_catch_up", catch_up)
+    coordinator._schedule("root", journal=True)
+    deadline = coordinator._journal_deadlines["root"]
+    assert 0 < deadline - asyncio.get_running_loop().time() <= 0.025
+    task = asyncio.create_task(coordinator._observe())
+    try:
+        async with asyncio.timeout(1):
+            while not refreshed.is_set():
+                coordinator._schedule("root", journal=True)
+                assert coordinator._journal_deadlines["root"] == deadline
+                await asyncio.sleep(0.001)
+        assert "root" not in coordinator._journal_deadlines
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await coordinator.close()
+        await store.close()
+
+
+async def test_control_preempts_only_its_root_and_queries_do_not_lose_new_hints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = PostgresStore("unused")
+    coordinator = PostgresCoordinator(store, catch_up_interval=10)
+    coordinator._observations = {root: _Observation() for root in ("first", "second", "control")}
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls: list[set[str]] = []
+
+    async def catch_up(roots: set[str], *, periodic: bool) -> None:
+        calls.append(roots)
+        if len(calls) == 1:
+            entered.set()
+            await release.wait()
+
+    monkeypatch.setattr(coordinator, "_catch_up", catch_up)
+    coordinator._schedule("first", journal=True)
+    coordinator._schedule("second", journal=True)
+    second_deadline = coordinator._journal_deadlines["second"]
+    coordinator._schedule("first")
+    assert "first" not in coordinator._journal_deadlines
+    assert coordinator._journal_deadlines["second"] == second_deadline
+    task = asyncio.create_task(coordinator._observe())
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert "first" in calls[0]
+        coordinator._schedule("first", journal=True)
+        coordinator._schedule("control", dispatch=True)
+        assert coordinator._dispatch_event.is_set()
+        release.set()
+        await eventually(lambda: any("control" in roots for roots in calls))
+        await eventually(lambda: sum("first" in roots for roots in calls) == 2)
+        await eventually(lambda: any("second" in roots for roots in calls))
+        assert not coordinator._journal_deadlines
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await coordinator.close()
+        await store.close()
+
+
+async def test_observer_departure_and_close_clear_pending_journal_deadlines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = PostgresStore("unused")
+    coordinator = PostgresCoordinator(store, catch_up_interval=10)
+    coordinator._started = True
+    root = uuid4().hex
+    iterator = coordinator.observe(root)
+    first = asyncio.create_task(anext(iterator))
+    await eventually(lambda: root in coordinator._observations)
+    coordinator._dirty_roots.clear()
+    coordinator._schedule(root, journal=True)
+    assert root in coordinator._journal_deadlines
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+    await iterator.aclose()
+    assert root not in coordinator._journal_deadlines
+    coordinator._observations[root] = _Observation()
+    coordinator._schedule(root, journal=True)
+    await coordinator.close()
+    assert not coordinator._journal_deadlines and not coordinator._dirty_roots
+    await store.close()
+
+
+@pytest.mark.parametrize("terminal", [TurnCompleted, TurnFailed, TurnCancelled, TurnInterrupted])
+async def test_observation_terminal_evidence_survives_lost_hints_and_transport_expiry(
+    postgres_dsn: str, pg_schema: str, terminal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    await store.setup()
+    root = uuid4().hex
+    await store.create(SessionHeader(id=root, root_id=root, agent="bot", model="m"))
+    await store.append(root, [SessionCreated(agent="bot", root_id=root, model="m")])
+    coordinator = PostgresCoordinator(store, catch_up_interval=0.03)
+    await coordinator.start()
+    iterator = coordinator.observe(root)
+    try:
+        initial = await anext(iterator)
+        assert initial.actors[root] == (1, False) and initial.terminal_sequences == {root: 0}
+        assert coordinator._listener_task is not None
+        coordinator._listener_task.cancel()
+        await asyncio.gather(coordinator._listener_task, return_exceptions=True)
+        coordinator._listener_task = None
+        args = (
+            {"stop_reason": "stop"}
+            if terminal is TurnCompleted
+            else {"error": "failed"}
+            if terminal is TurnFailed
+            else {"reason": "test"}
+        )
+        end = await store.append(root, [terminal(turn_id=uuid4().hex, **args), TextDelta(text="after terminal")])
+        async with store._connection() as conn:
+            await conn.execute(store._sql("DELETE FROM {schema}.coordinator_changes WHERE root_id = %s"), (root,))
+
+        def no_body_decode(*args: Any) -> None:
+            raise AssertionError("observation decoded an event body")
+
+        monkeypatch.setattr("tantra.stores.postgres._parse", no_body_decode)
+        async with asyncio.timeout(2):
+            while coordinator.observation(root).terminal_sequences[root] != end - 1:
+                await anext(iterator)
+        current = coordinator.observation(root)
+        assert current.actors[root] == (end, False) and current.terminal_sequences[root] == end - 1
+    finally:
+        await iterator.aclose()
+        await coordinator.close()
+        await store.close()
 
 
 async def test_malformed_notification_kinds_do_not_stop_listener(postgres_dsn: str, pg_schema: str) -> None:

@@ -8,8 +8,9 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from tantra import Agent, CoordinatorUnavailable, RemoteExecutionError, Runtime
+from tantra import Agent, CoordinatorUnavailable, RemoteExecutionError, Runtime, SessionHeader
 from tantra.coordinator import RootObservation, WriterToken
+from tantra.events import InputQueued, TurnCancelled, TurnCompleted, TurnFailed, TurnInterrupted, TurnStarted
 from tantra.providers.fake import FakeProvider
 from tantra.stores.memory import MemoryStore
 
@@ -75,6 +76,7 @@ def snapshot(
     owner_generation: int = 0,
     owner_valid: bool = False,
     recovery: dict[str, Any] | None = None,
+    terminals: dict[str, int] | None = None,
 ) -> RootObservation:
     return RootObservation(
         root_id=root_id,
@@ -88,7 +90,199 @@ def snapshot(
         actors={root_id: (seq, active)},
         expires_at=datetime.now(UTC),
         error=error,
+        terminal_sequences=terminals,
     )
+
+
+async def test_terminal_metadata_skips_delta_and_unchanged_sample_result_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_id = uuid4().hex
+    command_id = uuid4()
+    coordinator = ObservationCoordinator()
+    coordinator.latest[root_id] = snapshot(root_id, 0, seq=1, active=True, terminals={root_id: 0})
+    store = MemoryStore()
+    await store.create(SessionHeader(id=root_id, agent="Bot", model="m"))
+    runtime = Runtime(FakeProvider([]), store, [Bot], default_model="m", coordinator=coordinator)
+    await runtime.start()
+    calls = 0
+    original = runtime._result
+
+    async def counted(agent_id: str, requested: UUID):
+        nonlocal calls
+        calls += 1
+        return await original(agent_id, requested)
+
+    monkeypatch.setattr(runtime, "_result", counted)
+    waiter = asyncio.create_task(runtime._wait_result(root_id, command_id))
+    try:
+        await wait_until(lambda: coordinator.users.get(root_id) == 1 and calls == 1)
+        for seq in range(2, 12):
+            await coordinator.emit(snapshot(root_id, 0, seq=seq, active=True, terminals={root_id: 0}))
+            await wait_until(lambda seq=seq: runtime._observations[root_id].actors[root_id][0] == seq)
+            await runtime._notify(root_id)
+        for sample in (1, 2, 3):
+            await coordinator.emit(snapshot(root_id, sample, seq=11, active=True, terminals={root_id: 0}))
+            await wait_until(lambda sample=sample: runtime._observations[root_id].sample == sample)
+        assert calls == 1
+        await store.append(root_id, [TurnCompleted(turn_id=command_id.hex, stop_reason="stop", output={"ok": True})])
+        await coordinator.emit(snapshot(root_id, 3, seq=12, terminals={root_id: 12}))
+        result = await asyncio.wait_for(waiter, 1)
+        assert result.outcome == "completed" and result.output == {"ok": True}
+        assert calls == 2
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await runtime.aclose()
+
+
+async def test_terminal_advances_during_initial_result_read_are_not_missed(monkeypatch: pytest.MonkeyPatch) -> None:
+    root_id = uuid4().hex
+    command_id = uuid4()
+    coordinator = ObservationCoordinator()
+    coordinator.latest[root_id] = snapshot(root_id, 0, active=True, terminals={root_id: 0})
+    store = MemoryStore()
+    await store.create(SessionHeader(id=root_id, agent="Bot", model="m"))
+    runtime = Runtime(FakeProvider([]), store, [Bot], default_model="m", coordinator=coordinator)
+    await runtime.start()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+    original = runtime._result
+
+    async def gated(agent_id: str, requested: UUID):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            entered.set()
+            await release.wait()
+            return None
+        return await original(agent_id, requested)
+
+    monkeypatch.setattr(runtime, "_result", gated)
+    waiter = asyncio.create_task(runtime._wait_result(root_id, command_id))
+    try:
+        await entered.wait()
+        await store.append(root_id, [TurnCancelled(turn_id=command_id.hex)])
+        await coordinator.emit(snapshot(root_id, 1, seq=1, terminals={root_id: 1}))
+        await wait_until(lambda: root_id in runtime._observations and runtime._observations[root_id].sample == 1)
+        release.set()
+        result = await asyncio.wait_for(waiter, 1)
+        assert result.outcome == "cancelled" and calls == 2
+    finally:
+        release.set()
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await runtime.aclose()
+
+
+@pytest.mark.parametrize("terminal", [TurnCompleted, TurnFailed, TurnCancelled, TurnInterrupted])
+async def test_latest_terminal_resolves_an_older_command_after_newer_turns_finish(terminal: Any) -> None:
+    root_id = uuid4().hex
+    command_id, newer = uuid4(), uuid4()
+    coordinator = ObservationCoordinator()
+    coordinator.latest[root_id] = snapshot(root_id, 0, active=True, terminals={root_id: 0})
+    store = MemoryStore()
+    await store.create(SessionHeader(id=root_id, agent="Bot", model="m"))
+    runtime = Runtime(FakeProvider([]), store, [Bot], default_model="m", coordinator=coordinator)
+    await runtime.start()
+    waiter = asyncio.create_task(runtime._wait_result(root_id, command_id))
+    try:
+        await wait_until(lambda: coordinator.users.get(root_id) == 1)
+        args = (
+            {"stop_reason": "stop"}
+            if terminal is TurnCompleted
+            else {"error": "failed"}
+            if terminal is TurnFailed
+            else {"reason": "test"}
+        )
+        last_seq = await store.append(
+            root_id,
+            [
+                InputQueued(command_id=command_id.hex, input="first"),
+                TurnStarted(turn_id=command_id.hex, input="first"),
+                terminal(turn_id=command_id.hex, **args),
+                InputQueued(command_id=newer.hex, input="second"),
+                TurnStarted(turn_id=newer.hex, input="second"),
+                TurnCompleted(turn_id=newer.hex, stop_reason="stop"),
+            ],
+        )
+        await coordinator.emit(snapshot(root_id, 1, seq=last_seq, terminals={root_id: last_seq}))
+        result = await asyncio.wait_for(waiter, 1)
+        assert result.command_id == command_id and result.outcome == terminal.model_fields["type"].default.removeprefix(
+            "turn_"
+        )
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await runtime.aclose()
+
+
+async def test_terminal_metadata_preserves_distinct_inactive_samples_and_local_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_id = uuid4().hex
+    command_id = uuid4()
+    coordinator = ObservationCoordinator()
+    coordinator.latest[root_id] = snapshot(root_id, 0, terminals={root_id: 0})
+    runtime = Runtime(FakeProvider([]), MemoryStore(), [Bot], default_model="m", coordinator=coordinator)
+    await runtime.start()
+    calls = 0
+
+    async def no_result(agent_id: str, requested: UUID) -> None:
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(runtime, "_result", no_result)
+    waiter = asyncio.create_task(runtime._wait_result(root_id, command_id))
+    try:
+        await wait_until(lambda: coordinator.users.get(root_id) == 1 and calls == 1)
+        await coordinator.emit(snapshot(root_id, 1, seq=7, terminals={root_id: 0}))
+        await wait_until(lambda: runtime._observations[root_id].sample == 1)
+        await asyncio.sleep(0)
+        for seq in range(8, 12):
+            await coordinator.emit(snapshot(root_id, 1, seq=seq, terminals={root_id: 0}))
+            await wait_until(lambda seq=seq: runtime._observations[root_id].actors[root_id][0] == seq)
+        assert not waiter.done() and calls == 1
+        await coordinator.emit(snapshot(root_id, 2, seq=11, terminals={root_id: 0}))
+        with pytest.raises(RemoteExecutionError, match="no active owner execution"):
+            await asyncio.wait_for(waiter, 1)
+        assert calls == 1
+
+        command_id = uuid4()
+        waiter = asyncio.create_task(runtime._wait_result(root_id, command_id))
+        await wait_until(lambda: coordinator.users.get(root_id) == 1 and calls == 2)
+        runtime._errors[root_id] = {command_id.hex: RuntimeError("local failure")}
+        await runtime._notify_waiter(root_id)
+        with pytest.raises(RuntimeError, match="local failure"):
+            await asyncio.wait_for(waiter, 1)
+        assert calls == 2
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await runtime.aclose()
+
+
+async def test_terminal_metadata_keeps_shutdown_final_result_check() -> None:
+    root_id = uuid4().hex
+    command_id = uuid4()
+    coordinator = ObservationCoordinator()
+    coordinator.latest[root_id] = snapshot(root_id, 0, active=True, terminals={root_id: 0})
+    store = MemoryStore()
+    await store.create(SessionHeader(id=root_id, agent="Bot", model="m"))
+    runtime = Runtime(FakeProvider([]), store, [Bot], default_model="m", coordinator=coordinator)
+    await runtime.start()
+    waiter = asyncio.create_task(runtime._wait_result(root_id, command_id))
+    try:
+        await wait_until(lambda: coordinator.users.get(root_id) == 1)
+        await store.append(root_id, [TurnInterrupted(turn_id=command_id.hex, reason="shutdown")])
+        await runtime.aclose()
+        result = await asyncio.wait_for(waiter, 1)
+        assert result.outcome == "interrupted"
+    finally:
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        await runtime.aclose()
 
 
 async def wait_until(predicate: Any) -> None:

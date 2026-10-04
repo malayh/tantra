@@ -375,7 +375,7 @@ async def test_migration_six_backfills_pages_envelopes_nul_and_projection_indexe
         postgres_dsn,
         pg_schema,
         "SELECT version FROM {schema}.schema_version ORDER BY version",
-    ) == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+    ) == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
     assert _query(
         postgres_dsn,
         pg_schema,

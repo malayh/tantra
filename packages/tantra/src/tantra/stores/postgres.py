@@ -436,6 +436,10 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         FOR EACH ROW EXECUTE FUNCTION {schema}.sync_session_updated_at()
         """,
     ),
+    (
+        "CREATE INDEX journal_terminal_idx ON {schema}.journal_index (actor_id, seq DESC)"
+        " WHERE event_type IN ('turn_completed', 'turn_failed', 'turn_cancelled', 'turn_interrupted')",
+    ),
 )
 
 

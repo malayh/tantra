@@ -41,6 +41,7 @@ except ImportError:
 DEFAULT_LEASE_TTL = 60.0
 DEFAULT_REQUEST_TIMEOUT = 10.0
 DEFAULT_CATCH_UP_INTERVAL = 2.0
+JOURNAL_HINT_DELAY = 0.025
 RETENTION = timedelta(hours=24)
 
 
@@ -162,6 +163,7 @@ class RootObservation:
     expires_at: datetime | None = None
     error: CoordinatorUnavailable | None = None
     deleted: bool = False
+    terminal_sequences: dict[str, int] | None = None
 
 
 @dataclass
@@ -262,6 +264,7 @@ class PostgresCoordinator:
         self._listener_task: asyncio.Task[None] | None = None
         self._observations: dict[str, _Observation] = {}
         self._dirty_roots: set[str] = set()
+        self._journal_deadlines: dict[str, float] = {}
         self._observation_event = asyncio.Event()
         self._observation_task: asyncio.Task[None] | None = None
         self._observation_sample = 0
@@ -303,6 +306,8 @@ class PostgresCoordinator:
                 task.cancel()
         await asyncio.gather(*(task for task in tasks if task is not None), return_exceptions=True)
         self._dispatchers.clear()
+        self._dirty_roots.clear()
+        self._journal_deadlines.clear()
         if self._listener_conn is not None:
             await self._listener_conn.close()
             self._listener_conn = None
@@ -651,6 +656,7 @@ class PostgresCoordinator:
             if state.users == 0 and self._observations.get(root_id) is state:
                 self._observations.pop(root_id, None)
                 self._dirty_roots.discard(root_id)
+                self._journal_deadlines.pop(root_id, None)
 
     async def watch(self, root_id: str, *, after: int = 0) -> AsyncIterator[ChangeNotice]:
         cursor = max(after, 0)
@@ -853,10 +859,16 @@ class PostgresCoordinator:
             ChangeNotice(change_id=row[0], root_id=row[1], kind=row[2], actor_id=row[3], seq=row[4]) for row in rows
         ]
 
-    def _schedule(self, root_id: str, *, dispatch: bool = False) -> None:
+    def _schedule(self, root_id: str, *, dispatch: bool = False, journal: bool = False) -> None:
         if root_id in self._observations:
-            self._dirty_roots.add(root_id)
-            self._observation_event.set()
+            if journal:
+                if root_id not in self._dirty_roots and root_id not in self._journal_deadlines:
+                    self._journal_deadlines[root_id] = asyncio.get_running_loop().time() + JOURNAL_HINT_DELAY
+                    self._observation_event.set()
+            else:
+                self._dirty_roots.add(root_id)
+                self._journal_deadlines.pop(root_id, None)
+                self._observation_event.set()
         if dispatch:
             self._dispatch_event.set()
 
@@ -879,7 +891,11 @@ class PostgresCoordinator:
                             continue
                         if root_id in self._observations:
                             self.routed_wakeups += 1
-                        self._schedule(root_id, dispatch=payload.get("kind") in ("request", "ownership"))
+                        self._schedule(
+                            root_id,
+                            dispatch=payload.get("kind") in ("request", "ownership"),
+                            journal=payload.get("kind") == "journal",
+                        )
             except asyncio.CancelledError:
                 raise
             except psycopg.Error:
@@ -892,16 +908,24 @@ class PostgresCoordinator:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.catch_up_interval
         while not self._closed:
+            wake_at = min(deadline, min(self._journal_deadlines.values(), default=deadline))
             try:
-                await asyncio.wait_for(self._observation_event.wait(), max(deadline - loop.time(), 0))
+                await asyncio.wait_for(self._observation_event.wait(), max(wake_at - loop.time(), 0))
             except TimeoutError:
                 pass
             self._observation_event.clear()
-            periodic = loop.time() >= deadline
-            roots = set(self._observations) if periodic else self._dirty_roots.copy()
+            now = loop.time()
+            periodic = now >= deadline
+            roots = (
+                set(self._observations)
+                if periodic
+                else self._dirty_roots | {root for root, due in self._journal_deadlines.items() if due <= now}
+            )
             self._dirty_roots.difference_update(roots)
+            for root_id in roots:
+                self._journal_deadlines.pop(root_id, None)
             if periodic:
-                deadline = loop.time() + self.catch_up_interval
+                deadline = now + self.catch_up_interval
             if roots:
                 await self._catch_up(roots, periodic=periodic)
 
@@ -925,11 +949,15 @@ class PostgresCoordinator:
                         " WHERE root_id = i.root_id ORDER BY id DESC LIMIT 1) c ON true"
                         " UNION ALL SELECT 'actor', i.root_id, s.id, jsonb_build_array(s.last_seq,"
                         " coalesce(a.active AND r.owner_instance IS NOT NULL"
-                        " AND r.expires_at > clock_timestamp(), false))"
+                        " AND r.expires_at > clock_timestamp(), false), coalesce(t.seq, 0))"
                         " FROM interested i JOIN {schema}.sessions s"
                         " ON COALESCE(NULLIF(s.header->>'root_id', ''), s.id) = i.root_id"
                         " LEFT JOIN {schema}.coordinator_activity a ON a.root_id = i.root_id AND a.actor_id = s.id"
                         " LEFT JOIN {schema}.coordinator_roots r ON r.root_id = i.root_id"
+                        " LEFT JOIN LATERAL (SELECT seq FROM {schema}.journal_index"
+                        " WHERE actor_id = s.id AND seq <= s.last_seq AND event_type IN"
+                        " ('turn_completed', 'turn_failed', 'turn_cancelled', 'turn_interrupted')"
+                        " ORDER BY seq DESC LIMIT 1) t ON true"
                         " UNION ALL SELECT 'reply', request_id::text, NULL::text, reply"
                         " FROM {schema}.coordinator_requests WHERE request_id = ANY(%s::uuid[])"
                     ),
@@ -941,11 +969,13 @@ class PostgresCoordinator:
                 self.observation_ticks += 1
             headers: dict[str, dict[str, Any]] = {}
             actors: dict[str, dict[str, tuple[int, bool]]] = {root: {} for root in roots}
+            terminals: dict[str, dict[str, int]] = {root: {} for root in roots}
             for kind, key, actor, data in rows:
                 if kind == "root":
                     headers[key] = data
                 elif kind == "actor":
                     actors[key][actor] = (int(data[0]), bool(data[1]))
+                    terminals[key][actor] = int(data[2])
                 elif UUID(key) in self._pending_requests:
                     self._observed_replies[UUID(key)] = CommandReply.model_validate(data) if data else None
             for root_id, data in headers.items():
@@ -964,6 +994,7 @@ class PostgresCoordinator:
                     actors=actors[root_id],
                     expires_at=datetime.fromisoformat(data["expires"]) if data["expires"] else None,
                     deleted=bool(data["deleted"]),
+                    terminal_sequences=terminals[root_id],
                 )
                 async with state.condition:
                     state.snapshot = snapshot

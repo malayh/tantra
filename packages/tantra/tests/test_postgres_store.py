@@ -117,7 +117,7 @@ async def test_setup_is_versioned_and_running_it_twice_leaves_the_version_unchan
 ) -> None:
     store = await _store(postgres_dsn, pg_schema)
     versions = _query(postgres_dsn, pg_schema, "SELECT version FROM {schema}.schema_version ORDER BY version")
-    assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,)]
+    assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
 
     await store.setup()
     await PostgresStore(postgres_dsn, schema=pg_schema).setup()
@@ -132,6 +132,7 @@ async def test_setup_is_versioned_and_running_it_twice_leaves_the_version_unchan
         (7,),
         (8,),
         (9,),
+        (10,),
     ]
 
 
@@ -411,6 +412,7 @@ async def test_racing_setups_on_a_fresh_schema_all_succeed(postgres_dsn: str, pg
         (7,),
         (8,),
         (9,),
+        (10,),
     ]
 
 

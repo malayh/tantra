@@ -279,7 +279,7 @@ async def test_migration_backfills_syncs_rolls_back_and_repeats(postgres_dsn: st
     assert native == stored.updated_at
     assert native > stamp
     await store.setup()
-    assert _query(postgres_dsn, pg_schema, "SELECT max(version) FROM {schema}.schema_version") == [(10,)]
+    assert _query(postgres_dsn, pg_schema, "SELECT max(version) FROM {schema}.schema_version") == [(len(MIGRATIONS),)]
     await store.close()
 
     rollback_schema = f"{pg_schema}_rollback"
@@ -316,7 +316,9 @@ async def test_migration_backfills_syncs_rolls_back_and_repeats(postgres_dsn: st
     recovered = PostgresStore(postgres_dsn, schema=rollback_schema)
     await recovered.setup()
     await recovered.setup()
-    assert _query(postgres_dsn, rollback_schema, "SELECT max(version) FROM {schema}.schema_version") == [(10,)]
+    assert _query(postgres_dsn, rollback_schema, "SELECT max(version) FROM {schema}.schema_version") == [
+        (len(MIGRATIONS),)
+    ]
     await recovered.close()
 
 

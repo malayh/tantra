@@ -102,14 +102,15 @@ Reduce Python and PostgreSQL CPU during streaming, observation, and reader fan-o
 - **70 focused checks** and **1,050 package/bench/durable PostgreSQL stress tests passed, zero skips**; `just lint` and one independent Ponytail review passed. A provider `ContextVar` compatibility defect discovered after the initial review required a narrow fix and re-review: construction, sequential reads, and closure now share one context on the batched path. The superseded after run remains incomplete under `016-p2-after-superseded`; only the corrected final campaign is authoritative. Fault tests prove exact committed prefixes across cancellation, deletion, shutdown, takeover, rollback, lost acknowledgments, and process death before/during/after flush.
 - Owned before/after/focused workers, Compose containers, and volumes were removed; watcher/subscription counts and expired transport backlog returned to zero. No paid inference, migration, or application changes. Stop after P2; P3 remains unstarted.
 
-### P3 — Reduce transaction and header overhead · deps: P2 · —
+### P3 — Reduce transaction and header overhead · deps: P2 · DONE
 
 **Deliver**
-- Combine transaction settings into fewer SQL statements and perform initial ownership/expiry validation in the locked root-row query.
+- Combine the three timeout settings and the three transaction-local authorization settings into two parameterized statements; authorize only after ownership validation. Use a materialized locking CTE so initial expiry is checked after the root row lock.
 - Preserve final fencing, transaction-local authorization, and root → coordinator row → actor lock order.
-- For exclusively streaming-delta appends, avoid Python header hydration, deep-copying, and serialization. Update sequence, timestamp, and operational watermark atomically.
-- Add migration 11 with a stored generated root key, preserving the existing root-expression semantics and replacing its expression index. This allows testing HOT eligibility without indexing the changing header. [PostgreSQL HOT requirements](https://www.postgresql.org/docs/17/storage-hot.html).
-- Preserve legacy parent relationships, deletion guards, cleanup age, and revision checks.
+- Share a connection-level PostgreSQL fast path for nonempty batches containing only `TextDelta`, `ReasoningDelta`, and `ToolCallDelta`. Read root/sequence evidence, reuse event encoding/insertion, and update native/JSON sequence, timestamp, and the conditional operational watermark atomically without Python header hydration, copying, or serialization. Mixed/empty appends retain the reducer.
+- Add migration 11 with stored generated `root_key = COALESCE(NULLIF(header->>'root_id', ''), id)` and replace `sessions_root_idx` with its native-column index. Table-backed lookups use the key; session BEFORE guards still derive roots from header values. This allows testing HOT eligibility without indexing the changing header. [PostgreSQL HOT requirements](https://www.postgresql.org/docs/17/storage-hot.html).
+- Preserve legacy parent traversal, deletion guards, cleanup age/revisions, extra header fields, and lifecycle projections. Keep fillfactor and database settings unchanged.
+- Capture a fresh unchanged before CPU campaign and separate matched HOT/WAL probes before runtime edits. Compare the identical after campaign with fresh before and retained P2 reports; retain instrumentation/workload identities.
 
 **Verify**
 - Test pooled authorization isolation, stale writers, rollback, extra header fields, operational watermarks, and cleanup races.
@@ -117,8 +118,16 @@ Reduce Python and PostgreSQL CPU during streaming, observation, and reader fan-o
 - Compare transaction statements and CPU against P2.
 
 **Checklist**
-- [ ] Transaction/header path and migration
-- [ ] Fencing, cleanup parity, and measured write costs
+- [x] Transaction/header path and migration
+- [x] Fencing, cleanup parity, and measured write costs
+
+**Verification — 2026-10-04**
+- [Fresh before](../stress/bench/artifacts/016-p3-before/report.html), [verified after](../stress/bench/artifacts/016-p3-after-verified/report.html), [matched comparison](../stress/bench/artifacts/016-p3-comparison/report.html), and [retained P2 comparison](../stress/bench/artifacts/016-p3-vs-p2/report.html) preserve 21 warmed scenarios, 57 matching trials, identical benchmark/database identities, and all replay digests/commit probes. Runtime source hashes identify unchanged P2 before and measured P3 after; no timing instrumentation changed.
+- Five-trial 1,024-fragment cases with 0/1/8 extra readers reduced median Python CPU **17.3%/9.2%/5.2%**, wall time **11.5%/4.5%/5.8%**, client SQL **12.3%/12.5%/9.2%**, and WAL **8.6%/8.2%/7.8%**. PostgreSQL CPU fell **5.6%/6.8%** with 0/1 readers but rose **1.8%** with eight. Commits remain **49**, nested SQL remains **8,514**, and five client setting/expiry executions were removed per coordinated transaction.
+- Delivery P95 with eight readers increased **42.58 → 47.52 ms**. The 256-fragment 0/8-reader wall P95 rose **24.20/10.84 ms** despite lower medians. Other primary PostgreSQL CPU increases range **0.6–2.6%**. The one-trial unbatched tool-progress case rose **41.49 ms (+2.4%)** in wall time while Python/PostgreSQL CPU fell **12.1%/4.7%**. Causes are not isolated; all distributions and remaining reader/full-history costs are retained. Previously deferred latency findings remain separate.
+- Separate [before](../stress/bench/artifacts/016-p3-hot-before/hot.json)/[after](../stress/bench/artifacts/016-p3-hot-after/hot.json) five-trial write probes recorded **0 → 1,024** HOT updates for single-event appends and **0 → 32** for 32-event batches. Median WAL fell **32.2%/4.2%** respectively, without fillfactor or database tuning. These single-session probes do not promise a production HOT rate. Actual shared-observation plans use the native `sessions_root_idx` with 10,000 unrelated sessions and 100 children; the expiry plan has a materialized locking CTE.
+- **1,064 package/bench/durable PostgreSQL stress tests passed, zero skips**; focused fast-path/fencing/checkpoint/migration/cleanup checks, `just lint`, and one independent Ponytail review passed. Migration rollback/retry preserves journal bodies and header fields. The original timing campaign's full gate had one obsolete root-expression plan fixture (**1,063 passed, one failed**); the fixture now uses production `root_key` predicates. The final full suite was rerun on identical durable database settings. `016-p3-after` retains the original failure; `016-p3-after-verified` preserves its timing samples unchanged and cites the successful recheck. Verification logs and probes are retained under `016-p3-checks`.
+- Owned workers, Compose containers, and volumes were removed; watcher/subscription counts and expired transport backlogs returned to zero. No paid inference or application changes. Stop after P3; P4 remains unstarted.
 
 ### P4 — Share committed reads and publish final comparison · deps: P3 · —
 

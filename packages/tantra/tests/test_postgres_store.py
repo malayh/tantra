@@ -117,23 +117,12 @@ async def test_setup_is_versioned_and_running_it_twice_leaves_the_version_unchan
 ) -> None:
     store = await _store(postgres_dsn, pg_schema)
     versions = _query(postgres_dsn, pg_schema, "SELECT version FROM {schema}.schema_version ORDER BY version")
-    assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
+    assert versions == [(version,) for version in range(1, len(postgres.MIGRATIONS) + 1)]
 
     await store.setup()
     await PostgresStore(postgres_dsn, schema=pg_schema).setup()
 
-    assert _query(postgres_dsn, pg_schema, "SELECT version FROM {schema}.schema_version ORDER BY version") == [
-        (1,),
-        (2,),
-        (3,),
-        (4,),
-        (5,),
-        (6,),
-        (7,),
-        (8,),
-        (9,),
-        (10,),
-    ]
+    assert _query(postgres_dsn, pg_schema, "SELECT version FROM {schema}.schema_version ORDER BY version") == versions
 
 
 async def test_pool_is_lazy_bounded_autocommit_and_uses_the_configured_connection_class(
@@ -237,7 +226,7 @@ async def test_migration_seven_installs_only_the_query_shape_indexes(postgres_ds
         )
     )
 
-    assert "COALESCE(NULLIF((header ->> 'root_id'::text), ''::text), id)" in definitions["sessions_root_idx"]
+    assert "(root_key)" in definitions["sessions_root_idx"]
     assert '(created_at DESC, id COLLATE "C" DESC)' in definitions["sessions_order_idx"]
     assert '(parent_id, created_at DESC, id COLLATE "C" DESC)' in definitions["sessions_parent_order_idx"]
     assert "sessions_parent_idx" not in definitions
@@ -403,16 +392,7 @@ async def test_racing_setups_on_a_fresh_schema_all_succeed(postgres_dsn: str, pg
     )
 
     assert _query(postgres_dsn, pg_schema, "SELECT version FROM {schema}.schema_version ORDER BY version") == [
-        (1,),
-        (2,),
-        (3,),
-        (4,),
-        (5,),
-        (6,),
-        (7,),
-        (8,),
-        (9,),
-        (10,),
+        (version,) for version in range(1, len(postgres.MIGRATIONS) + 1)
     ]
 
 

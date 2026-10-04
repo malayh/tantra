@@ -464,7 +464,7 @@ class PostgresCoordinator:
                             " UNION ALL SELECT 1 FROM {schema}.coordinator_requests"
                             " WHERE root_id = %s AND reply IS NULL AND deadline > clock_timestamp()"
                             " UNION ALL SELECT 1 FROM {schema}.sessions"
-                            " WHERE COALESCE(NULLIF(header->>'root_id', ''), id) = %s"
+                            " WHERE root_key = %s"
                             " AND header->>'status' IN ('queued', 'running', 'awaiting_input')"
                             ")"
                         ),
@@ -516,11 +516,11 @@ class PostgresCoordinator:
                             " UNION ALL SELECT 1 FROM {schema}.coordinator_requests"
                             " WHERE root_id = %s AND reply IS NULL AND deadline > clock_timestamp()"
                             " UNION ALL SELECT 1 FROM {schema}.sessions"
-                            " WHERE COALESCE(NULLIF(header->>'root_id', ''), id) = %s"
+                            " WHERE root_key = %s"
                             " AND header->>'status' IN ('running', 'awaiting_input')"
                             ") OR NOT EXISTS ("
                             " SELECT 1 FROM {schema}.sessions WHERE id = %s"
-                            " AND COALESCE(NULLIF(header->>'root_id', ''), id) = %s"
+                            " AND root_key = %s"
                             " AND header->>'status' IN ('queued', 'idle')"
                             ")"
                         ),
@@ -951,7 +951,7 @@ class PostgresCoordinator:
                         " coalesce(a.active AND r.owner_instance IS NOT NULL"
                         " AND r.expires_at > clock_timestamp(), false), coalesce(t.seq, 0))"
                         " FROM interested i JOIN {schema}.sessions s"
-                        " ON COALESCE(NULLIF(s.header->>'root_id', ''), s.id) = i.root_id"
+                        " ON s.root_key = i.root_id"
                         " LEFT JOIN {schema}.coordinator_activity a ON a.root_id = i.root_id AND a.actor_id = s.id"
                         " LEFT JOIN {schema}.coordinator_roots r ON r.root_id = i.root_id"
                         " LEFT JOIN LATERAL (SELECT seq FROM {schema}.journal_index"
@@ -1159,9 +1159,11 @@ class PostgresCoordinator:
 
     async def _configure_transaction(self, conn: Any) -> None:
         timeout = str(max(int(self.request_timeout * 1000), 1))
-        await conn.execute("SELECT set_config('statement_timeout', %s, true)", (timeout,))
-        await conn.execute("SELECT set_config('lock_timeout', %s, true)", (timeout,))
-        await conn.execute("SELECT set_config('idle_in_transaction_session_timeout', %s, true)", (timeout,))
+        await conn.execute(
+            "SELECT set_config('statement_timeout', %s, true), set_config('lock_timeout', %s, true),"
+            " set_config('idle_in_transaction_session_timeout', %s, true)",
+            (timeout, timeout, timeout),
+        )
 
     async def _not_expired(self, conn: Any, expires_at: datetime) -> bool:
         cursor = await conn.execute("SELECT %s > clock_timestamp()", (expires_at,))
@@ -1192,21 +1194,20 @@ class _TransactionContext:
             await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (self.ownership.root_id,))
             cursor = await conn.execute(
                 self.coordinator._sql(
-                    "SELECT owner_instance, generation, expires_at"
-                    " FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE"
+                    "WITH locked AS MATERIALIZED (SELECT owner_instance, generation, expires_at"
+                    " FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE)"
+                    " SELECT owner_instance, generation, expires_at > clock_timestamp() FROM locked"
                 ),
                 (self.ownership.root_id,),
             )
             row = await cursor.fetchone()
-            if (
-                row is None
-                or row[:2] != (str(self.ownership.instance_id), self.ownership.generation)
-                or not await self.coordinator._not_expired(conn, row[2])
-            ):
+            if row is None or row[:2] != (str(self.ownership.instance_id), self.ownership.generation) or not row[2]:
                 raise LeaseLost(self.ownership.root_id)
-            await conn.execute("SELECT set_config('tantra.root_id', %s, true)", (self.ownership.root_id,))
-            await conn.execute("SELECT set_config('tantra.instance_id', %s, true)", (str(self.ownership.instance_id),))
-            await conn.execute("SELECT set_config('tantra.generation', %s, true)", (str(self.ownership.generation),))
+            await conn.execute(
+                "SELECT set_config('tantra.root_id', %s, true), set_config('tantra.instance_id', %s, true),"
+                " set_config('tantra.generation', %s, true)",
+                (self.ownership.root_id, str(self.ownership.instance_id), str(self.ownership.generation)),
+            )
             self._store = CoordinatedStore(self.coordinator, self.ownership, conn)
             return self._store
         except BaseException as exc:
@@ -1389,6 +1390,10 @@ class CoordinatedStore:
 
     async def append(self, sid: str, events: Sequence[SessionEvent]) -> int:
         self._ensure_active()
+        seq = await self.coordinator.store._append_deltas(self.conn, sid, events, root_id=self.ownership.root_id)
+        if seq is not None:
+            await self.change("journal", sid, seq)
+            return seq
         cursor = await self.conn.execute(
             self.coordinator._sql("SELECT header, last_seq FROM {schema}.sessions WHERE id = %s FOR UPDATE"),
             (sid,),
@@ -1637,7 +1642,7 @@ class CoordinatedStore:
                 " UNION ALL SELECT 1 FROM {schema}.coordinator_requests"
                 " WHERE root_id = %s AND reply IS NULL AND deadline > clock_timestamp()"
                 " UNION ALL SELECT 1 FROM {schema}.sessions"
-                " WHERE COALESCE(NULLIF(header->>'root_id', ''), id) = %s"
+                " WHERE root_key = %s"
                 " AND header->>'status' IN ('queued', 'running', 'awaiting_input')"
                 ")"
             ),

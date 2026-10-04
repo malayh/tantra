@@ -91,7 +91,9 @@ async def test_terminal_index_migration_rolls_back_retries_and_preserves_journal
         await store.setup()
         await store.setup()
         with psycopg.connect(postgres_dsn) as conn:
-            assert conn.execute(statement("SELECT max(version) FROM {schema}.schema_version")).fetchone() == (10,)
+            assert conn.execute(statement("SELECT max(version) FROM {schema}.schema_version")).fetchone() == (
+                len(MIGRATIONS),
+            )
             assert (
                 conn.execute("SELECT to_regclass(%s)", (f"{pg_schema}.journal_terminal_idx",)).fetchone()[0] is not None
             )

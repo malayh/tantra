@@ -15,6 +15,7 @@ from tantra.errors import (
     CoordinatorUnavailable,
     CorruptLog,
     InvalidCommandReuse,
+    LeaseLost,
     ModelChangeBusy,
     SessionBusy,
     SessionExists,
@@ -27,10 +28,13 @@ from tantra.events import (
     CancellationRequested,
     CompactionApplied,
     InputQueued,
+    ReasoningDelta,
     SessionEvent,
     SessionHeader,
     SessionStatus,
     Stamped,
+    TextDelta,
+    ToolCallDelta,
     TurnCancelled,
     TurnCompleted,
     TurnFailed,
@@ -440,6 +444,12 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         "CREATE INDEX journal_terminal_idx ON {schema}.journal_index (actor_id, seq DESC)"
         " WHERE event_type IN ('turn_completed', 'turn_failed', 'turn_cancelled', 'turn_interrupted')",
     ),
+    (
+        "ALTER TABLE {schema}.sessions ADD COLUMN root_key text"
+        " GENERATED ALWAYS AS (COALESCE(NULLIF(header->>'root_id', ''), id)) STORED",
+        "DROP INDEX {schema}.sessions_root_idx",
+        "CREATE INDEX sessions_root_idx ON {schema}.sessions (root_key)",
+    ),
 )
 
 
@@ -511,10 +521,10 @@ class PostgresStore:
         if header.root_id is None and header.parent_id is not None:
             cursor = await conn.execute(
                 self._sql(
-                    "WITH RECURSIVE ancestors AS (SELECT id, parent_id, header FROM {schema}.sessions WHERE id = %s"
-                    " UNION SELECT s.id, s.parent_id, s.header FROM {schema}.sessions s"
+                    "WITH RECURSIVE ancestors AS (SELECT id, parent_id, root_key FROM {schema}.sessions WHERE id = %s"
+                    " UNION SELECT s.id, s.parent_id, s.root_key FROM {schema}.sessions s"
                     " JOIN ancestors a ON s.id = a.parent_id)"
-                    " SELECT COALESCE(NULLIF(header->>'root_id', ''), id)"
+                    " SELECT root_key"
                     " FROM ancestors WHERE parent_id IS NULL LIMIT 1"
                 ),
                 (header.parent_id,),
@@ -554,7 +564,7 @@ class PostgresStore:
                             self._sql(
                                 "SELECT id FROM {schema}.sessions WHERE id = ANY(%s::text[])"
                                 " AND (parent_id IS NOT NULL"
-                                " OR COALESCE(NULLIF(header->>'root_id', ''), id) <> id) LIMIT 1"
+                                " OR root_key <> id) LIMIT 1"
                             ),
                             (root_ids,),
                         )
@@ -588,7 +598,7 @@ class PostgresStore:
                 "WITH RECURSIVE roots AS ("
                 " SELECT s.id, s.created_at FROM {schema}.sessions s"
                 " WHERE (%s::boolean OR (s.parent_id IS NULL"
-                " AND COALESCE(NULLIF(s.header->>'root_id', ''), s.id) = s.id))"
+                " AND s.root_key = s.id))"
                 " AND (%s::boolean OR s.id = ANY(%s::text[]))"
                 " AND (%s::boolean OR s.metadata @> %s::jsonb)"
                 ' AND (%s::boolean OR (s.created_at, s.id COLLATE "C")'
@@ -824,6 +834,9 @@ class PostgresStore:
         async with self._connection() as conn:
             async with conn.transaction():
                 await self._guard_session(conn, sid)
+                seq = await self._append_deltas(conn, sid, events)
+                if seq is not None:
+                    return seq
                 cursor = await conn.execute(
                     self._sql("SELECT header, last_seq FROM {schema}.sessions WHERE id = %s FOR UPDATE"), (sid,)
                 )
@@ -855,6 +868,44 @@ class PostgresStore:
                     (_json(header), seq, seq, sid),
                 )
                 return seq
+
+    async def _append_deltas(
+        self,
+        conn: Any,
+        sid: str,
+        events: Sequence[SessionEvent],
+        *,
+        root_id: str | None = None,
+    ) -> int | None:
+        if not events or not all(isinstance(event, TextDelta | ReasoningDelta | ToolCallDelta) for event in events):
+            return None
+        cursor = await conn.execute(
+            self._sql("SELECT root_key, last_seq FROM {schema}.sessions WHERE id = %s FOR UPDATE"), (sid,)
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise SessionNotFound(sid)
+        if root_id is not None and root_id != row[0]:
+            raise LeaseLost(row[0])
+        seq = row[1] + len(events)
+        await cursor.executemany(
+            self._sql("INSERT INTO {schema}.events (session_id, seq, stamped) VALUES (%s, %s, %s)"),
+            [
+                (sid, row[1] + offset, _event_json(Stamped(seq=row[1] + offset, event=event)))
+                for offset, event in enumerate(events, start=1)
+            ],
+        )
+        now = datetime.now(UTC)
+        await conn.execute(
+            self._sql(
+                "UPDATE {schema}.sessions SET header = jsonb_set(jsonb_set(header, '{{last_seq}}',"
+                " to_jsonb(%s::bigint)), '{{updated_at}}', to_jsonb(%s::text)), last_seq = %s,"
+                " operational_seq = CASE WHEN operational_version = 1 AND operational_seq = last_seq"
+                " THEN %s ELSE operational_seq END, updated_at = %s WHERE id = %s"
+            ),
+            (seq, now.isoformat().replace("+00:00", "Z"), seq, seq, now, sid),
+        )
+        return seq
 
     async def enqueue(self, sid: str, event: InputQueued) -> EnqueueResult:
         async with self._connection() as conn:
@@ -1454,7 +1505,7 @@ class PostgresStore:
 
     async def _guard_session(self, conn: Any, sid: str) -> None:
         cursor = await conn.execute(
-            self._sql("SELECT COALESCE(NULLIF(header->>'root_id', ''), id) FROM {schema}.sessions WHERE id = %s"),
+            self._sql("SELECT root_key FROM {schema}.sessions WHERE id = %s"),
             (sid,),
         )
         row = await cursor.fetchone()
@@ -1463,7 +1514,7 @@ class PostgresStore:
 
     async def _prepare_header_patch(self, conn: Any, sid: str) -> str:
         cursor = await conn.execute(
-            self._sql("SELECT COALESCE(NULLIF(header->>'root_id', ''), id) FROM {schema}.sessions WHERE id = %s"),
+            self._sql("SELECT root_key FROM {schema}.sessions WHERE id = %s"),
             (sid,),
         )
         row = await cursor.fetchone()
@@ -1477,7 +1528,7 @@ class PostgresStore:
 
     async def _prepare_model_patch(self, conn: Any, sid: str) -> str:
         cursor = await conn.execute(
-            self._sql("SELECT COALESCE(NULLIF(header->>'root_id', ''), id) FROM {schema}.sessions WHERE id = %s"),
+            self._sql("SELECT root_key FROM {schema}.sessions WHERE id = %s"),
             (sid,),
         )
         row = await cursor.fetchone()
@@ -1496,7 +1547,7 @@ class PostgresStore:
                 " UNION ALL SELECT 1 FROM {schema}.coordinator_requests"
                 " WHERE root_id = %s AND reply IS NULL AND deadline > clock_timestamp()"
                 " UNION ALL SELECT 1 FROM {schema}.sessions"
-                " WHERE COALESCE(NULLIF(header->>'root_id', ''), id) = %s"
+                " WHERE root_key = %s"
                 " AND header->>'status' IN ('queued', 'running', 'awaiting_input')"
                 ")"
             ),

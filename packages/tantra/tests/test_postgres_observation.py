@@ -425,7 +425,7 @@ async def test_shared_observation_queries_use_the_scaling_indexes(postgres_dsn: 
 
         plans = {
             "root": await explain(
-                "SELECT id FROM {schema}.sessions WHERE COALESCE(NULLIF(header->>'root_id', ''), id) = %s",
+                "SELECT id FROM {schema}.sessions WHERE root_key = %s",
                 ("root-05000",),
             ),
             "sessions": await explain(
@@ -440,7 +440,7 @@ async def test_shared_observation_queries_use_the_scaling_indexes(postgres_dsn: 
             "catch_up": await explain(
                 "WITH interested AS (SELECT unnest(%s::text[]) AS root_id)"
                 " SELECT s.id FROM interested i JOIN {schema}.sessions s"
-                " ON COALESCE(NULLIF(s.header->>'root_id', ''), s.id) = i.root_id",
+                " ON s.root_key = i.root_id",
                 (["root-00001", "root-05000", "root-09999"],),
             ),
             "root_request": await explain(

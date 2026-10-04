@@ -4,6 +4,8 @@
 
 Reduce Python and PostgreSQL CPU during streaming, observation, and reader fan-out. Applications receive the improvements by upgrading Tantra. Preserve [investigation 015](015_runtime_cpu_investigation.md) and its reports as supporting evidence.
 
+**Status:** complete through P4; latency and individual workload regressions below remain follow-up findings.
+
 **In:** Tantra runtime, PostgreSQL optimizations, existing automated bench, correctness tests.
 **Out:** Osuite/Sarathi changes, paid inference, codec replacement, journal pruning, changing the default full-history mode.
 
@@ -129,25 +131,35 @@ Reduce Python and PostgreSQL CPU during streaming, observation, and reader fan-o
 - **1,064 package/bench/durable PostgreSQL stress tests passed, zero skips**; focused fast-path/fencing/checkpoint/migration/cleanup checks, `just lint`, and one independent Ponytail review passed. Migration rollback/retry preserves journal bodies and header fields. The original timing campaign's full gate had one obsolete root-expression plan fixture (**1,063 passed, one failed**); the fixture now uses production `root_key` predicates. The final full suite was rerun on identical durable database settings. `016-p3-after` retains the original failure; `016-p3-after-verified` preserves its timing samples unchanged and cites the successful recheck. Verification logs and probes are retained under `016-p3-checks`.
 - Owned workers, Compose containers, and volumes were removed; watcher/subscription counts and expired transport backlogs returned to zero. No paid inference or application changes. Stop after P3; P4 remains unstarted.
 
-### P4 — Share committed reads and publish final comparison · deps: P3 · —
+### P4 — Share committed reads and publish final comparison · deps: P3 · DONE
 
 **Deliver**
-- Share recent committed event pages within each Runtime, with independent reader cursors and single-flight page reads.
-- Bound the cache to 256 events/1 MiB per actor and 64 actors/16 MiB globally. Oversized events bypass it; gaps and slow readers fall back to SQL.
-- Populate only after successful commits or authoritative reads. Purge on deletion, final reader departure, and shutdown.
+- Share recent committed event pages within each Runtime, with independent reader cursors and one in-flight recent-page read per actor. Return independent snapshots; shield shared reads from individual reader cancellation.
+- Bound the cache to 256 events/1 MiB per actor and 64 actors/16 MiB globally, conservatively accounting for Python objects and using LRU eviction. Oversized events bypass it; gaps and slow readers retain historical SQL pagination.
+- Populate only after successful outer commits or authoritative reads. Unknown acknowledgments require an authoritative read. Purge on deletion, final reader departure, and shutdown; guard in-flight publication against concurrent replacement.
 - Reduce duplicate empty-page/header race checks using registered interest, observed high-water marks, and signal generations. Keep conservative fallbacks.
-- Filter internal Runtime actor observations to registered interests; preserve existing root-wide observer behavior.
-- Reuse the assembled request for unchanged compaction projections. Preserve custom compactors, hooks, skill bodies, tool pairing, and full-history semantics.
-- Publish final comparisons against P0 and each preceding phase.
+- Filter internal Runtime actor observations to the union of stream/wait interests; connection-only interests retain root control state. Root-wide subscribers require all actors. Schedule additions immediately and distinguish uncovered actors from inactive ones.
+- Reuse freshly assembled requests only through the built-in compactor's private path for unchanged projections. Rebuild changed summaries, pruning candidates, tails, and committed compaction requests. Preserve direct/custom compactors, hooks, skill bodies, tool pairing, and full-history semantics; retain no cross-invocation history cache.
+- Capture fresh unchanged CPU, baseline, 64-observer/16-turn, and 1,000-observer/100-turn references before runtime edits. Publish matching after comparisons against these and compatible retained P0–P3 reports, with unchanged timing instrumentation and workload identities.
 
 **Verify**
-- Exercise reader mutation isolation, reconnect cursors, missed hints, slow readers, deletion, cache eviction, and subscription cleanup.
+- Exercise nested reader mutation isolation, exact cache limits, single-flight cancellation, reconnect cursors, missed hints, slow readers, deletion, cache eviction, and subscription cleanup. Gate rollback, unknown acknowledgments, takeover, shutdown, and publication races.
+- Verify filtered observations with 100 children, new actor registration, simultaneous root-wide subscribers, silent lease expiry, and writer replacement; unchanged samples fetch no journal/result bodies.
 - Verify unchanged provider requests, compaction outcomes, public replay, and retained context.
 - Rerun existing baseline, 64-observer/16-turn, and 1,000-observer/100-turn workloads alongside the CPU suite.
 
 **Checklist**
-- [ ] Bounded read sharing and request reuse
-- [ ] Final correctness, resource, and CPU reports
+- [x] Bounded read sharing and request reuse
+- [x] Final correctness, resource, and CPU reports
+
+**Verification — 2026-10-04**
+- [Fresh before](../stress/bench/artifacts/016-p4-cpu-before/report.html), [verified after](../stress/bench/artifacts/016-p4-cpu-after-verified/report.html), [matched comparison](../stress/bench/artifacts/016-p4-comparison/report.html), and retained [P0](../stress/bench/artifacts/016-p4-vs-p0/report.html)/[P1](../stress/bench/artifacts/016-p4-vs-p1/report.html)/[P2](../stress/bench/artifacts/016-p4-vs-p2/report.html)/[P3](../stress/bench/artifacts/016-p4-vs-p3/report.html) comparisons passed. Each CPU campaign preserves 21 warmed scenarios, 57 matching trials, identical benchmark/database identities, replay digests and independent commit probes. Raw samples and measured source archive remain retained; subsequent Ruff formatting is AST-identical, with both source hashes recorded.
+- Across all nine primary cases, complete-spec median Python CPU fell **72.8–93.3%** and PostgreSQL CPU fell **58.0–94.1%** against P0. Every case has five trials; its highest P4 CPU sample remains below its lowest P0 sample for both Python and PostgreSQL.
+- Incremental P4 results are mixed. With eight extra readers, fetched rows fell **60.8–77.5%** and client SQL fell **11.6–24.9%**. At 1,024 fragments/eight readers, Python/PostgreSQL CPU fell **1.3%/4.5%**, but wall time rose **6.7%** and remote delivery P95 rose **42.19 → 73.77 ms**. The 64-fragment/one-reader PostgreSQL median rose **39.9%**; several primary Python medians rose **4.4–8.6%**. Exploratory single-trial 4,000-event/full-history wall time rose **64.0%**, while 8,192-fragment/tool-argument Python CPU rose **20.0%/18.6%**. Causes are not isolated; all CPU, latency, SQL, WAL and memory distributions remain in the reports.
+- Matched [baseline](../stress/bench/artifacts/016-p4-baseline-comparison/report.html), [64-observer/16-turn](../stress/bench/artifacts/016-p4-scale64-comparison/report.html), and [1,000-observer/100-turn](../stress/bench/artifacts/016-p4-scale1000-comparison/report.html) workloads passed. Both scale runs have zero unchanged journal/result-body reads, one shared observation query per healthy interval, four data connections/dispatchers maximum, and zero retained watchers/subscriptions. Single-campaign active Python CPU changed **−4.9%/+9.6%** and active wall changed **+6.7%/+1.4%** respectively; these descriptive regressions remain follow-ups.
+- Eight remote streams share one authoritative 32-event page. Actual shared-query plans with 100 children and 10,000 unrelated roots return **102 full / 3 filtered / 1 control-only rows**, using root/actor indexes without journal bodies. Focused checks cover cache limits, nested mutation isolation, historical pagination, commit/rollback/unknown acknowledgment, deletion/shutdown/replacement, interest coverage and simultaneous root-wide subscribers. Direct/custom compactor behavior and committed replay remain unchanged. Default full-history decoding, historical replay, independent reader copies and event/trigger write costs remain.
+- **1,090 package/bench/durable PostgreSQL stress tests passed, zero skips**; `just lint` and one independent Ponytail full review passed. The original full gate retained four obsolete observation-fixture failures (**1,086 passed**); fixtures now intercept the private observer and supply all query parameters. The entire suite was rerun on identical durable settings; the verified report preserves every original timing sample unchanged. Logs, plans, review and source identities are under `016-p4-checks`.
+- Owned workers, Compose containers and volumes were removed; caches, watcher/subscription counts and expired transport backlogs returned to zero. No paid inference, migrations or application changes. Spec 016 is complete; stop after P4. Previously deferred journal-scaling P3 latency findings remain separate.
 
 ## Verification and upkeep
 

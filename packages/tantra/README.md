@@ -65,7 +65,7 @@ Compaction is opt-in with `Runtime(compactor=PruneThenSummarize())`. Configured 
 
 For multi-process deployments, pair `PostgresStore` with the optional `PostgresCoordinator` for leased execution ownership, fenced writes, command forwarding, and takeover recovery. The default remains single-process.
 
-Tantra 1.3 adds indexed command lookup, operational checkpoints, pooled PostgreSQL access, and shared observer catch-up. `Runtime(history_mode="compacted")` can load the latest summary and retained history; full history remains the default, and public replay stays complete. Stop PostgreSQL writers before upgrading an existing database.
+Tantra 1.3 adds indexed command lookup, operational checkpoints, pooled PostgreSQL access, shared observer catch-up, and safe root-tree deletion with scoped cleanup and read-only dry runs. `Runtime(history_mode="compacted")` can load the latest summary and retained history; full history remains the default, and public replay stays complete. Stop PostgreSQL writers before upgrading an existing database.
 
 See the [documentation](https://malayh.github.io/tantra/docs/), the [1.3 upgrade guide](https://malayh.github.io/tantra/docs/guides/migration-1.3/), and the [coordinator setup guide](https://malayh.github.io/tantra/docs/guides/migration-1.2/).
 

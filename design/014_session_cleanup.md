@@ -87,7 +87,15 @@ Verification:
 - just lint, strict documentation build, and independent Ponytail review passed. The owned workers/database/volume were removed.
 - Evidence: [verification](../stress/bench/artifacts/014-p0-checks/verification.json), [package tests](../stress/bench/artifacts/014-p0-checks/package-tests.txt), [stress tests](../stress/bench/artifacts/014-p0-checks/stress-tests.txt), [review](../stress/bench/artifacts/014-p0-checks/review.md).
 
-### P1 — Bounded selector cleanup · deps: P0 · —
+### P1 — Bounded selector cleanup · deps: P0 · DONE
+
+Implementation contract:
+- `CleanupSelector(root_ids=None, metadata=None, inactive_before=None)` filters root metadata with AND; cutoff is strict `<`. IDs are UUIDs; scalar values are null, string, boolean, or finite number. Explicit live child IDs are rejected before mutation.
+- `CleanupReport.results` is a tuple of `CleanupResult(root_id, outcome, error_code=None)`; `counts` includes every outcome. `next_after` is a versioned value cursor; `error_code` is a bounded content-free infrastructure code.
+- Selection enumerates existing roots. Already absent IDs produce no candidates; disappearance after selection reports absent. Active candidates remain in pages and advance the cursor.
+- Dry runs reserve nothing and perform no ownership/control writes. Deletion compares an internal tree revision before task cancellation; ownership-only changes and cleanup control requests do not invalidate it.
+- Definitive per-root outcomes advance continuation. Infrastructure/unknown outcomes stop admission and retain the preceding cursor. Caller cancellation stops new admission while an accepted deletion remains shielded.
+- Header replacements stamp actual edit time; PostgreSQL's native timestamp mirrors stored headers. Existing creation/import timestamps and retained replay remain unchanged.
 
 Deliver:
 - Selectors, dry runs, reports, deletion-safe pagination.
@@ -102,10 +110,21 @@ Verify:
 - Deliberate oracle errors fail reports and exit nonzero.
 
 Checklist:
-- [ ] Selectors and cursor contract
-- [ ] Transactional rechecks and partial reports
-- [ ] Store parity and read bounds
-- [ ] Bench evidence, documentation, and independent review
+- [x] Selectors and cursor contract
+- [x] Transactional rechecks and partial reports
+- [x] Store parity and read bounds
+- [x] Bench evidence, documentation, and independent review
+
+Implementation notes:
+- PostgreSQL selection uses a repeatable-read, read-only snapshot and SQL SHA256 revisions. SQLite/memory retain their existing journal reductions for activity; their public selector/report behavior matches PostgreSQL.
+- Ordinary and coordinated PostgreSQL replacement timestamps are stamped after write locks. Migration 9 keeps native timestamps synchronized without rewriting journals or adding per-child root writes.
+- The owner-death bench setup now waits for durable child finish evidence before terminating its owner. Review also corrected EXPLAIN to use the production selector and made default fault workloads record their effective scenario list.
+
+Verification:
+- 844 package tests, 127 full stress tests, and 9 post-review bench tests passed with zero skips (129 distinct stress/bench cases). just lint, strict documentation build, and one independent Ponytail review passed.
+- All five cleanup scenarios passed across two workers on isolated durable Compose PostgreSQL. At 10,000 sessions and 4,000/100,000-event journals, selection took 2.28 ms and two-tree deletion 1,806.43 ms; both read zero historical event bodies. The actual SQL plan bounded root/tree state to two rows and used indexes.
+- Deliberate oracle injection produced a failed report and exit 1. No paid inference was used. Owned workers, Compose containers, and volumes were removed.
+- Evidence: [final report](../stress/bench/artifacts/014-p1-cleanup-final/report.html), [verification](../stress/bench/artifacts/014-p1-checks/verification.json), [package tests](../stress/bench/artifacts/014-p1-checks/package-tests.txt), [stress tests](../stress/bench/artifacts/014-p1-checks/stress-tests.txt), [post-review tests](../stress/bench/artifacts/014-p1-checks/post-review-bench-tests.txt), [review](../stress/bench/artifacts/014-p1-checks/review.md), [oracle failure](../stress/bench/artifacts/014-p1-cleanup-oracle/report.html).
 
 ### Conventions (all phases)
 

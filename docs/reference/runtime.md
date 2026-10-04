@@ -37,6 +37,32 @@ Deletion is atomic in PostgreSQL and SQLite, and locked in memory. It removes ac
 
 `MemoryStore`, `SQLiteStore`, and `PostgresStore` support deletion. Coordinated deletion requires `PostgresCoordinator` using that same store. Filesystem stores and unsupported custom stores/coordinators raise `NotImplementedError` before mutation. Uncoordinated runtimes retain their single-process ownership assumptions; use PostgreSQL coordination for multiple workers.
 
+### Selector cleanup
+
+`await cleanup(selector, *, dry_run=True, allow_active=False, limit=100, after=None) -> CleanupReport` processes one page of root trees. It uses the same deletion guarantees and supported stores as `delete`. It requires optional cleanup capabilities; unsupported custom stores or coordinators fail before mutation.
+
+```python
+from tantra import CleanupSelector
+
+selector = CleanupSelector(metadata={"tenant": "example"}, inactive_before=cutoff)
+review = await runtime.cleanup(selector)
+reviewed_ids = [row.root_id for row in review.results if row.outcome == "candidate"]
+result = await runtime.cleanup(
+    CleanupSelector(root_ids=reviewed_ids, metadata={"tenant": "example"}, inactive_before=cutoff),
+    dry_run=False,
+)
+```
+
+`CleanupSelector` combines supplied criteria with AND. Metadata applies to roots and accepts only null, strings, booleans, and finite numbers. Missing keys do not match null; booleans do not match numbers. `inactive_before` must be timezone-aware and compares strictly before the latest header or journal change anywhere in a tree. Header replacements stamp their actual edit time; reading history does not refresh age. Root IDs must be UUIDs. An empty ID collection matches nothing; a live child ID is rejected before mutation. An unscoped selector is rejected.
+
+A dry run writes nothing, acquires no execution ownership, cancels nothing, and makes no provider calls. It reserves no sessions: execution rechecks the selected tree before cancellation and skips revisions changed since selection. Use the reviewed IDs together with the original filters to restrict execution to that set.
+
+`CleanupReport.results` contains `CleanupResult(root_id, outcome, error_code=None)` entries. Its `counts` includes every outcome. `candidate` means dry-run eligibility; `active` means busy or uncertain work skipped by default; `changed` means selection evidence changed before deletion; `absent` means a selected root disappeared; `deleted` means committed deletion. Already absent IDs produce no candidates. `failed` is a definitive per-root error; `unknown` requires retry by root UUID. Errors contain bounded class codes rather than session content.
+
+Pages contain 1–1,000 roots, oldest first by `(created_at, id)`. Pass `report.next_after` to the next call with the same selector; this value cursor stays valid after deletion. Active and definitive failed entries advance it. Trees commit individually, so earlier deletions survive later errors. Infrastructure failures stop further admission, set `report.error_code`, and retain the preceding cursor for safe retry; a null cursor with an error does not mean completion. Caller cancellation stops new admission while an accepted deletion can still finish.
+
+### Connections
+
 `connect(root_id, *, after=0, writable=False) -> Connection` validates a root. A connection iterates only the root journal.
 
 `events(agent_id, *, after=0) -> AsyncIterator[LoggedEvent]` replays and tails any root or child journal without activating it.

@@ -9,6 +9,7 @@ from tantra.ask import (
     FreeText,
     FreeTextResponse,
 )
+from tantra.cleanup import CleanupReport, CleanupResult, CleanupSelector
 from tantra.compaction import CompactionConfig, Compactor, PruneThenSummarize
 from tantra.context import TurnContext
 from tantra.coordinator import (
@@ -92,6 +93,9 @@ __all__ = [
     "ChoiceResponse",
     "ChangeNotice",
     "ClaimWriterPayload",
+    "CleanupReport",
+    "CleanupResult",
+    "CleanupSelector",
     "CompactionApplied",
     "CompactionConfig",
     "Compactor",

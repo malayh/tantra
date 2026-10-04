@@ -11,6 +11,7 @@ from uuid import UUID, uuid5
 
 import psycopg
 
+from stress.bench.cleanup import CLEANUP_SCENARIOS, cleanup_scenarios
 from stress.driver import call_policy, last_user, turn_step
 from tantra import (
     Agent,
@@ -55,7 +56,7 @@ class FaultRoot(Agent):
 
 
 FAULT_AGENTS = [FaultRoot]
-FAULT_SCENARIOS = (
+LEGACY_FAULT_SCENARIOS = (
     "writer-reconnect",
     "owner-sigkill",
     "cancel-boundaries",
@@ -63,6 +64,7 @@ FAULT_SCENARIOS = (
     "slow-reader",
     "database-outage",
 )
+FAULT_SCENARIOS = (*LEGACY_FAULT_SCENARIOS, *CLEANUP_SCENARIOS)
 
 
 def _fault_policy(req: Any, state: Any) -> Sample:
@@ -283,12 +285,14 @@ class FaultState:
 
             async def notified() -> bool:
                 prefix = f"[agent {UUID(hex=child_id)} "
-                return any(
+                lifecycle = any(
                     isinstance(event, InputQueued)
                     and event.input.startswith(prefix)
                     and (" finished]" in event.input or " turn ended]" in event.input)
                     for event in await _events(self.runtime, sid)
                 )
+                finished = any(isinstance(event, AgentFinished) for event in await _events(self.runtime, child_id))
+                return lifecycle and finished
 
             await _eventually(notified)
             await self.connections[sid].send("drain", command_id=UUID(hex=queued))
@@ -672,7 +676,7 @@ def fault_campaign(
         raise ValueError(f"unknown fault scenarios: {sorted(unknown)}")
     if len(ids) < 2:
         raise ValueError("fault campaign requires at least two seeded sessions")
-    roots = {name: _id(ids[index % len(ids)], name) for index, name in enumerate(sorted(names))}
+    roots = {name: _id(ids[index % len(ids)], name) for index, name in enumerate(sorted(LEGACY_FAULT_SCENARIOS))}
     a, b = workers
 
     def call(worker: Any, label: str, operation: str, **kwargs: Any) -> dict[str, Any]:
@@ -955,6 +959,7 @@ def fault_campaign(
         "lost-notifications": lost_notifications,
         "slow-reader": slow_reader,
         "database-outage": database_outage,
+        **cleanup_scenarios(report, workers, ids, call),
     }
     for name, run in scenarios.items():
         if name in selected:

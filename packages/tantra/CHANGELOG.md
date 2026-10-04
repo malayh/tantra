@@ -2,13 +2,12 @@
 
 ## Unreleased
 
-- Add `Runtime.delete(root_id, allow_active=False)` for atomic root-tree deletion on PostgreSQL, SQLite, and memory stores, with active-work protection and permanent UUID markers. Coordinated deletion revokes ownership and ends readers with `SessionNotFound`.
-- PostgreSQL migration 8 adds deletion markers and write guards. Stop writers before setup; retained event bodies, sequences, and replay cursors remain unchanged. Filesystem deletion is unsupported.
-
 ## 1.3.0
 
 Added:
 
+- `Runtime.delete(root_id, allow_active=False)` for atomic root-tree deletion on PostgreSQL, SQLite, and memory stores, with active-work protection and permanent ID-only markers. Coordinated deletion revokes ownership and ends readers with `SessionNotFound`.
+- `Runtime.cleanup` with root-ID, scalar metadata, and tree-age selectors; read-only dry runs; deletion-safe cursors; per-tree outcomes; and transactional revision checks. Exported `CleanupSelector`, `CleanupResult`, `CleanupReport`, and `SessionBusy` support application-managed retention.
 - PostgreSQL command and lifecycle indexes, transactional operational checkpoints, and targeted completed-turn reads. Command retries and recovery no longer require full-journal scans when projections are current.
 - Optional `Runtime(history_mode="compacted")` loading of the latest summary and retained event window. Full history remains the default for hooks, callable prompts, and custom compactors.
 - A repository Runtime bench with isolated durable Compose PostgreSQL, two workers, synthetic scale/fault campaigns, fresh OpenRouter behavioral tests, exact recorded replay, persistent token budgeting, and JSON/HTML reports.
@@ -17,6 +16,7 @@ Changed:
 
 - PostgreSQL uses the official Psycopg pool with up to four data connections per worker, separate control/LISTEN connections, and bounded concurrent dispatch across unrelated roots. The `[postgres]` extra now includes `psycopg-pool`.
 - Observers share batched catch-up queries and receive routed notification hints. Unused watchers are released, and expired transport records drain in bounded batches without removing lifetime command identity.
+- PostgreSQL tracks native actor update timestamps for tree-age selection without reading historical event bodies or writing the root on each child event. Header replacements stamp their actual edit time.
 
 Fixed:
 
@@ -25,8 +25,8 @@ Fixed:
 
 Compatibility and upgrade:
 
-- Stop all PostgreSQL writers before running `PostgresStore.setup()` with 1.3. It applies migrations 5–7 and backfills journal projections; mixed-version writers are unsupported. Original event bodies, sequences, and replay cursors remain unchanged.
-- Required Store/Coordinator interfaces remain unchanged; custom implementations retain full-read fallbacks. Non-PostgreSQL stores keep their existing formats. Compacted mode changes turn context only; public replay remains complete.
+- Stop all PostgreSQL writers before running `PostgresStore.setup()` with 1.3. It applies migrations 5–9, backfills journal projections and actor timestamps, and adds deletion markers/write guards; mixed-version writers are unsupported. Original event bodies, sequences, and replay cursors remain unchanged.
+- Required Store/Coordinator interfaces remain unchanged; custom implementations retain full-read fallbacks for optimized reads. SQLite setup adds permanent deletion markers idempotently. Filesystem and unsupported custom stores/coordinators reject deletion and cleanup before mutation. Compacted mode changes turn context only; retained sessions keep complete public replay.
 - See the [1.3 migration guide](https://malayh.github.io/tantra/docs/guides/migration-1.3/). Serial latency regressions and full-history decoding costs remain documented follow-up work.
 
 ## 1.2.0

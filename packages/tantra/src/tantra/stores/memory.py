@@ -2,8 +2,17 @@ from __future__ import annotations
 
 import threading
 from collections.abc import AsyncIterator, Callable, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
+from tantra.cleanup import (
+    CleanupCandidate,
+    CleanupChanged,
+    CleanupSelector,
+    check_revision,
+    cleanup_trees,
+    tree_revision,
+)
 from tantra.errors import InvalidCommandReuse, SessionBusy, SessionExists, SessionNotFound, TantraError
 from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
@@ -45,19 +54,23 @@ class MemoryStore:
         *,
         allow_active: bool = False,
         before_delete: Callable[[list[str]], None] | None = None,
+        expected_revision: str | None = None,
     ) -> list[str]:
         with self._lock:
             root = self._headers.get(sid)
             if root is None:
                 return []
             if root.parent_id is not None or root.root_id not in (None, sid):
+                if expected_revision is not None:
+                    raise CleanupChanged("selected tree changed")
                 raise TantraError(f"session {sid} is not a root session")
             ids = [sid]
             for current in ids:
                 ids.extend(sorted(h.id for h in self._headers.values() if h.parent_id == current))
+            headers = [self._headers[actor_id] for actor_id in ids]
+            check_revision(expected_revision, tree_revision(headers))
             if not allow_active:
-                for actor_id in ids:
-                    header = self._headers[actor_id]
+                for actor_id, header in zip(ids, headers, strict=True):
                     journal = reduce_journal(self._events.get(actor_id, []))
                     if (
                         header.pending_ask is not None
@@ -91,7 +104,35 @@ class MemoryStore:
                 raise SessionNotFound(h.id)
             stored = h.model_copy(deep=True)
             stored.last_seq = current.last_seq
+            stored.updated_at = datetime.now(UTC)
             self._headers[h.id] = stored
+
+    async def select_cleanup(
+        self,
+        selector: CleanupSelector,
+        *,
+        limit: int,
+        after: str | None = None,
+    ) -> list[CleanupCandidate]:
+        with self._lock:
+            trees = cleanup_trees(list(self._headers.values()), selector, after=after)[: max(limit, 0)]
+            return [
+                CleanupCandidate(
+                    root_id=tree[0].id,
+                    created_at=tree[0].created_at,
+                    updated_at=max(header.updated_at for header in tree),
+                    revision=tree_revision(tree),
+                    active=any(
+                        header.pending_ask is not None
+                        or header.status in ("queued", "running", "awaiting_input")
+                        or header.current_turn_id is not None
+                        or (journal := reduce_journal(self._events.get(header.id, []))).pending
+                        or journal.incomplete is not None
+                        for header in tree
+                    ),
+                )
+                for tree in trees
+            ]
 
     async def patch_header(
         self,

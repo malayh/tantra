@@ -3,11 +3,20 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
+from tantra.cleanup import (
+    CleanupCandidate,
+    CleanupChanged,
+    CleanupSelector,
+    check_revision,
+    cleanup_trees,
+    tree_revision,
+)
 from tantra.errors import CorruptLog, InvalidCommandReuse, SessionBusy, SessionExists, SessionNotFound, TantraError
 from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
 from tantra.memory import MemoryRecord
@@ -97,13 +106,16 @@ class SQLiteStore:
         *,
         allow_active: bool = False,
         before_delete: Callable[[list[str]], None] | None = None,
+        expected_revision: str | None = None,
     ) -> list[str]:
         with self._write() as conn:
-            row = conn.execute("SELECT header FROM sessions WHERE id = ?", (sid,)).fetchone()
+            row = conn.execute("SELECT header, last_seq FROM sessions WHERE id = ?", (sid,)).fetchone()
             if row is None:
                 return []
-            root = SessionHeader.model_validate_json(row[0])
+            root = _hydrate(row)
             if root.parent_id is not None or root.root_id not in (None, sid):
+                if expected_revision is not None:
+                    raise CleanupChanged("selected tree changed")
                 raise TantraError(f"session {sid} is not a root session")
             rows = conn.execute("SELECT id, parent_id FROM sessions").fetchall()
             by_parent: dict[str, list[str]] = {}
@@ -113,15 +125,24 @@ class SQLiteStore:
             ids = [sid]
             for current in ids:
                 ids.extend(sorted(by_parent.get(current, [])))
+            headers = {sid: root}
+            if expected_revision is not None or not allow_active:
+                for actor_id in ids:
+                    if actor_id not in headers:
+                        header_row = conn.execute(
+                            "SELECT header, last_seq FROM sessions WHERE id = ?", (actor_id,)
+                        ).fetchone()
+                        headers[actor_id] = _hydrate(header_row)
+            if expected_revision is not None:
+                check_revision(expected_revision, tree_revision([headers[actor_id] for actor_id in ids]))
             if not allow_active:
                 for actor_id in ids:
-                    header_row = conn.execute("SELECT header FROM sessions WHERE id = ?", (actor_id,)).fetchone()
                     event_rows = conn.execute(
                         "SELECT stamped FROM events WHERE session_id = ? ORDER BY seq",
                         (actor_id,),
                     ).fetchall()
                     journal = reduce_journal(_parse(actor_id, event[0]) for event in event_rows)
-                    header = SessionHeader.model_validate_json(header_row[0])
+                    header = headers[actor_id]
                     if (
                         header.pending_ask is not None
                         or header.status in ("queued", "running", "awaiting_input")
@@ -154,10 +175,55 @@ class SQLiteStore:
             if row is None:
                 raise SessionNotFound(h.id)
             stored.last_seq = row[0]
+            stored.updated_at = datetime.now(UTC)
             conn.execute(
                 "UPDATE sessions SET header = ?, created_at = ?, parent_id = ? WHERE id = ?",
                 (stored.model_dump_json(), stored.created_at.isoformat(), stored.parent_id, stored.id),
             )
+
+    async def select_cleanup(
+        self,
+        selector: CleanupSelector,
+        *,
+        limit: int,
+        after: str | None = None,
+    ) -> list[CleanupCandidate]:
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            rows = conn.execute("SELECT header, last_seq FROM sessions").fetchall()
+            trees = cleanup_trees([_hydrate(row) for row in rows], selector, after=after)[: max(limit, 0)]
+            candidates = []
+            for tree in trees:
+                active = False
+                for header in tree:
+                    if (
+                        header.pending_ask is not None
+                        or header.status in ("queued", "running", "awaiting_input")
+                        or header.current_turn_id is not None
+                    ):
+                        active = True
+                        break
+                    event_rows = conn.execute(
+                        "SELECT stamped FROM events WHERE session_id = ? ORDER BY seq", (header.id,)
+                    ).fetchall()
+                    try:
+                        journal = reduce_journal(_parse(header.id, row[0]) for row in event_rows)
+                    except CorruptLog:
+                        active = True
+                        break
+                    if journal.pending or journal.incomplete is not None:
+                        active = True
+                        break
+                candidates.append(
+                    CleanupCandidate(
+                        root_id=tree[0].id,
+                        created_at=tree[0].created_at,
+                        updated_at=max(header.updated_at for header in tree),
+                        revision=tree_revision(tree),
+                        active=active,
+                    )
+                )
+            return candidates
 
     async def patch_header(
         self,

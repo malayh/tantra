@@ -17,6 +17,7 @@ import psycopg
 from psycopg import sql
 
 from stress.bench.behavior import BEHAVIOR_AGENTS, COMPACTION, BehaviorState, prepare_behavior_skills
+from stress.bench.cleanup import CleanupState
 from stress.bench.faults import FAULT_AGENTS, FaultState
 from stress.bench.providers import RecordedProvider, live_provider
 from stress.driver import SyntheticProvider, call_policy
@@ -89,6 +90,8 @@ class Metrics:
     loop_lag_ms: list[float] = field(default_factory=list)
     journal_queries: int = 0
     journal_rows: int = 0
+    event_body_queries: int = 0
+    event_body_rows: int = 0
     result_queries: int = 0
 
     def clear(self) -> None:
@@ -97,6 +100,7 @@ class Metrics:
         self.notifications.clear()
         self.loop_lag_ms.clear()
         self.journal_queries = self.journal_rows = 0
+        self.event_body_queries = self.event_body_rows = 0
         self.result_queries = 0
 
 
@@ -167,7 +171,9 @@ class MeasuredCursor(psycopg.AsyncCursor):
         except Exception:
             rendered = ""
         self._bench_journal_query = rendered.lstrip().upper().startswith(("SELECT", "WITH")) and ".events" in rendered
+        self._bench_event_body_query = self._bench_journal_query and "stamped" in rendered.lower()
         METRICS.journal_queries += int(self._bench_journal_query)
+        METRICS.event_body_queries += int(self._bench_event_body_query)
         METRICS.result_queries += int(rendered.lstrip().upper().startswith("SELECT REPLY FROM"))
         try:
             return await super().execute(*args, **kwargs)
@@ -187,6 +193,7 @@ class MeasuredCursor(psycopg.AsyncCursor):
         result = await super().fetchone()
         METRICS.fetched_rows += int(result is not None)
         METRICS.journal_rows += int(result is not None and getattr(self, "_bench_journal_query", False))
+        METRICS.event_body_rows += int(result is not None and getattr(self, "_bench_event_body_query", False))
         return result
 
     async def fetchall(self) -> Any:
@@ -194,6 +201,8 @@ class MeasuredCursor(psycopg.AsyncCursor):
         METRICS.fetched_rows += len(result)
         if getattr(self, "_bench_journal_query", False):
             METRICS.journal_rows += len(result)
+        if getattr(self, "_bench_event_body_query", False):
+            METRICS.event_body_rows += len(result)
         return result
 
 
@@ -384,6 +393,7 @@ class WorkerState:
         self.observer_errors: list[str] = []
         self.behavior = BehaviorState(runtime, provider)
         self.faults = FaultState(runtime, provider)
+        self.cleanup = CleanupState(runtime, BenchAgent)
 
     async def operation(self, request: dict[str, Any]) -> dict[str, Any]:
         op = request["op"]
@@ -521,6 +531,9 @@ class WorkerState:
         behavior = await self.behavior.operation(request)
         if behavior is not None:
             return behavior
+        cleanup = await self.cleanup.operation(request)
+        if cleanup is not None:
+            return cleanup
         faults = await self.faults.operation(request)
         if faults is not None:
             return faults
@@ -598,6 +611,8 @@ async def serve(pipe: Any, settings: dict[str, Any]) -> None:
                 "sql_ms": METRICS.sql_ms,
                 "journal_queries": METRICS.journal_queries,
                 "journal_rows": METRICS.journal_rows,
+                "event_body_queries": METRICS.event_body_queries,
+                "event_body_rows": METRICS.event_body_rows,
                 "result_queries": METRICS.result_queries,
                 "notifications": dict(METRICS.notifications),
                 "provider_requests": len(provider.requests) - provider_before,
@@ -614,6 +629,7 @@ async def serve(pipe: Any, settings: dict[str, Any]) -> None:
             pipe.send(reply)
     finally:
         await state.behavior.close()
+        await state.cleanup.close()
         await state.faults.close()
         await state.operation({"op": "stop_observers"})
         await runtime.aclose()

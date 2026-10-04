@@ -9,4 +9,4 @@ Tantra is a process-wide actor runtime for Python agents. Every root and child a
 
 Start with the [quickstart](getting-started/quickstart.md), then read [actor architecture](concepts/architecture.md), [durability and crashes](concepts/durability.md), and [subagents](guides/subagents.md).
 
-Tantra 1.3 adds bounded PostgreSQL command/recovery reads, pooled concurrent access, shared observation, and optional compacted-history loading. Existing PostgreSQL deployments should follow the [1.3 upgrade guide](guides/migration-1.3.md) with writers stopped.
+Tantra 1.3 adds bounded PostgreSQL command/recovery reads, pooled concurrent access, shared observation, optional compacted-history loading, and [session deletion and scoped cleanup](reference/runtime.md#selector-cleanup). Existing PostgreSQL deployments should follow the [1.3 upgrade guide](guides/migration-1.3.md) with writers stopped.

@@ -5,10 +5,12 @@ import base64
 import hashlib
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import ValidationError
 
+from tantra.cleanup import CleanupCandidate, CleanupSelector, check_revision, cleanup_cursor
 from tantra.errors import (
     CoordinatorUnavailable,
     CorruptLog,
@@ -415,6 +417,25 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         "CREATE TRIGGER deleted_event_guard BEFORE INSERT OR UPDATE ON {schema}.events"
         " FOR EACH ROW EXECUTE FUNCTION {schema}.guard_deleted_session()",
     ),
+    (
+        "ALTER TABLE {schema}.sessions ADD COLUMN updated_at timestamptz",
+        "UPDATE {schema}.sessions SET updated_at = COALESCE((header->>'updated_at')::timestamptz, created_at)",
+        "ALTER TABLE {schema}.sessions ALTER COLUMN updated_at SET NOT NULL",
+        "ALTER TABLE {schema}.sessions ALTER COLUMN updated_at SET DEFAULT clock_timestamp()",
+        """
+        CREATE FUNCTION {schema}.sync_session_updated_at() RETURNS trigger AS $$
+        BEGIN
+            NEW.updated_at := COALESCE((NEW.header->>'updated_at')::timestamptz, NEW.updated_at, clock_timestamp());
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        """,
+        """
+        CREATE TRIGGER sessions_updated_at_sync
+        BEFORE INSERT OR UPDATE OF header ON {schema}.sessions
+        FOR EACH ROW EXECUTE FUNCTION {schema}.sync_session_updated_at()
+        """,
+    ),
 )
 
 
@@ -515,8 +536,135 @@ class PostgresStore:
             )
             return bool((await cursor.fetchone())[0])
 
+    async def select_cleanup(
+        self, selector: CleanupSelector, *, limit: int, after: str | None = None
+    ) -> list[CleanupCandidate]:
+        root_ids = None if selector.root_ids is None else [root.hex for root in selector.root_ids]
+        cursor = cleanup_cursor(after)
+        try:
+            async with self._connection() as conn:
+                async with conn.transaction():
+                    await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                    if root_ids:
+                        found = await conn.execute(
+                            self._sql(
+                                "SELECT id FROM {schema}.sessions WHERE id = ANY(%s::text[])"
+                                " AND (parent_id IS NOT NULL"
+                                " OR COALESCE(NULLIF(header->>'root_id', ''), id) <> id) LIMIT 1"
+                            ),
+                            (root_ids,),
+                        )
+                        row = await found.fetchone()
+                        if row is not None:
+                            raise TantraError("cleanup root_ids contains a live child")
+                    return await self._cleanup_rows(
+                        conn,
+                        root_ids=root_ids,
+                        metadata=dict(selector.metadata or {}),
+                        inactive_before=selector.inactive_before,
+                        after=cursor,
+                        limit=limit,
+                    )
+        except (psycopg.OperationalError, psycopg.InterfaceError) as exc:
+            raise CoordinatorUnavailable("cannot select cleanup candidates") from exc
+
+    async def _cleanup_rows(
+        self,
+        conn: Any,
+        *,
+        root_ids: list[str] | None,
+        limit: int,
+        metadata: dict[str, Any] | None = None,
+        inactive_before: datetime | None = None,
+        after: tuple[datetime, str] | None = None,
+        require_root: bool = True,
+    ) -> list[CleanupCandidate]:
+        cursor = await conn.execute(
+            self._sql(
+                "WITH RECURSIVE roots AS ("
+                " SELECT s.id, s.created_at FROM {schema}.sessions s"
+                " WHERE (%s::boolean OR (s.parent_id IS NULL"
+                " AND COALESCE(NULLIF(s.header->>'root_id', ''), s.id) = s.id))"
+                " AND (%s::boolean OR s.id = ANY(%s::text[]))"
+                " AND (%s::boolean OR s.metadata @> %s::jsonb)"
+                ' AND (%s::boolean OR (s.created_at, s.id COLLATE "C")'
+                ' > (%s::timestamptz, %s::text COLLATE "C"))'
+                "), tree(root_id, id) AS ("
+                " SELECT id, id FROM roots UNION"
+                " SELECT t.root_id, s.id FROM {schema}.sessions s JOIN tree t ON s.parent_id = t.id"
+                "), session_state AS ("
+                " SELECT t.root_id, max(s.updated_at) AS updated_at,"
+                " bool_or(s.operational_version <> 1 OR s.operational_seq <> s.last_seq"
+                " OR s.header->>'status' IN ('queued', 'running', 'awaiting_input')"
+                " OR s.header->>'current_turn_id' IS NOT NULL"
+                " OR s.header->>'pending_ask' IS NOT NULL) AS active,"
+                " jsonb_agg(jsonb_build_array(s.id, s.parent_id, s.created_at, s.updated_at,"
+                " s.header, s.last_seq, s.operational_version, s.operational_seq)"
+                ' ORDER BY s.id COLLATE "C") AS payload'
+                " FROM tree t JOIN {schema}.sessions s ON s.id = t.id GROUP BY t.root_id"
+                "), live_index AS ("
+                " SELECT t.root_id, jsonb_agg(jsonb_build_array(i.actor_id, i.seq, i.event_type,"
+                " encode(i.command_id, 'hex'), encode(i.turn_id, 'hex'))"
+                ' ORDER BY i.actor_id COLLATE "C", i.seq) AS payload'
+                " FROM tree t JOIN {schema}.journal_index i ON i.actor_id = t.id"
+                " WHERE i.live GROUP BY t.root_id"
+                "), activity AS ("
+                " SELECT a.root_id, jsonb_agg(jsonb_build_array(a.actor_id, a.active)"
+                ' ORDER BY a.actor_id COLLATE "C") AS payload'
+                " FROM {schema}.coordinator_activity a JOIN roots r ON r.id = a.root_id"
+                " WHERE a.active GROUP BY a.root_id"
+                "), requests AS ("
+                " SELECT q.root_id, jsonb_agg(jsonb_build_array(q.request_id::text, q.deadline,"
+                " q.envelope->>'operation')"
+                " ORDER BY q.request_id) AS payload"
+                " FROM {schema}.coordinator_requests q JOIN roots r ON r.id = q.root_id"
+                " WHERE q.reply IS NULL AND q.deadline > clock_timestamp()"
+                " AND q.envelope->>'operation' IN ('send', 'answer', 'cancel') GROUP BY q.root_id"
+                ") SELECT r.id, r.created_at, s.updated_at,"
+                " encode(sha256(convert_to(jsonb_build_array(s.payload,"
+                " COALESCE(i.payload, '[]'::jsonb), COALESCE(a.payload, '[]'::jsonb),"
+                " COALESCE(q.payload, '[]'::jsonb))::text, 'UTF8')), 'hex'),"
+                " COALESCE(s.active, false) OR i.payload IS NOT NULL"
+                " OR a.payload IS NOT NULL OR q.payload IS NOT NULL"
+                " FROM roots r JOIN session_state s ON s.root_id = r.id"
+                " LEFT JOIN live_index i ON i.root_id = r.id"
+                " LEFT JOIN activity a ON a.root_id = r.id"
+                " LEFT JOIN requests q ON q.root_id = r.id"
+                " WHERE (%s::boolean OR s.updated_at < %s::timestamptz)"
+                ' ORDER BY r.created_at, r.id COLLATE "C" LIMIT %s'
+            ),
+            (
+                not require_root,
+                root_ids is None,
+                root_ids or [],
+                not metadata,
+                Jsonb(metadata or {}),
+                after is None,
+                None if after is None else after[0],
+                None if after is None else after[1],
+                inactive_before is None,
+                inactive_before,
+                max(limit, 0),
+            ),
+        )
+        return [
+            CleanupCandidate(
+                root_id=root_id,
+                created_at=created_at,
+                updated_at=updated_at,
+                revision=revision,
+                active=active,
+            )
+            for root_id, created_at, updated_at, revision, active in await cursor.fetchall()
+        ]
+
     async def delete_tree(
-        self, sid: str, *, allow_active: bool = False, before_delete: Callable[[list[str]], None] | None = None
+        self,
+        sid: str,
+        *,
+        allow_active: bool = False,
+        before_delete: Callable[[list[str]], None] | None = None,
+        expected_revision: str | None = None,
     ) -> list[str]:
         async with self._connection() as conn, conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (sid,))
@@ -524,7 +672,13 @@ class PostgresStore:
             if await cursor.fetchone() is None:
                 return []
             await self._guard_session(conn, sid)
-            return await self._delete_tree(conn, sid, allow_active=allow_active, before_delete=before_delete)
+            return await self._delete_tree(
+                conn,
+                sid,
+                allow_active=allow_active,
+                before_delete=before_delete,
+                expected_revision=expected_revision,
+            )
 
     async def _deletion_headers(self, conn: Any, sid: str) -> list[SessionHeader]:
         cursor = await conn.execute(
@@ -537,9 +691,6 @@ class PostgresStore:
             (sid,),
         )
         headers = [_hydrate(row) for row in await cursor.fetchall()]
-        root = next((header for header in headers if header.id == sid), None)
-        if root is not None and (root.parent_id is not None or root.root_id not in (None, sid)):
-            raise TantraError(f"session {sid} is not a root")
         return headers
 
     async def _delete_tree(
@@ -550,29 +701,19 @@ class PostgresStore:
         allow_active: bool,
         before_delete: Callable[[list[str]], None] | None = None,
         request_id: Any = None,
+        expected_revision: str | None = None,
     ) -> list[str]:
         headers = await self._deletion_headers(conn, sid)
         if not headers:
             return []
         ids = [header.id for header in headers]
-        if not allow_active:
-            cursor = await conn.execute(
-                self._sql(
-                    "SELECT EXISTS (SELECT 1 FROM {schema}.journal_index WHERE actor_id = ANY(%s::text[]) AND live"
-                    " UNION ALL SELECT 1 FROM {schema}.sessions WHERE id = ANY(%s::text[])"
-                    " AND (operational_version <> 1 OR operational_seq <> last_seq"
-                    " OR header->>'status' IN ('queued', 'running', 'awaiting_input')"
-                    " OR header->>'current_turn_id' IS NOT NULL OR header->>'pending_ask' IS NOT NULL)"
-                    " UNION ALL SELECT 1 FROM {schema}.coordinator_activity"
-                    " WHERE root_id = %s AND active"
-                    " UNION ALL SELECT 1 FROM {schema}.coordinator_requests WHERE root_id = %s"
-                    " AND reply IS NULL AND deadline > clock_timestamp()"
-                    " AND envelope->>'operation' IN ('send', 'answer', 'cancel'))"
-                ),
-                (ids, ids, sid, sid),
-            )
-            if (await cursor.fetchone())[0]:
-                raise SessionBusy(sid)
+        state = (await self._cleanup_rows(conn, root_ids=[sid], limit=1, require_root=False))[0]
+        check_revision(expected_revision, state.revision)
+        root = next((header for header in headers if header.id == sid), None)
+        if root is not None and (root.parent_id is not None or root.root_id not in (None, sid)):
+            raise TantraError(f"session {sid} is not a root")
+        if not allow_active and state.active:
+            raise SessionBusy(sid)
         if before_delete is not None:
             before_delete(ids)
         await conn.execute(
@@ -615,6 +756,7 @@ class PostgresStore:
                 if row is None:
                     raise SessionNotFound(h.id)
                 stored.last_seq = row[0]
+                stored.updated_at = datetime.now(UTC)
                 await conn.execute(
                     self._sql(
                         "UPDATE {schema}.sessions SET header = %s, metadata = %s, parent_id = %s, created_at = %s"

@@ -592,7 +592,7 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
         if args.faults:
-            report["workload"].update({"suite": "faults", "scenarios": args.scenario})
+            report["workload"].update({"suite": "faults", "scenarios": args.scenario or list(FAULT_SCENARIOS)})
         if settings.get("reconciled"):
             report["budget_reconciliation"] = settings["reconciled"]
         with Database() as database:

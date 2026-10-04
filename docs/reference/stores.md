@@ -28,3 +28,7 @@ The journal-index, operational-checkpoint, and coordinator-index migrations run 
 The package retains older store methods only for the transitional in-repository application until its migration. They are not part of the Runtime contract.
 
 Migration 8 adds permanent ID-only deletion markers and PostgreSQL write guards. Stop writers before setup; the migration publishes atomically and does not rewrite retained journals. SQLite setup adds its marker table idempotently. Session deletion is performed through `Runtime.delete`, which handles tasks, fencing, and readers. The optional store primitives do not extend the required Store protocol; direct unfenced deletion of a coordinated root is rejected. Filesystem deletion is unsupported.
+
+## Cleanup selection
+
+Memory, SQLite, and PostgreSQL provide optional cleanup selection and revision-guarded deletion. These capabilities are not additions to the required Store protocol. PostgreSQL migration 9 adds a native actor `updated_at` synchronized with header writes. Selection computes tree age and activity from headers and lifecycle evidence in SQL, without reading historical event bodies or updating the root for every child event. Run migrations with writers stopped; mixed-version writers are unsupported.

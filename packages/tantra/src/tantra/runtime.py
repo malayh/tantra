@@ -13,6 +13,14 @@ from pydantic import TypeAdapter
 
 from tantra.agent import Agent, agent_name, build_name_table
 from tantra.ask import ApprovalResponse, AskResponse
+from tantra.cleanup import (
+    CleanupChanged,
+    CleanupReport,
+    CleanupResult,
+    CleanupSelector,
+    cleanup_cursor,
+    cleanup_infrastructure,
+)
 from tantra.context import compacted_history
 from tantra.coordinator import (
     AnswerPayload,
@@ -1034,7 +1042,7 @@ class Runtime:
     async def delete(self, root_id: UUID, *, allow_active: bool = False) -> bool:
         return await _shielded(self._accept_delete(root_id, allow_active=allow_active))
 
-    async def _accept_delete(self, root_id: UUID, *, allow_active: bool) -> bool:
+    async def _accept_delete(self, root_id: UUID, *, allow_active: bool, expected_revision: str | None = None) -> bool:
         self._ensure_open()
         self._ensure_started()
         _, sid = _id(root_id, "root_id")
@@ -1051,9 +1059,13 @@ class Runtime:
             header = await self.store.header(sid)
             if header is None:
                 return False
+            if expected_revision is not None and (header.parent_id is not None or header.root_id not in (None, sid)):
+                raise CleanupChanged("selected root changed")
             try:
                 await self._root_header(sid)
-                result = await self._request_command(sid, "delete", DeletePayload(allow_active=allow_active), None)
+                result = await self._request_command(
+                    sid, "delete", DeletePayload(allow_active=allow_active, expected_revision=expected_revision), None
+                )
             except SessionNotFound:
                 return False
             finally:
@@ -1062,10 +1074,12 @@ class Runtime:
         tasks: list[asyncio.Task[None]] = []
         async with self._lock(sid):
             try:
+                kwargs = {"expected_revision": expected_revision} if expected_revision is not None else {}
                 ids = await delete_tree(
                     sid,
                     allow_active=allow_active,
                     before_delete=lambda ids: tasks.extend(self._begin_deletion(sid, ids, allow_active)),
+                    **kwargs,
                 )
             except BaseException:
                 self._deleting.discard(sid)
@@ -1073,6 +1087,66 @@ class Runtime:
         if ids:
             await self._finish_deletion(sid, ids, tasks)
         return bool(ids)
+
+    async def cleanup(
+        self,
+        selector: CleanupSelector,
+        *,
+        dry_run: bool = True,
+        allow_active: bool = False,
+        limit: int = 100,
+        after: str | None = None,
+    ) -> CleanupReport:
+        self._ensure_open()
+        self._ensure_started()
+        if not isinstance(selector, CleanupSelector):
+            raise TypeError("selector must be a CleanupSelector")
+        if not isinstance(dry_run, bool) or not isinstance(allow_active, bool):
+            raise TypeError("dry_run and allow_active must be booleans")
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        cleanup_cursor(after)
+        select = getattr(self.store, "select_cleanup", None)
+        if (
+            not callable(select)
+            or not callable(getattr(self.store, "delete_tree", None))
+            or self.coordinator is not None
+            and not isinstance(self.coordinator, PostgresCoordinator)
+        ):
+            raise NotImplementedError("this store/coordinator does not support session cleanup")
+        try:
+            candidates = await select(selector, limit=limit + 1, after=after)
+        except Exception as exc:
+            if not cleanup_infrastructure(exc):
+                raise
+            return CleanupReport((), next_after=after, error_code=type(exc).__name__[:80])
+        results: list[CleanupResult] = []
+        cursor = after
+        for candidate in candidates[:limit]:
+            root_id = UUID(hex=candidate.root_id)
+            if candidate.active and not allow_active:
+                results.append(CleanupResult(root_id, "active"))
+            elif dry_run:
+                results.append(CleanupResult(root_id, "candidate"))
+            else:
+                try:
+                    deleted = await _shielded(
+                        self._accept_delete(root_id, allow_active=allow_active, expected_revision=candidate.revision)
+                    )
+                    results.append(CleanupResult(root_id, "deleted" if deleted else "absent"))
+                except SessionBusy:
+                    results.append(CleanupResult(root_id, "active"))
+                except CleanupChanged:
+                    results.append(CleanupResult(root_id, "changed"))
+                except Exception as exc:
+                    code = type(exc).__name__[:80]
+                    if cleanup_infrastructure(exc):
+                        results.append(CleanupResult(root_id, "unknown", code))
+                        return CleanupReport(tuple(results), next_after=cursor, error_code=code)
+                    results.append(CleanupResult(root_id, "failed", code))
+            cursor = candidate.cursor
+            await asyncio.sleep(0)
+        return CleanupReport(tuple(results), next_after=cursor if len(candidates) > limit else None)
 
     async def _acquire_for_deletion(self, root_id: str) -> None:
         assert self.coordinator is not None
@@ -1853,6 +1927,7 @@ class Runtime:
             "writer_replaced": WriterReplaced,
             "writer_required": WriterRequired,
             "session_busy": SessionBusy,
+            "cleanup_changed": CleanupChanged,
             "session_not_found": SessionNotFound,
         }
         error = errors.get(reply.error_code or "")
@@ -2042,14 +2117,18 @@ class Runtime:
                 ids = await store.delete_tree(
                     request.root_id,
                     allow_active=payload.allow_active,
+                    expected_revision=payload.expected_revision,
                     before_delete=lambda actors: tasks.extend(
                         self._begin_deletion(request.root_id, actors, payload.allow_active)
                     ),
                 )
                 return CommandReply(request_id=request.request_id, result={"deleted": bool(ids)})
-            except SessionBusy:
+            except (SessionBusy, CleanupChanged) as exc:
                 return CommandReply(
-                    request_id=request.request_id, status="error", error_code="session_busy", message=request.root_id
+                    request_id=request.request_id,
+                    status="error",
+                    error_code="session_busy" if isinstance(exc, SessionBusy) else "cleanup_changed",
+                    message=request.root_id,
                 )
 
         try:

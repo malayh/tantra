@@ -90,6 +90,7 @@ class CancelPayload(FrozenModel):
 class DeletePayload(FrozenModel):
     type: Literal["delete"] = "delete"
     allow_active: bool = False
+    expected_revision: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 CommandPayload = Annotated[
@@ -1210,7 +1211,12 @@ class CoordinatedStore:
         self.delete_request_id: UUID | None = None
 
     async def delete_tree(
-        self, sid: str, *, allow_active: bool = False, before_delete: Callable[[list[str]], None] | None = None
+        self,
+        sid: str,
+        *,
+        allow_active: bool = False,
+        before_delete: Callable[[list[str]], None] | None = None,
+        expected_revision: str | None = None,
     ) -> list[str]:
         await self._assert_fence()
         if sid != self.ownership.root_id:
@@ -1223,6 +1229,7 @@ class CoordinatedStore:
             allow_active=allow_active,
             before_delete=before_delete,
             request_id=self.delete_request_id,
+            expected_revision=expected_revision,
         )
         return self.deleted_ids
 
@@ -1291,6 +1298,7 @@ class CoordinatedStore:
         self._ensure_active()
         self._check_header(header)
         stored = header.model_copy(deep=True)
+        stored.updated_at = datetime.now(UTC)
         cursor = await self.conn.execute(
             self.coordinator._sql("SELECT last_seq FROM {schema}.sessions WHERE id = %s FOR UPDATE"),
             (header.id,),

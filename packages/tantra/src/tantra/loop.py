@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextvars import copy_context
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4
@@ -57,6 +58,9 @@ if TYPE_CHECKING:
 
 SUBMIT_OUTPUT = "submit_output"
 COMPLETED_RESULT = "not executed: turn completed"
+DELTA_BATCH_DELAY = 0.025
+DELTA_BATCH_COUNT = 32
+DELTA_BATCH_BYTES = 65_536
 
 
 @dataclass(frozen=True)
@@ -135,6 +139,7 @@ class TurnEngine:
         patch_header: Callable[..., Awaitable[SessionHeader]] | None = None,
         terminal_tool: str | None = None,
         history_mode: Literal["full", "compacted"] = "full",
+        _batch_deltas: bool = False,
     ) -> None:
         self.store = store
         self.provider = provider
@@ -148,6 +153,9 @@ class TurnEngine:
         self.deps = deps
         self.retry = retry
         self.hooks = list(hooks)
+        self._batch_deltas = _batch_deltas and all(
+            getattr(hook.on_event, "__func__", None) is Hook.on_event for hook in self.hooks
+        )
         self.default_permission = default_permission
         self.permission_chain = list(permission_chain)
         self.skills_index = list(skills_index)
@@ -260,6 +268,88 @@ class TurnEngine:
             await hook.after_turn(self.turn, terminal)
         return terminal
 
+    async def _stream_events(self, req: SampleRequest) -> AsyncIterator[list[SessionEvent] | StreamEnd]:
+        provider_context = copy_context()
+        stream = (
+            provider_context.run(lambda: aiter(self.provider.stream(req)))
+            if self._batch_deltas
+            else aiter(self.provider.stream(req))
+        )
+        pending: asyncio.Future[Any] | None = None
+        buffer: list[SessionEvent] = []
+        size = 0
+        deadline = 0.0
+        loop = asyncio.get_running_loop()
+
+        async def read() -> Any:
+            return await anext(stream)
+
+        async def close() -> None:
+            closer = getattr(stream, "aclose", None)
+            if closer is not None:
+                await closer()
+
+        try:
+            while True:
+                if buffer and loop.time() >= deadline:
+                    batch, buffer = buffer, []
+                    size = 0
+                    yield batch
+                    continue
+                try:
+                    if self._batch_deltas:
+                        if pending is None:
+                            pending = asyncio.create_task(read(), context=provider_context)
+                        done, _ = await asyncio.wait(
+                            (pending,), timeout=max(0, deadline - loop.time()) if buffer else None
+                        )
+                        if not done:
+                            continue
+                        event = pending.result()
+                        pending = None
+                    else:
+                        event = await anext(stream)
+                except StopAsyncIteration:
+                    if buffer:
+                        yield buffer
+                    return
+                except ProviderError:
+                    if buffer:
+                        yield buffer
+                    raise
+                if isinstance(event, TextDelta | ReasoningDelta | ToolCallDelta):
+                    if not self._batch_deltas:
+                        yield [event]
+                        continue
+                    event_size = len(event.model_dump_json().encode())
+                    if buffer and (size + event_size > DELTA_BATCH_BYTES or loop.time() >= deadline):
+                        batch, buffer = buffer, []
+                        size = 0
+                        yield batch
+                    if not buffer:
+                        deadline = loop.time() + DELTA_BATCH_DELAY
+                    buffer.append(event)
+                    size += event_size
+                    if len(buffer) >= DELTA_BATCH_COUNT or size >= DELTA_BATCH_BYTES:
+                        batch, buffer = buffer, []
+                        size = 0
+                        yield batch
+                else:
+                    if buffer:
+                        batch, buffer = buffer, []
+                        size = 0
+                        yield batch
+                    if isinstance(event, StreamEnd):
+                        yield event
+        finally:
+            if pending is not None:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+            if self._batch_deltas:
+                await asyncio.create_task(close(), context=provider_context)
+            else:
+                await close()
+
     async def _sample(
         self,
         req: SampleRequest,
@@ -284,30 +374,43 @@ class TurnEngine:
             while True:
                 attempts += 1
                 end = None
+                failure = None
+                stream = self._stream_events(req)
                 try:
-                    async for event in self.provider.stream(req):
-                        if isinstance(event, TextDelta | ReasoningDelta | ToolCallDelta):
-                            await self._append([event])
+                    while True:
+                        try:
+                            event = await anext(stream)
+                        except StopAsyncIteration:
+                            break
+                        except ProviderError as exc:
+                            failure = exc
+                            break
+                        if isinstance(event, list):
+                            await self._append(event)
                             persisted = True
-                        elif isinstance(event, StreamEnd):
+                        else:
                             end = event
-                    if end is None:
-                        raise ProviderError("provider stream ended without a StreamEnd")
-                except ProviderError as exc:
+                finally:
+                    await stream.aclose()
+                if failure is None and end is None:
+                    failure = ProviderError("provider stream ended without a StreamEnd")
+                if failure is not None:
+                    exc = failure
                     if exc.context_overflow:
                         if persisted or recovered:
-                            raise
+                            raise exc
                         replacement = await recover()
                         if replacement is None:
-                            raise
+                            raise exc
                         req = replacement
                         recovered = True
                         continue
                     failures += 1
                     if failures >= self.retry.max_attempts or not is_retryable(exc):
-                        raise
+                        raise exc
                     await asyncio.sleep(min(self.retry.base_delay * 2 ** (failures - 1), self.retry.max_delay))
                     continue
+                assert end is not None
                 return end
         except BaseException as exc:
             error = exc

@@ -81,6 +81,7 @@ from tantra.permissions import check_permission, decide
 from tantra.providers.base import Provider
 from tantra.skills import SKILL_TOOL, SkillInfo, Skills
 from tantra.stores.base import HistorySnapshot, OperationalState, Store, reduce_journal
+from tantra.stores.postgres import PostgresStore
 from tantra.tools import Context, Tool
 from tantra.tracing import NULL_TRACER, Tracer
 
@@ -1774,6 +1775,8 @@ class Runtime:
                     model=model,
                     history=[item.event for item in history.items],
                     history_mode=self.history_mode,
+                    _batch_deltas=type(self.store) is PostgresStore
+                    and (self.coordinator is None or type(self.coordinator) is PostgresCoordinator),
                     deps=deps,
                     retry=self.retry,
                     hooks=self.hooks,

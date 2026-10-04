@@ -73,14 +73,18 @@ Reduce Python and PostgreSQL CPU during streaming, observation, and reader fan-o
 - **37 focused checks** and **1,010 package/bench/durable PostgreSQL stress tests passed, zero skips**; `just lint` and one independent Ponytail review passed. Migration rollback/retry preserves journal bodies and sequences. Actual shared-observation plans use `journal_terminal_idx` with one index-only result at 4,000 and 100,000 events, without event-body reads. Plans and review evidence are retained under `016-p1-checks`.
 - Owned workers, Compose databases, and volumes were removed; watcher/subscription counts and expired transport backlog returned to zero. No paid inference or application changes. Stop after P1; P2 remains unstarted.
 
-### P2 — Bounded durable delta batching · deps: P1 · —
+### P2 — Bounded durable delta batching · deps: P1 · DONE
 
 **Deliver**
 - Batch only provider `TextDelta`, `ReasoningDelta`, and `ToolCallDelta`. Preserve each original event and its order.
+- Enable the private batching path only for the built-in PostgreSQL append path without custom coordination or `on_event` overrides. Other stores and custom event hooks retain immediate commits.
+- Flush at 25 ms, 32 events, or 64 KiB. Count the complete UTF-8 delta JSON, including extra fields and escaping; flush before exceeding the byte bound and commit oversized events alone.
 - Use bounded buffering with at most one pending provider read; flush on timeout even when the provider stalls. Commit an oversized event alone.
 - Flush before stream completion, tool execution boundaries, and ordinary provider error/retry handling while ownership remains valid.
 - Treat received buffered output as partial output for context-overflow recovery decisions.
+- Run batched provider construction, sequential reads, and closure in one private context so tracing and other `ContextVar` scopes reset correctly. Immediate paths retain the caller context.
 - Preserve generation checks, root ordering, hooks after commit, and existing unknown-commit handling. Never retry a possibly committed batch blindly or append after a cancellation terminal.
+- Capture the unchanged fresh before campaign before runtime edits; retain benchmark identities and compare the matching after campaign with both it and retained P1 evidence. Keep append failures outside provider retry handling.
 
 **Verify**
 - Prove count, byte, and timer bounds; commit-before-delivery; exact replay identity; and immediate behavior for fallible custom event hooks.
@@ -88,8 +92,15 @@ Reduce Python and PostgreSQL CPU during streaming, observation, and reader fan-o
 - Compare CPU, transactions, WAL, first-event latency, and inter-event latency against P1.
 
 **Checklist**
-- [ ] Automatic batching and compatible fallback
-- [ ] Flush-boundary faults and before/after reports
+- [x] Automatic batching and compatible fallback
+- [x] Flush-boundary faults and before/after reports
+
+**Verification — 2026-10-04**
+- [Fresh before](../stress/bench/artifacts/016-p2-before/report.html), [final after](../stress/bench/artifacts/016-p2-after/report.html), [matched comparison](../stress/bench/artifacts/016-p2-comparison/report.html), and [retained P1 comparison](../stress/bench/artifacts/016-p2-vs-p1/report.html) passed. Each campaign retained 21 warmed scenarios and 57 measured trials, identical workload/instrumentation/database identities, and matching replay digests and independent commit probes.
+- Five-trial 1,024-fragment cases with 0/1/8 extra readers reduced median Python CPU **88.5%/88.8%/85.4%**, PostgreSQL CPU **89.1%/89.3%/83.9%**, and wall time **92.8%/92.8%/92.1%**. Commits fell **1,042 → 49** and WAL fell roughly **79%**. Event bodies and individual sequences remain unchanged; header/guard work, encoding, full-history loading, and duplicate reader work remain for P3/P4.
+- Remote delivery P95 increased **33.31 → 39.03 ms** with one extra reader and **29.25 → 45.19 ms** with eight. The one-trial paced case increased first delivery **17.95 → 60.60 ms** and delivery P95 **33.91 → 66.58 ms**; buffering and observation both contribute alongside database/scheduler delay. The unbatched tool-progress exploratory case regressed **115.22 ms (+6.8%)** in wall time, **14.4%** in Python CPU, and **7.2%** in PostgreSQL CPU; cause is not isolated. Reports retain these findings and maximum inter-event gaps, since burst-local P95 can hide gaps between batches. Previously deferred latency findings remain separate.
+- **70 focused checks** and **1,050 package/bench/durable PostgreSQL stress tests passed, zero skips**; `just lint` and one independent Ponytail review passed. A provider `ContextVar` compatibility defect discovered after the initial review required a narrow fix and re-review: construction, sequential reads, and closure now share one context on the batched path. The superseded after run remains incomplete under `016-p2-after-superseded`; only the corrected final campaign is authoritative. Fault tests prove exact committed prefixes across cancellation, deletion, shutdown, takeover, rollback, lost acknowledgments, and process death before/during/after flush.
+- Owned before/after/focused workers, Compose containers, and volumes were removed; watcher/subscription counts and expired transport backlog returned to zero. No paid inference, migration, or application changes. Stop after P2; P3 remains unstarted.
 
 ### P3 — Reduce transaction and header overhead · deps: P2 · —
 

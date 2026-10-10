@@ -590,7 +590,7 @@ class TurnEngine:
                     Approval(
                         title=f"Run {call.name}?",
                         body=body,
-                        extra={"permission": call.name},
+                        extra={"permission": call.name, "arguments": json.loads(json.dumps(effective.args))},
                     ),
                 )
                 if not (isinstance(response, ApprovalResponse) and response.allow):
@@ -635,6 +635,7 @@ class TurnEngine:
             emit=emit,
             ask=lambda request: self._ask(call.call_id, request),
             memory=self.memory,
+            submitted_by=self.turn.submitted_by,
         )
         kwargs = dict(prepared.kwargs)
         if prepared.tool.ctx_param is not None:
@@ -835,6 +836,7 @@ class TurnEngine:
             input=queued.input,
             metadata=self.header.metadata,
             deps=self.deps,
+            submitted_by=queued.submitted_by,
         )
         self.turn.history = self.history
         self.turn.model = self.model

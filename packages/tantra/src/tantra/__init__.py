@@ -70,7 +70,7 @@ from tantra.memory import (
 from tantra.providers.base import Embedder, ModelLimits, Provider, ProviderEvent, SampleRequest
 from tantra.providers.fake import FakeProvider, Sample
 from tantra.providers.openai_compat import OpenAICompatible, OpenAICompatibleEmbedder
-from tantra.runtime import CommandReceipt, Connection, Runtime, TurnResult
+from tantra.runtime import CommandReceipt, Connection, LocatedAsk, Runtime, TurnResult
 from tantra.skills import FileSystemSkills, Skill, SkillInfo, Skills
 from tantra.stores.base import Store
 from tantra.stores.fs import FileSystemStore
@@ -120,6 +120,7 @@ __all__ = [
     "InvalidCommandReuse",
     "LeaseLost",
     "LoggedEvent",
+    "LocatedAsk",
     "MaxDepthExceeded",
     "Memory",
     "MemoryHit",

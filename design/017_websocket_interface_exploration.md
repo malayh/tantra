@@ -1,132 +1,175 @@
-# 017 — WebSocket interface exploration
+# 017 — Pluggable WebSocket interface
 
-**Status:** provisional reference draft. No transport implementation is scheduled or authorized by this document.
+**Status:** P0 complete. P1–P3 not started.
 
 ## Goal
 
-Capture the evidence and constraints for an optional Tantra WebSocket interface. Refine it through future real applications before defining a public contract. The interface sketches below are hypotheses, not APIs available in Tantra 1.4.
+Provide a native ASGI WebSocket endpoint and framework-independent TypeScript client, then adopt them in Sarathi. Applications plug in authentication, permissions, input validation, event visibility, and notices.
 
 ## Scope
 
-**In:** Sarathi/Osuite findings, shared transport responsibilities, application integration points, illustrative interfaces, and questions to revisit.
+- **In:** private/team chats, editor snapshots, approvals, service clients, read-only observers, descendants, durable attribution, native ASGI transport, TypeScript client, Sarathi adoption.
+- **Out:** Osuite adoption, HTTP session/history routes, application identity models, UI reducers, billing, quotas, execution permissions, paid inference.
 
-**Out:** extracting either bridge, introducing dependencies, changing authentication, publishing a client SDK, or scheduling implementation phases beyond this reference draft.
+## Decisions
 
-## Decisions and constraints
+- Wrap public Runtime streams and commands. Runtime owns ordering, replay, recovery, command identity, fencing, and commit-before-delivery.
+- Applications own authentication and authorization. Writer ownership grants concurrency control, never application access.
+- Use native ASGI with existing dependencies; add no FastAPI/Starlette runtime dependency. The client uses native WebSocket, ESM, and declarations, without React or a state-library dependency.
+- Preserve Sarathi's full-history display. Replay is paged and memory-bounded; there is no default total-history cutoff. Applications may supply snapshot watermarks.
+- Persist optional attribution separately from Runtime actor identity. Applications authorize every approval against its durable descriptor and reauthorize protected effects at execution.
+- Deploy coordinated workers together before relying on attribution. Deploy Sarathi backend/client together; old wire clients require refresh.
 
-- Wrap existing Runtime operations: `connect`, `events`, `Connection.send`, `answer`, and `cancel`. Keep replay, recovery, command identity, fencing, and commit-before-delivery in Runtime rather than duplicating them in the adapter.
-- Applications own authentication, session access, and tool permissions. A writer token controls concurrency; it does not grant application authorization.
-- Preserve application input validation and immutable command payloads. Retrying an editor command must reuse its original snapshot rather than capturing a new draft.
-- Preserve actor/sequence cursors through event filtering. Replaying history reconstructs state; it must not reopen completed proposals or answered approvals.
-- Preserve accepted work across socket disconnects. Turn/tool authorization remains necessary because execution can outlive the authenticated connection.
-- Keep server dependencies optional and bound subscriptions, pending commands, and outbound buffering. A slow client must not block unrelated clients.
-- Judge extraction by the duplicated machinery it removes from real applications. Callbacks that recreate the bridge indicate a poor boundary.
-- Another agent class alone provides little transport evidence. Use a genuinely different application integration when a real requirement arises.
-
-## Current evidence
-
-| Source | Shared mechanisms | Application behavior |
-|---|---|---|
-| [Sarathi bridge](../apps/sarathi/backend/src/sarathi/api/ws.py) | Subscription tasks, replay readiness, writer handling, commands, errors, cleanup | Attachments, child subscriptions, typed asks, title/header updates |
-| [Osuite bridge](../../observability_ui/backend/app/api/agents.py) | Root subscription, replay readiness, writer handling, commands, errors, cleanup | Dashboard authorization, editor snapshots, proposal/display rules |
-
-- Sarathi's [socket tests](../apps/sarathi/backend/tests/test_ws.py) cover cursor replay, writer takeover, read-only views, descendants, asks, slow clients, and execution after disconnect. Osuite's [API tests](../../observability_ui/backend/app/tests/api/test_dashboard_agent.py) cover permission rechecks, deleted sessions, and two-runtime proposal/replay behavior.
-- The wire formats already differ: Sarathi supports `unsubscribe` and `ask_response`; Osuite restricts subscriptions to the root and includes `writable` in readiness frames. Extracting code is not automatically wire-compatible.
-- Both clients send credentials in query strings. No explicit Origin check was found in the inspected routes; ordinary CORS middleware does not authorize WebSocket handshakes. A future adapter needs an explicit security contract rather than silently inheriting these choices.
-- Osuite's [history service](../../observability_ui/backend/app/services/dashboard_history.py) projects the last 20 visible messages and hides skill bodies. Its client hydrates at a watermark before streaming the suffix. Generic event replay alone does not solve message-history loading or proposal eligibility.
-- Both apps use similar Runtime flows. They establish a shared-mechanism opportunity, not a universal application model.
-
-## Possible integration shape
-
-This sketch tests a boundary; names, signatures, dependencies, and callback count remain open. Authentication runs in application code. Header and actor identities supplied to policy checks must come from authoritative server state.
+## Application interface
 
 ```python
 endpoint = SessionSocket(
     runtime,
-    authorize=authorize,
-    message_schema=DashboardMessage,
-    encode_input=encode_input,
-    event_view_factory=DashboardEventView,
-    allowed_origins=application_origins,
+    bind=bind_session,
+    policy=access_policy,
+    input_codec=InputCodec(MessageSchema, encode_input),
+    views=open_event_view,
+    notices=open_application_notices,
+    allowed_origins=origins,
 )
-
-await endpoint.serve(
-    websocket,
-    root_id=root_id,
-    principal=identity.user,
-    expires_at=identity.expires_at,
-)
+await endpoint(scope, receive, send)
 ```
 
-| Candidate integration point | Application responsibility |
-|---|---|
-| Authentication before serving | Validate cookie/ticket/token and provide trusted identity and expiry |
-| Authorization | Check read access, writer acquisition, send, answer, and cancel; handle changed permissions |
-| Message validation and encoding | Validate dashboard context or attachments and prepare stable durable input |
-| Subscription-local event projection | Hide application content while preserving cursor advancement |
+- `bind(scope) -> SocketBinding` resolves the root and authenticated session through application middleware, cookies, tickets, or headers.
+- Authentication supplies an opaque principal, optional stable `submitted_by`, credential expiry, revalidation callback, and optional revocation event. Revalidate before mutations and every 30 seconds; enforce expiry independently of client traffic.
+- Policy authorizes subscribe, writer acquisition, send, answer, and cancel using server-loaded root/actor information, validated input, and durable ask details.
+- The input codec validates application JSON and deterministically encodes Runtime input. Retries retain their original payload; encoding performs no business writes.
+- A subscription-local event view starts at a cursor and maps committed events to JSON or null. Applications seed correlation state or redact conservatively.
+- Optional application notices are outbound-only iterators for title/model updates. They have no journal cursor or durable delivery guarantee.
+- Missing authentication/policy fails closed. Anonymous access requires explicit application configuration. Credential parsing, quotas, billing, and tool authorization stay application-owned.
 
-Potential shared server behavior includes subscriptions, caught-up state, command receipts, typed answers, stable errors, writer replacement, and cleanup. Potential browser behavior includes cursor tracking, exact-command outboxes, reconnects, and retries. Durable acceptance and turn completion are separate states; an uncertain timeout must retain the original command ID.
+## Durable attribution and approval details
 
-A possible browser call shape is:
+- `Connection.send`, `prompt`, `answer`, and `cancel` gain optional keyword-only `submitted_by: str | None`. Non-null identities are exact, nonempty strings of at most 256 characters; no normalization.
+- Persist attribution on `InputQueued`, `AskAnswered`, and `CancellationRequested`, and propagate input attribution to `TurnContext` and tool `Context`. Do not automatically include it in model prompts.
+- Preserve `AskAnswered.answered_by` as the Runtime root actor. Changed attribution under the same command ID raises `InvalidCommandReuse`; legacy missing attribution means None and is never reassigned.
+- Attribution is audit context, not a grant. Internal actor commands remain unattributed; applications control delegated execution scope.
+- `Runtime.lookup_ask(root_id, ask_id) -> LocatedAsk | None` returns the original `AskRaised`, actor UUID, and sequence. Validate the root; lookup performs no recovery or provider work and says nothing about pending state.
+- Duplicate matching asks are ambiguous and raise `ValueError`. Unknown ask IDs return None; missing roots raise `SessionNotFound`; live child IDs are rejected.
+- PostgreSQL optionally implements indexed `lookup_ask`; other/custom stores use a full-read fallback. Keep required Store/Coordinator protocols unchanged.
+- Permission approvals persist structured post-hook arguments in `Approval.extra['arguments']` alongside `permission`. Arguments must be JSON-serializable. Policies never parse display text or trust client descriptors.
+- Runtime remains authoritative for answer expiry/idempotency. Policies requiring resource details deny legacy asks that lack them.
 
-```typescript
-await chat.connect({ after: history.watermark, writable: false });
-await chat.takeWriter();
-const receipt = await chat.send(frozenMessage);
-await chat.answer(askId, { kind: "approval", allow: true });
-await chat.cancel();
-```
+## Transport and client
 
-Candidate companion contracts are versioned frames/types, connection and actor status, bounded history snapshots with watermarks and pending asks, and sanitized diagnostics. Each requires evidence before standardization. Cookie or connection-ticket authentication, a generic `Access` object, event-view factories, and a common history reducer are not committed design choices.
+- Subprotocol: `tantra.session.v1`. Strict JSON frames and canonical UUIDs.
+- Client operations: subscribe/unsubscribe, send, typed answer, cancel. Each subscription specifies actor, cursor, read/write mode, and unique subscription ID.
+- Server frames: projected event, replay-ready state, committed receipt, writer loss, sanitized error, application notice. Subscription frames echo the subscription ID.
+- Each actor has an independent cursor. Hidden events carry `body: null` and advance it. Ignore late frames from replaced subscriptions.
+- Root commands require a writable, caught-up subscription. Descendants are explicitly subscribed and read-only.
+- Writer replacement downgrades to reading; reconnect starts read-only; reclaim is explicit.
+- Receipts mean durable acceptance, not completion. Uncertain failures retry the same frozen command.
+- Install no projection `on_event` hook and duplicate no coordinator observation machinery.
+- Defaults: eight subscriptions, 256 KiB inbound, 1 MiB outbound, queue bounded to 256 frames/4 MiB. Await queue capacity with a ten-second timeout so healthy replay bursts survive while stalled clients disconnect.
+- The TypeScript client owns independent cursors and a bounded FIFO frozen-command outbox. Retry at most three times, then require manual intervention; hold commands after writer loss.
+- Advance cursors only after application event handling succeeds. Bound incoming queues; overflow reconnects from the last applied cursor. Persistence is opt-in and scoped to root plus authenticated identity.
 
 ## Considered & rejected
 
-- **Finalize a universal adapter now:** the two existing applications have similar integration patterns, so callback shapes and generality remain unproven.
-- **Build artificial applications for evidence:** spend the effort on real application requirements instead.
-- **Standardize identity or chat UI with the transport:** ownership, permissions, visible history, and actions differ between applications.
-- **Extract immediately:** the user chose a reference draft for future work.
+- **Framework-specific endpoint:** native ASGI works with application-selected frameworks without a runtime dependency.
+- **Standardize identity, HTTP routes, history reducers, or UI:** applications have different ownership and visibility rules.
+- **Use writer tokens as authorization:** concurrency ownership does not establish resource access.
+- **Parse approval display text:** hook transformations and presentation make it unreliable authorization evidence.
+- **Nonblocking queue overflow on every full queue:** healthy replay bursts can fill a bounded queue before the sender runs; timed capacity waits provide backpressure.
+- **Migrate Osuite in the same spec:** its history/proposal contracts need separate adoption work.
 
 ## Implementation phases
 
-### P0 — Reference draft · deps: none · ✅ DONE (documentation only)
+### P0 — Durable command attribution and ask lookup · deps: none · ✅ DONE
 
 **Deliver**
-- Record existing findings, preservation constraints, and illustrative interfaces in this document.
-- Keep public API choices open; record revisit criteria without scheduling an extraction.
+- Implement attribution, context propagation, duplicate comparisons, and durable approval descriptors.
+- Add PostgreSQL migration 12: ask identity projection and partial lookup index. Backfill through the existing codec in keyset batches of at most 1,000 events; publish atomically with writers stopped.
+- Preserve original journal bodies/sequences. Use compatible full-read lookup fallback outside PostgreSQL.
 
 **Verify**
-- Check current-code claims and source links against the inspected bridges and tests.
-- Confirm examples are clearly hypothetical and open choices are not presented as frozen contracts.
-- Confirm this work changes only the document, with no code, dependency, or application changes.
+- Retries, changed attribution, original cancellation targets, lost replies, recovery, legacy events, transformed arguments, ambiguous asks, root isolation, and lookup without activation.
+- Migration upgrade, repeat setup, both envelopes, NUL payloads, rollback/retry, and bounded PostgreSQL lookup on long journals.
+- Focused checks, `just lint`, package/bench tests, PostgreSQL stress tests with zero skips, and one independent Ponytail review.
 
 **Checklist**
-- [x] Findings and constraints
-- [x] Illustrative integration
-- [x] Open decisions and revisit criteria
+- [x] Attribution and context
+- [x] Durable descriptors and lookup
+- [x] Migration and bounded reads
+- [x] Correctness, project checks, documentation, and review
+
+**Verified:** 976 package tests; 148 stress/bench tests with zero skips; 89 targeted checks after the review fix, including four additional parity/read-bound cases; `just lint` and diff checks. Owned Compose PostgreSQL used `fsync=on` and `synchronous_commit=on`; workers and volumes were removed afterward. Normal query plans used `journal_ask_idx` on 4,000/100,000-event journals and read one original body. Independent review found duplicate asks could read bodies before limiting; lookup now limits identity evidence first, and 1,000 duplicate asks read at most two bodies. Runtime additions are frozen for dependent phases.
+
+### P1 — Native ASGI endpoint · deps: P0 · —
+
+**Deliver**
+- Implement protocol models, plugin interfaces, authentication lifecycle, ordered delivery, replay readiness, writer transitions, and bounded cleanup.
+- Check Origin before accepting. Reject missing Origin unless explicitly enabled for authenticated non-browser clients.
+- Revalidate read access periodically; pause protected delivery when access expires or becomes uncertain.
+
+**Verify**
+- Private, anonymous, team-role, editor, approval, observer, and descendant policies with deterministic fixtures.
+- Reconnect, filtered replay, slow clients, deletion, shutdown, revocation, and two-worker ownership changes.
+
+**Checklist**
+- [ ] Protocol and plugin contracts
+- [ ] Authentication and delivery lifecycle
+- [ ] Policy fixtures, transport checks, documentation, and review
+
+### P2 — TypeScript client · deps: P1 · —
+
+**Deliver**
+- Add a small ESM package with declarations and native WebSocket.
+- Provide connect/disconnect, subscriptions, explicit writer acquisition, send, typed answer, cancel, state/event callbacks, bounded outbox, and cursor handling.
+- Keep HTTP history and UI reducers application-owned.
+
+**Verify**
+- Protocol fixtures, mutation isolation, lost receipts, reconnect races, subscription replacement, identity changes, type/build/tests.
+
+**Checklist**
+- [ ] Client API and bounded state
+- [ ] Retry, reconnect, cursor, and persistence contracts
+- [ ] Client checks, documentation, and review
+
+### P3 — Sarathi adoption · deps: P2 · —
+
+**Deliver**
+- Replace bridge/connection hook; preserve full history, attachments, children, typed asks, titles, and model updates.
+- Add application-owned HTTP signed root-scoped 30-second handshake tickets. Reuse within the handshake window; socket lifetime follows original login expiry. Remove long-lived login tokens from WebSocket URLs.
+- Supply codec, explicit view, policy, title/model notices. Schedule titles in application lifecycle code so disconnects do not lose them.
+- Add explicit writer reclaim and distinguish authentication, deletion, and infrastructure failures. Update local client dependencies and Docker build context.
+
+**Verify**
+- Sarathi behavioral suite and browser workflows across both backend instances; lint/type/build/API checks.
+- Transport scale: 1,000 idle connections and 100 active synthetic turns across two workers. Bound queues, preserve Runtime pool limits, avoid per-delta authorization queries, and release all subscriptions.
+
+**Checklist**
+- [ ] Backend/client adoption and tickets
+- [ ] Preserved application behavior and writer UI
+- [ ] Two-instance browser/scale checks, documentation, and review
 
 ### Conventions
 
-- This is documentation only; no runtime test campaign or independent code review is required.
-- Future code work follows repository guidelines: Ponytail full, no code comments, focused verification, `just lint`, relevant tests, and one independent review per requested code phase.
-- **Contract freeze:** preservation constraints only. Package layout, wire protocol, and public interfaces remain provisional.
+- One requested phase at a time; Ponytail full; no code comments.
+- Use deterministic providers and owned durable Compose PostgreSQL; no paid inference.
+- Each code phase runs focused checks, `just lint`, package/bench tests, PostgreSQL stress with zero skips, and one independent review. Clean up owned resources.
+- **Contract freeze:** Runtime additions after P0; wire/plugin contracts after P1. Update this spec before changing frozen contracts.
+- Stop writers for migrations; mixed-version writers are unsupported.
 
 ### Keeping this spec current
 
-- Update the phase marker and checklist after document verification.
-- Add evidence when a real application exposes a requirement; distinguish observations from candidate design.
-- Record only material changes or surprises, not routine implementation history.
-- Before implementation, resolve the relevant open decisions and replace provisional sections with a decision-complete plan. Implement only a separately requested phase.
+- Update status/checklists only after verification passes.
+- Record material deviations and unresolved follow-ups; skip routine implementation history.
+- Leave later phases untouched unless a boundary change is explicitly approved.
 
 ## Open Decisions
 
-Defer package layout/framework dependency, policy and callback shapes, wire versioning, credential transport and revocation, browser client scope, history projection, event visibility, flow control, and compatibility rollout. No default authorizes implementing any of these.
-
-Revisit when a real application needs integration. Compare its requirements against both existing bridges, identify repeated mechanisms, and test the smallest shared boundary. Resolve only the decisions required by that work; leave unsupported generality open.
+None blocking. Concrete wire/plugin types are finalized in P1 against the approved contracts. Osuite adoption remains separate.
 
 ## Risks
 
-- Similar applications can make an overly narrow interface appear universal.
-- Excessive callbacks can relocate duplication instead of removing it.
-- Raw events can expose tool arguments/results, skill bodies, and application context.
-- Public wire types create compatibility obligations across independently deployed clients and servers.
-- Replay, projection, and revocation mistakes can expose content or make historical actions appear live.
+- Revoked or disconnected sockets do not undo accepted external effects; execution must reauthorize.
+- Projections can expose tool arguments, skill bodies, and application context unless the application supplies a safe view.
+- Durable attribution is caller-supplied audit context; trusted adapters must obtain it from authenticated identity.
+- Legacy asks lack structured resource details; strict policies must deny them.
+- Public wire contracts constrain independent deployments. Full replay remains proportional to history, with bounded memory rather than bounded total work.

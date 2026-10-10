@@ -9,6 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from tantra.ask import AskRequest, AskResponse
 
+SubmittedBy = Annotated[str, Field(strict=True, min_length=1, max_length=256)]
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -44,6 +46,7 @@ class InputQueued(EventBase):
     type: Literal["input_queued"] = "input_queued"
     command_id: str
     input: str
+    submitted_by: SubmittedBy | None = None
 
 
 class TurnStarted(EventBase):
@@ -143,6 +146,7 @@ class AskAnswered(EventBase):
     response: AskResponse
     command_id: str | None = None
     answered_by: str | None = None
+    submitted_by: SubmittedBy | None = None
 
 
 class SampleCompleted(EventBase):
@@ -165,6 +169,7 @@ class CancellationRequested(EventBase):
     type: Literal["cancellation_requested"] = "cancellation_requested"
     command_id: str
     targets: dict[str, list[str]] = Field(default_factory=dict)
+    submitted_by: SubmittedBy | None = None
 
 
 class TurnCompleted(EventBase):

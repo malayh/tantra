@@ -25,7 +25,7 @@ from tantra.errors import (
     TantraError,
     WriterReplaced,
 )
-from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, Usage
+from tantra.events import InputQueued, SessionEvent, SessionHeader, SessionStatus, Stamped, SubmittedBy, Usage
 from tantra.stores.base import UNSET, EnqueueResult, HistorySnapshot, OperationalState, apply_patch, reduce_header
 from tantra.stores.postgres import PostgresStore, _event_json, _hydrate, _json, _parse
 
@@ -74,6 +74,7 @@ class SendPayload(FrozenModel):
     type: Literal["send"] = "send"
     command_id: UUID
     input: str
+    submitted_by: SubmittedBy | None = None
 
 
 class AnswerPayload(FrozenModel):
@@ -81,11 +82,13 @@ class AnswerPayload(FrozenModel):
     command_id: UUID
     ask_id: UUID
     response: AskResponse
+    submitted_by: SubmittedBy | None = None
 
 
 class CancelPayload(FrozenModel):
     type: Literal["cancel"] = "cancel"
     command_id: UUID
+    submitted_by: SubmittedBy | None = None
 
 
 class DeletePayload(FrozenModel):

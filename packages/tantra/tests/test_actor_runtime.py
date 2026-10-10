@@ -1398,9 +1398,9 @@ class ObservedCancellationRuntime(Runtime):
         super().__init__(*args, **kwargs)
         self.cancellation_started = asyncio.Event()
 
-    async def _accept_cancel(self, connection: Any, command_id: UUID) -> Any:
+    async def _accept_cancel(self, connection: Any, command_id: UUID, *, submitted_by: str | None = None) -> Any:
         self.cancellation_started.set()
-        return await super()._accept_cancel(connection, command_id)
+        return await super()._accept_cancel(connection, command_id, submitted_by=submitted_by)
 
 
 async def test_cancel_racing_durable_finish_preserves_finished_terminal() -> None:

@@ -67,6 +67,7 @@ from tantra.events import (
     SessionEvent,
     SessionHeader,
     Stamped,
+    SubmittedBy,
     TextPart,
     TurnCancelled,
     TurnCompleted,
@@ -87,6 +88,7 @@ from tantra.tools import Context, Tool
 from tantra.tracing import NULL_TRACER, Tracer
 
 ACTOR_STATUS_ADAPTER: TypeAdapter[ActorStatus] = TypeAdapter(ActorStatus)
+SUBMITTED_BY_ADAPTER: TypeAdapter[SubmittedBy | None] = TypeAdapter(SubmittedBy | None)
 
 if TYPE_CHECKING:
     from tantra.compaction import Compactor
@@ -149,6 +151,13 @@ def _tool_table(agent: type[Agent]) -> dict[str, Tool]:
 class CommandReceipt:
     command_id: UUID
     duplicate: bool
+
+
+@dataclass(frozen=True)
+class LocatedAsk:
+    actor_id: UUID
+    seq: int
+    event: AskRaised
 
 
 @dataclass(frozen=True)
@@ -1310,6 +1319,29 @@ class Runtime:
         active = {header.id: await self.coordinator.active(sid, header.id) for header in headers}
         return [self._status_from_header(header, active[header.id]) for header in headers]
 
+    async def lookup_ask(self, root_id: UUID, ask_id: UUID) -> LocatedAsk | None:
+        self._ensure_started()
+        _, rid = _id(root_id, "root_id")
+        _, aid = _id(ask_id, "ask_id")
+        await self._root_header(rid)
+        lookup = getattr(self.store, "lookup_ask", None)
+        if lookup is not None:
+            found = await lookup(rid, aid)
+        else:
+            found = None
+            for header in await self._tree_headers(rid):
+                for item in await self._journal(header.id):
+                    if isinstance(item.event, AskRaised) and item.event.ask_id == aid:
+                        if found is not None:
+                            raise ValueError(f"ambiguous ask {aid}")
+                        found = header.id, item
+        if found is None:
+            return None
+        actor_id, item = found
+        if not isinstance(item.event, AskRaised) or item.event.ask_id != aid:
+            raise TantraError(f"invalid ask evidence for {aid}")
+        return LocatedAsk(UUID(hex=actor_id), item.seq, item.event.model_copy(deep=True))
+
     async def events(self, agent_id: UUID, *, after: int = 0) -> AsyncIterator[LoggedEvent]:
         self._ensure_started()
         public_id, sid = _id(agent_id, "agent_id")
@@ -2093,7 +2125,11 @@ class Runtime:
                         if isinstance(payload, ReleaseWriterPayload):
                             result = {"released": await store.release_writer(request.writer_token)}
                         elif isinstance(payload, SendPayload):
-                            event = InputQueued(command_id=payload.command_id.hex, input=payload.input)
+                            event = InputQueued(
+                                command_id=payload.command_id.hex,
+                                input=payload.input,
+                                submitted_by=payload.submitted_by,
+                            )
                             existing = await find_command(payload.command_id.hex)
                             if existing is not None:
                                 if existing != (request.root_id, event):
@@ -2117,6 +2153,7 @@ class Runtime:
                                 response=payload.response,
                                 command_id=payload.command_id.hex,
                                 answered_by=request.root_id,
+                                submitted_by=payload.submitted_by,
                             )
                             existing = await find_command(payload.command_id.hex)
                             if existing is not None:
@@ -2153,13 +2190,21 @@ class Runtime:
                         elif isinstance(payload, CancelPayload):
                             existing = await find_command(payload.command_id.hex)
                             if existing is not None:
-                                if existing[0] != request.root_id or not isinstance(existing[1], CancellationRequested):
+                                if (
+                                    existing[0] != request.root_id
+                                    or not isinstance(existing[1], CancellationRequested)
+                                    or existing[1].submitted_by != payload.submitted_by
+                                ):
                                     raise InvalidCommandReuse(payload.command_id.hex)
                                 cancellation = existing[1]
                                 duplicate = True
                             else:
                                 targets = self._operational_targets(states)
-                                cancellation = CancellationRequested(command_id=payload.command_id.hex, targets=targets)
+                                cancellation = CancellationRequested(
+                                    command_id=payload.command_id.hex,
+                                    targets=targets,
+                                    submitted_by=payload.submitted_by,
+                                )
                                 await store.append(request.root_id, [cancellation])
                                 duplicate = False
                             for actor_id, turn_ids in cancellation.targets.items():
@@ -2386,21 +2431,26 @@ class Runtime:
             raise WriterReplaced(f"writer for {connection.root_id} was replaced")
         self._ensure_open()
 
-    async def _send(self, connection: Connection, input: str, command_id: UUID) -> CommandReceipt:
-        return await _shielded(self._accept_send(connection, input, command_id))
+    async def _send(
+        self, connection: Connection, input: str, command_id: UUID, *, submitted_by: str | None = None
+    ) -> CommandReceipt:
+        submitted_by = SUBMITTED_BY_ADAPTER.validate_python(submitted_by)
+        return await _shielded(self._accept_send(connection, input, command_id, submitted_by=submitted_by))
 
-    async def _accept_send(self, connection: Connection, input: str, command_id: UUID) -> CommandReceipt:
+    async def _accept_send(
+        self, connection: Connection, input: str, command_id: UUID, *, submitted_by: str | None = None
+    ) -> CommandReceipt:
         public_id, cid = _id(command_id, "command_id")
         if self.coordinator is not None:
             self._check_writer(connection)
             result = await self._request_command(
                 connection._root,
                 "send",
-                SendPayload(command_id=public_id, input=input),
+                SendPayload(command_id=public_id, input=input, submitted_by=submitted_by),
                 connection._writer_token,
             )
             return CommandReceipt(public_id, bool(result["duplicate"]))
-        event = InputQueued(command_id=cid, input=input)
+        event = InputQueued(command_id=cid, input=input, submitted_by=submitted_by)
         async with self._lock(connection._root):
             self._check_writer(connection)
             existing = await self._tree_command(connection._root, cid)
@@ -2425,8 +2475,11 @@ class Runtime:
         ask_id: UUID,
         response: AskResponse,
         command_id: UUID,
+        *,
+        submitted_by: str | None = None,
     ) -> CommandReceipt:
-        return await _shielded(self._accept_answer(connection, ask_id, response, command_id))
+        submitted_by = SUBMITTED_BY_ADAPTER.validate_python(submitted_by)
+        return await _shielded(self._accept_answer(connection, ask_id, response, command_id, submitted_by=submitted_by))
 
     async def _accept_answer(
         self,
@@ -2434,6 +2487,8 @@ class Runtime:
         ask_id: UUID,
         response: AskResponse,
         command_id: UUID,
+        *,
+        submitted_by: str | None = None,
     ) -> CommandReceipt:
         public_command, cid = _id(command_id, "command_id")
         _, aid = _id(ask_id, "ask_id")
@@ -2442,7 +2497,7 @@ class Runtime:
             result = await self._request_command(
                 connection._root,
                 "answer",
-                AnswerPayload(command_id=public_command, ask_id=ask_id, response=response),
+                AnswerPayload(command_id=public_command, ask_id=ask_id, response=response, submitted_by=submitted_by),
                 connection._writer_token,
             )
             return CommandReceipt(public_command, bool(result["duplicate"]))
@@ -2451,6 +2506,7 @@ class Runtime:
             response=response,
             command_id=cid,
             answered_by=connection._root,
+            submitted_by=submitted_by,
         )
         async with self._lock(connection._root):
             self._check_writer(connection)
@@ -2474,17 +2530,22 @@ class Runtime:
             live.future.set_result(response)
             return CommandReceipt(command_id=public_command, duplicate=False)
 
-    async def _cancel(self, connection: Connection, command_id: UUID) -> CommandReceipt:
-        return await _shielded(self._accept_cancel(connection, command_id))
+    async def _cancel(
+        self, connection: Connection, command_id: UUID, *, submitted_by: str | None = None
+    ) -> CommandReceipt:
+        submitted_by = SUBMITTED_BY_ADAPTER.validate_python(submitted_by)
+        return await _shielded(self._accept_cancel(connection, command_id, submitted_by=submitted_by))
 
-    async def _accept_cancel(self, connection: Connection, command_id: UUID) -> CommandReceipt:
+    async def _accept_cancel(
+        self, connection: Connection, command_id: UUID, *, submitted_by: str | None = None
+    ) -> CommandReceipt:
         public_id, cid = _id(command_id, "command_id")
         if self.coordinator is not None:
             self._check_writer(connection)
             result = await self._request_command(
                 connection._root,
                 "cancel",
-                CancelPayload(command_id=public_id),
+                CancelPayload(command_id=public_id, submitted_by=submitted_by),
                 connection._writer_token,
             )
             return CommandReceipt(public_id, bool(result["duplicate"]))
@@ -2492,7 +2553,11 @@ class Runtime:
             self._check_writer(connection)
             existing = await self._tree_command(connection._root, cid)
             if existing is not None:
-                if existing[0] != connection._root or not isinstance(existing[1], CancellationRequested):
+                if (
+                    existing[0] != connection._root
+                    or not isinstance(existing[1], CancellationRequested)
+                    or existing[1].submitted_by != submitted_by
+                ):
                     raise InvalidCommandReuse(cid)
                 event = existing[1]
                 duplicate = True
@@ -2515,7 +2580,7 @@ class Runtime:
                         turn_ids.append(state.incomplete.turn_id)
                     if turn_ids:
                         targets[agent_id] = turn_ids
-                event = CancellationRequested(command_id=cid, targets=targets)
+                event = CancellationRequested(command_id=cid, targets=targets, submitted_by=submitted_by)
                 await self._append(connection._root, [event])
                 duplicate = False
             for agent_id, target_turns in event.targets.items():
@@ -2948,11 +3013,11 @@ class Connection:
             self._iterator = self.runtime._stream(self.root_id, self._root, self._after, self)
         return await anext(self._iterator)
 
-    async def send(self, input: str, *, command_id: UUID) -> CommandReceipt:
-        return await self.runtime._send(self, input, command_id)
+    async def send(self, input: str, *, command_id: UUID, submitted_by: str | None = None) -> CommandReceipt:
+        return await self.runtime._send(self, input, command_id, submitted_by=submitted_by)
 
-    async def prompt(self, input: str, *, command_id: UUID) -> TurnResult:
-        await self.runtime._send(self, input, command_id)
+    async def prompt(self, input: str, *, command_id: UUID, submitted_by: str | None = None) -> TurnResult:
+        await self.runtime._send(self, input, command_id, submitted_by=submitted_by)
         return await self.runtime._wait_result(self._root, command_id)
 
     async def answer(
@@ -2961,11 +3026,12 @@ class Connection:
         response: AskResponse,
         *,
         command_id: UUID,
+        submitted_by: str | None = None,
     ) -> CommandReceipt:
-        return await self.runtime._answer(self, ask_id, response, command_id)
+        return await self.runtime._answer(self, ask_id, response, command_id, submitted_by=submitted_by)
 
-    async def cancel(self, *, command_id: UUID) -> CommandReceipt:
-        return await self.runtime._cancel(self, command_id)
+    async def cancel(self, *, command_id: UUID, submitted_by: str | None = None) -> CommandReceipt:
+        return await self.runtime._cancel(self, command_id, submitted_by=submitted_by)
 
 
 def _turn_result(

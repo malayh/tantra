@@ -69,6 +69,8 @@ Pages contain 1–1,000 roots, oldest first by `(created_at, id)`. Pass `report.
 
 `status(agent_id) -> ActorStatus` reads one actor's durable header. `tree_status(root_id) -> list[ActorStatus]` reads the root and descendants breadth-first without activating actors or reading journals.
 
+`await lookup_ask(root_id, ask_id) -> LocatedAsk | None` locates the original durable `AskRaised` in that root tree. `LocatedAsk` contains `actor_id`, `seq`, and an independent copy of `event`. It does not activate work or report whether an ask is pending. Unknown asks return None; missing roots raise `SessionNotFound`; child roots are rejected; ambiguous duplicate asks raise `ValueError`. PostgreSQL reads indexed evidence and the original ask row; other stores use a full-history fallback.
+
 With a coordinator, `active` reflects valid distributed ownership and actor activity; database uncertainty raises `CoordinatorUnavailable` instead of reporting inactivity. Read-only event and status operations never acquire execution ownership.
 
 `ActorStatus.name` is the header's durable display name when present and otherwise the registered `agent` type. `state` is `queued`, `running`, `awaiting_input`, `idle`, `finished`, `failed`, `cancelled`, or `interrupted`. Without a coordinator, `active` reports only whether this Runtime process owns a live task. `current_turn_id`, `last_turn`, `last_seq`, and `updated_at` support polling without consuming actor journals.
@@ -79,10 +81,14 @@ With a coordinator, `active` reflects valid distributed ownership and actor acti
 
 Enter a connection with `async with`. Read-only connections iterate events. A writable connection claims the root tree and replaces any older writer across Runtime processes. Writer ownership is separate from execution ownership.
 
-- `send(input, *, command_id) -> CommandReceipt` accepts a durable root input.
-- `prompt(input, *, command_id) -> TurnResult` accepts the same input and waits for its terminal event.
-- `answer(ask_id, response, *, command_id) -> CommandReceipt` resolves a live root ask.
-- `cancel(*, command_id) -> CommandReceipt` cancels active and queued work in the live tree.
+- `send(input, *, command_id, submitted_by=None) -> CommandReceipt` accepts a durable root input.
+- `prompt(input, *, command_id, submitted_by=None) -> TurnResult` accepts the same input and waits for its terminal event.
+- `answer(ask_id, response, *, command_id, submitted_by=None) -> CommandReceipt` resolves a live root ask.
+- `cancel(*, command_id, submitted_by=None) -> CommandReceipt` cancels active and queued work in the live tree.
+
+`submitted_by` is optional application-supplied audit context: an exact nonempty string of at most 256 characters. Runtime persists it with the command and exposes input attribution to hooks and tools, without automatically adding it to model prompts. It grants no access. Obtain it from trusted authentication and authorize tool execution independently; accepted work can outlive the connection. Internal agent commands remain unattributed. `AskAnswered.answered_by` remains the Runtime root actor.
+
+Retries must preserve attribution as well as payload. Changed attribution under the same command UUID raises `InvalidCommandReuse`. Legacy events have None; a retry cannot assign them a new identity. Upgrade all coordinated workers together before relying on attribution; older workers may ignore the new optional fields.
 
 Cancelling the local wait for `prompt` does not cancel the accepted turn. Coordinated event readers replay Store pages and use notifications plus bounded catch-up polling, so a reconnect can observe work owned elsewhere without activating it.
 

@@ -36,6 +36,7 @@ class Context:
         spawn: Callable[[type[Agent] | str, str], Awaitable[Any]] | None = None,
         fan_out: Callable[[Sequence[tuple[type[Agent] | str, str]], int], Awaitable[list[Any]]] | None = None,
         memory: Memory | None = None,
+        submitted_by: str | None = None,
     ) -> None:
         self.session_id = session_id
         self.turn_id = turn_id
@@ -44,6 +45,7 @@ class Context:
         self.deps = deps
         self.store = store
         self.memory = memory
+        self.submitted_by = submitted_by
         self._emit = emit
         self._ask = ask
         self._spawn = spawn

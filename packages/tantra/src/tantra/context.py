@@ -61,6 +61,7 @@ class TurnContext:
     provider: Provider | None = None
     tracer: Tracer = NULL_TRACER
     sample_request: SampleRequest | None = None
+    submitted_by: str | None = None
 
 
 def _as_content(result: Any) -> str:

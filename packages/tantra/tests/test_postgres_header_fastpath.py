@@ -290,7 +290,9 @@ async def test_generated_root_migration_rollback_retry_and_original_rows(postgre
         await store.setup()
         await store.setup()
         with psycopg.connect(postgres_dsn) as conn:
-            assert conn.execute(store._sql("SELECT max(version) FROM {schema}.schema_version")).fetchone() == (11,)
+            assert conn.execute(store._sql("SELECT max(version) FROM {schema}.schema_version")).fetchone() == (
+                len(postgres.MIGRATIONS),
+            )
             assert (
                 conn.execute(store._sql("SELECT id,header,last_seq FROM {schema}.sessions ORDER BY id")).fetchall()
                 == before

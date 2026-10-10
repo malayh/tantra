@@ -1,6 +1,6 @@
 # 017 — Pluggable WebSocket interface
 
-**Status:** P0 complete. P1–P3 not started.
+**Status:** P0–P1 complete. P2–P3 not started.
 
 ## Goal
 
@@ -69,6 +69,8 @@ await endpoint(scope, receive, send)
 - The TypeScript client owns independent cursors and a bounded FIFO frozen-command outbox. Retry at most three times, then require manual intervention; hold commands after writer loss.
 - Advance cursors only after application event handling succeeds. Bound incoming queues; overflow reconnects from the last applied cursor. Persistence is opt-in and scoped to root plus authenticated identity.
 
+**Concrete P1 contracts:** import `SessionSocket`, `SocketAuth`, `SocketBinding`, `SocketAccess`, `SocketViewContext`, `InputCodec`, and `SocketLimits` from Tantra. `SocketAuth` carries an async zero-argument boolean revalidator; the policy is an async `SocketAccess -> bool` callback. View factories return async event mappers and reseed at the queued committed cursor on writer transitions; optional mapper `aclose()` releases resources. Uncertain read revalidation pauses delivery and closes the connection. The wire uses `type`, canonical UUID subscription IDs, one subscription per actor, explicit `acquire_writer`, and `unsubscribed` acknowledgments. [Reference contracts](../docs/reference/websocket.md) specify every frame, error, plugin field, and bound.
+
 ## Considered & rejected
 
 - **Framework-specific endpoint:** native ASGI works with application-selected frameworks without a runtime dependency.
@@ -100,7 +102,7 @@ await endpoint(scope, receive, send)
 
 **Verified:** 976 package tests; 148 stress/bench tests with zero skips; 89 targeted checks after the review fix, including four additional parity/read-bound cases; `just lint` and diff checks. Owned Compose PostgreSQL used `fsync=on` and `synchronous_commit=on`; workers and volumes were removed afterward. Normal query plans used `journal_ask_idx` on 4,000/100,000-event journals and read one original body. Independent review found duplicate asks could read bodies before limiting; lookup now limits identity evidence first, and 1,000 duplicate asks read at most two bodies. Runtime additions are frozen for dependent phases.
 
-### P1 — Native ASGI endpoint · deps: P0 · —
+### P1 — Native ASGI endpoint · deps: P0 · ✅ DONE
 
 **Deliver**
 - Implement protocol models, plugin interfaces, authentication lifecycle, ordered delivery, replay readiness, writer transitions, and bounded cleanup.
@@ -112,9 +114,11 @@ await endpoint(scope, receive, send)
 - Reconnect, filtered replay, slow clients, deletion, shutdown, revocation, and two-worker ownership changes.
 
 **Checklist**
-- [ ] Protocol and plugin contracts
-- [ ] Authentication and delivery lifecycle
-- [ ] Policy fixtures, transport checks, documentation, and review
+- [x] Protocol and plugin contracts
+- [x] Authentication and delivery lifecycle
+- [x] Policy fixtures, transport checks, documentation, and review
+
+**Verified:** 1,046 package tests; 148 stress/bench tests with zero skips; 70 focused transport/policy checks after final hardening, including four additional cases; `just lint`, strict documentation build, and diff checks. Deterministic ASGI fixtures covered private, anonymous, team, editor, approval, observer, and descendant access; expiry/revocation during stalled callbacks; paged/filtered replay; queue bounds; stale readiness; projection cancellation/reseeding; and cleanup. Two PostgreSQL Runtime instances verified writer replacement/reclaim, disconnect/reconnect, deletion with LISTEN unavailable, approval rollback, lost committed receipts, and exact retries. Independent Ponytail review reported no actionable findings. Owned Compose PostgreSQL used `fsync=on` and `synchronous_commit=on`; resources were removed after verification. Wire and plugin contracts are frozen for P2/P3. Transport scale and Sarathi browser checks remain in P3.
 
 ### P2 — TypeScript client · deps: P1 · —
 

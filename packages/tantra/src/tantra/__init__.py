@@ -79,6 +79,15 @@ from tantra.stores.postgres import PostgresStore
 from tantra.stores.sqlite import SQLiteStore
 from tantra.tools import Context, Tool, tool
 from tantra.tracing import NullTracer, Tracer
+from tantra.websocket import (
+    InputCodec,
+    SessionSocket,
+    SocketAccess,
+    SocketAuth,
+    SocketBinding,
+    SocketLimits,
+    SocketViewContext,
+)
 
 __all__ = [
     "ActorStatus",
@@ -118,6 +127,7 @@ __all__ = [
     "FreeTextResponse",
     "Hook",
     "InvalidCommandReuse",
+    "InputCodec",
     "LeaseLost",
     "LoggedEvent",
     "LocatedAsk",
@@ -151,6 +161,12 @@ __all__ = [
     "SessionHeader",
     "SessionNotFound",
     "SessionBusy",
+    "SessionSocket",
+    "SocketAccess",
+    "SocketAuth",
+    "SocketBinding",
+    "SocketLimits",
+    "SocketViewContext",
     "SessionStatus",
     "SendPayload",
     "Skill",

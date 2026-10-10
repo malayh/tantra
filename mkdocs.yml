@@ -73,6 +73,7 @@ nav:
   - Reference:
       - Agent: reference/agent.md
       - Runtime & Connection: reference/runtime.md
+      - WebSocket endpoint: reference/websocket.md
       - Loop & events flow: reference/loop.md
       - Tools: reference/tools.md
       - Context: reference/context.md

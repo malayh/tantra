@@ -120,4 +120,44 @@ Close codes: 1002 invalid protocol, 1008 authentication/read-policy denial, 1009
 
 Replay uses Runtime paging without a total-history cutoff. Applications may start from a projection snapshot watermark. Subscription cancellation and replacement discard obsolete queued frames. Disconnect closes streams, writer connections, and notice iterators without closing Runtime or cancelling accepted turns. Runtime deletion and shutdown terminate streams and release interests.
 
-The TypeScript client and Sarathi migration are separate phases. This endpoint does not install application routes or adopt existing wire clients automatically.
+## TypeScript client
+
+`tantra-session-client` is a native ESM package with declarations and no runtime dependencies. One `SessionClient` is permanently scoped by `serverScope`, canonical root UUID, and authenticated identity key. The identity key scopes local state and is not authentication. Its async `url()` callback runs before every dial so the application can issue a fresh ticket. Native `WebSocket` is the default; `webSocketFactory` supplies the same seam for tests or non-browser environments.
+
+```ts
+import { SessionClient } from "tantra-session-client";
+
+const client = new SessionClient({
+  serverScope: "https://api.example",
+  rootId,
+  identity: user.id,
+  url: async () => socketUrl(await issueTicket()),
+  initialCursors: { [rootId]: restoredProjection.cursor },
+  onEvent: async (event) => applyEvent(event),
+  onError: (error) => reportError(error),
+});
+
+const root = client.subscribe(rootId);
+await client.connect();
+await root.ready();
+await client.acquireWriter();
+const command = client.send({ message: "hello" });
+console.log(command.commandId);
+await command;
+```
+
+Subscriptions expose `state`, `ready()`, and `unsubscribe()`. They reconnect from the last successfully applied cursor with a fresh transport subscription ID. Async `onEvent`, `onNotice`, and `onReceipt` callbacks are serialized and awaited. An event, including a hidden event with `body: null`, advances its actor cursor only after `onEvent` succeeds and the optional persistence save completes. Handler failure blocks processing. `onState` reports connection, subscription, and outbox state; `onError` receives protocol, transport, command, storage, and application failures.
+
+All subscriptions start read-only. Root mutation requires `acquireWriter()` after readiness. Writer loss and reconnect hold commands and require another explicit acquisition; descendants stay read-only. Writer-acquisition timeout retires the ambiguous transport and reconnects read-only for explicit reclaim. `send`, typed `answer`, and `cancel` return a promise with a synchronous `commandId` property and resolve only on a durable receipt. `onReceipt` observes the same acceptance separately.
+
+Commands retain their UUID and frozen payload through the initial delivery and three automatic retries. Retry exhaustion rejects the promise with an uncertain `SessionClientError` whose code is `unknown_outcome`, leaves that command in manual state at the outbox head, and holds later commands. `retry(commandId)` starts another bounded cycle without changing its content. Definitive command rejection releases the next command; `writer_required` instead waits for explicit writer acquisition.
+
+Persistence is optional and memory is the default. A `Persistence` adapter provides async `load()` and `save(PersistedState)` methods. State is versioned and bound to the exact server/root/identity scope. It stores desired actors, validated cursors, frozen commands, and attempt counts, never credentials, ticket URLs, transport IDs, writer grants, notices, or transcript data. Concurrent owners of one persisted outbox are unsupported. Storage failure blocks transmission and event advancement for manual recovery.
+
+Persisted actor cursors are validated but never blindly restored as replay boundaries. The application must restore its projection first and pass exactly matching `initialCursors`; otherwise actors replay from zero. The adapter cannot make projection updates and cursor saves atomic, so applications needing durable resume must couple them in their own storage design.
+
+`timing` overrides receipt timeout, the three retry delays, reconnect base/cap, and capacity timeout. Defaults are ten seconds for receipts and capacity, one/two/four seconds for command retries, and jittered reconnect backoff from one to 30 seconds for at most ten consecutive failed dials.
+
+Sarathi migration remains separate. This endpoint and package do not install application routes or adopt existing wire clients automatically.
+
+A root subscription with pending commands cannot be unsubscribed. Use `disconnect()` to leave safely while retaining its unresolved outbox.

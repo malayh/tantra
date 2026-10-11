@@ -1,6 +1,6 @@
 # 017 — Pluggable WebSocket interface
 
-**Status:** P0–P1 complete. P2–P3 not started.
+**Status:** P0–P2 complete. P3 not started.
 
 ## Goal
 
@@ -120,20 +120,52 @@ await endpoint(scope, receive, send)
 
 **Verified:** 1,046 package tests; 148 stress/bench tests with zero skips; 70 focused transport/policy checks after final hardening, including four additional cases; `just lint`, strict documentation build, and diff checks. Deterministic ASGI fixtures covered private, anonymous, team, editor, approval, observer, and descendant access; expiry/revocation during stalled callbacks; paged/filtered replay; queue bounds; stale readiness; projection cancellation/reseeding; and cleanup. Two PostgreSQL Runtime instances verified writer replacement/reclaim, disconnect/reconnect, deletion with LISTEN unavailable, approval rollback, lost committed receipts, and exact retries. Independent Ponytail review reported no actionable findings. Owned Compose PostgreSQL used `fsync=on` and `synchronous_commit=on`; resources were removed after verification. Wire and plugin contracts are frozen for P2/P3. Transport scale and Sarathi browser checks remain in P3.
 
-### P2 — TypeScript client · deps: P1 · —
+### P2 — TypeScript client · deps: P1 · DONE
+
+**Goal:** ship a standalone client for the frozen P1 endpoint; Sarathi adoption remains P3.
 
 **Deliver**
-- Add a small ESM package with declarations and native WebSocket.
-- Provide connect/disconnect, subscriptions, explicit writer acquisition, send, typed answer, cancel, state/event callbacks, bounded outbox, and cursor handling.
-- Keep HTTP history and UI reducers application-owned.
+- Add `packages/tantra-client`, a local ESM package named `tantra-session-client`, with JavaScript exports and TypeScript declarations. Use native WebSocket, TypeScript tooling, and Node's test runner; no runtime dependency or root JavaScript workspace. Registry publication is separate.
+- Export `SessionClient`, subscription handles, typed answers, receipts/errors/state, and JSON input/event generics. Provide connect/disconnect, subscribe/unsubscribe, explicit writer acquisition, send/answer/cancel, retry, and event/notice/receipt/error/state callbacks. Mutation promises resolve on committed receipts, never on turn completion.
+- Fix each instance to one server scope, root UUID, and authenticated identity key. Resolve the URL asynchronously on every dial so applications can issue fresh tickets. Credentials, HTTP calls, schemas, and UI reducers stay application-owned; the identity key scopes state and is not authentication. Allow a socket-construction seam for tests/non-browser environments.
+- Extend the WebSocket reference with client usage and failure/persistence contracts. Keep Sarathi dependencies, hooks, Docker files, and application behavior unchanged.
+
+**Subscriptions and delivery**
+- Offer and verify `tantra.session.v1`. Validate frame discriminants/fields, canonical UUIDs, finite JSON, and nonnegative safe-integer cursors. Reject non-JSON inputs before serialization silently alters them. Share serialized fixtures with Python tests without adding a generator framework.
+- Retain desired actors across reconnects; use fresh subscription UUIDs and initially subscribe read-only from each actor's applied cursor. One subscription per actor, at most eight. Ignore retired IDs/old socket generations; wait for unsubscribe acknowledgment before replacing an actor on the same socket.
+- Serialize async application handling across subscriptions. Advance cursors only after successful handling, including hidden `body: null` events. Ready becomes usable only after earlier events are applied; its cursor must match the applied replay boundary. Notices/receipts never advance cursors.
+- Verify actor identity and contiguous ordering; ignore already-applied duplicates. Gaps reconnect from applied cursors. Handler failure pauses replay for explicit retry; reducers must tolerate replay after partially applied failures.
+- Bound incoming state to 256 frames/4 MiB, including the executing handler, and 1 MiB per frame. Overflow reconnects from applied cursors after the old in-flight handler settles. Successful old handling still advances its actor cursor; replacement/replay cannot race that callback.
+- Writer loss/closure immediately holds commands. Keep reading after writer loss, require explicit reclaim, and never restore write privilege automatically or persist it. Descendants stay read-only. Transmission requires a fresh writable Ready.
+
+**Commands and reconnect**
+- Freeze operation, command UUID, root/actor, input or ask/response at enqueue. Rebind only the subscription UUID after reconnect. Caller mutation cannot alter commands or callback snapshots; conflicting local UUID reuse and oversized/invalid frames fail before sending.
+- Use a FIFO outbox bounded to 64 commands/1 MiB, including the in-flight command. Reject command frames above 256 KiB; bound native socket buffered bytes to 4 MiB with a ten-second capacity timeout. Allow one outstanding receipt; matching receipt, including `duplicate: true`, advances the queue. Journal events never acknowledge acceptance.
+- Default receipt timeout: ten seconds. Allow the initial send plus three automatic retransmissions across reconnects, with one-, two-, and four-second retry delays. Lost receipts/uncertain retryable errors resend exact content. Exhaustion pauses the uncertain head for explicit retry with the same UUID; later mutations remain held. Explicit retry starts another bounded attempt cycle without changing content.
+- Definitive rejection reports failure and releases the next command. `writer_required` holds for explicit reclaim despite its nonretryable wire flag. Validate receipt subscription, command, and operation; stale/unrelated receipts cannot remove an entry.
+- Reconnect infrastructure/slow-client closures with jittered backoff from one second to 30 seconds, bounded to ten consecutive failed dials. Stop on authentication/policy denial, deletion, malformed frames/size violations, or handler failure. Expose manual recovery. Browser handshake rejection may be indistinguishable from infrastructure; report ambiguity rather than asserting an auth diagnosis.
+- Disconnect releases sockets/listeners/timers/queues/subscriptions without cancelling accepted work. Retain unresolved commands and applied cursors for same-scope reconnect. Root/identity changes require a new client and never migrate its outbox. Root unsubscribe requires a settled outbox; disconnect retains unresolved commands.
+
+**Optional persistence**
+- Default to memory. Offer a minimal async load/save adapter for versioned, bounded state scoped to server/root/authenticated identity. Load before connecting; persist frozen commands and attempt counts before transmission. Storage failure holds transmission; restored in-flight commands remain uncertain.
+- Never store credentials, ticket URLs, transport subscription IDs, writer grants, notices, or transcript. Reject invalid/mismatched saved state. Applications choose storage/security; concurrent sharing of one persisted outbox is unsupported.
+- Starting cursors must match application-restored projections/snapshots. Persisted cursors alone never skip history for an empty reducer. The adapter cannot make UI state and cursor saves atomic; applications requiring durable resume must couple them. Cursor-save failure pauses processing and preserves the previous durable watermark.
 
 **Verify**
-- Protocol fixtures, mutation isolation, lost receipts, reconnect races, subscription replacement, identity changes, type/build/tests.
+- P1 fixture parity: every frame/answer, hidden events, strict fields, IDs, non-finite values, unsafe cursors, and size bounds.
+- Deterministic socket/clock tests: lost receipts, exact retries, FIFO blocking, exhaustion, rejection, writer loss/reclaim, mutation isolation, stale generations, replacement, callbacks during reconnect, overflow, gaps, and cleanup.
+- Persistence tests: wrong identity/root/server, malformed/oversized state, save failure, restart after uncertain send, retained attempt counts, and projection/cursor mismatch. A new identity never transmits another identity's command.
+- Run the built native client against P1 ASGI and two Runtime instances using deterministic providers and owned durable Compose PostgreSQL. Cover root/descendant replay, typed approvals, writer replacement, lost committed receipts/retries, reconnect, and deletion. Authenticated non-browser fixtures explicitly enable missing Origin; production defaults stay unchanged.
+- Inspect journals independently for one logical command per UUID, unchanged payload/attribution, ordered replay, and accepted work continuing after disconnect. Require bounded client queues and zero retained socket/subscription interests after closure.
+- Run client lint/type/build/tests and an ESM/declaration consumer check; `just lint`, package/bench tests, PostgreSQL stress tests with zero skips, strict docs build, and one independent Ponytail review. Transport scale and Sarathi browser checks remain P3.
 
 **Checklist**
-- [ ] Client API and bounded state
-- [ ] Retry, reconnect, cursor, and persistence contracts
-- [ ] Client checks, documentation, and review
+- [x] ESM API, protocol parity, and bounded state
+- [x] Retry, reconnect, cursor, and persistence contracts
+- [x] Real endpoint/two-instance correctness and resource checks
+- [x] Client/project checks, documentation, and independent review
+
+**Verified:** 42 client tests; ESM/declaration consumer checks using ordinary TypeScript interfaces; 1,053 package tests; 148 stress/bench tests with zero skips; client lint/type/build, `just lint`, strict documentation build, and diff checks. The native client exercised both ASGI endpoints over two PostgreSQL Runtime instances: root/descendant replay, writer replacement/reclaim, typed approval, a lost committed answer receipt retried as a duplicate with one tool execution, accepted work finishing after disconnect, read-only reconnect, and deletion releasing all interests. Journal reads independently confirmed ordered evidence, one command per UUID, and unchanged payload/attribution. Independent Ponytail review found three issues, corrected and rechecked: duplicate JSON keys, ambiguous acquisition timeout, and idle subscription persistence. Owned durable Compose resources were removed. No paid inference, backend/wire changes, or application adoption; P3 remains unstarted.
 
 ### P3 — Sarathi adoption · deps: P2 · —
 

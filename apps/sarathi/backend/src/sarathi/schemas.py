@@ -1,9 +1,7 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Discriminator, Field
-
-from tantra import SessionEvent
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SignupRequest(BaseModel):
@@ -51,6 +49,8 @@ class MemoryOut(BaseModel):
 
 
 class Attachment(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     path: str
     name: str
 
@@ -88,84 +88,29 @@ class ActorStatusOut(BaseModel):
     updated_at: datetime
 
 
-class SubscribeFrame(BaseModel):
-    type: Literal["subscribe"] = "subscribe"
-    agent_id: WireId
-    after: int = Field(default=0, ge=0)
-    writable: bool = False
+class SessionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
 
-
-class UnsubscribeFrame(BaseModel):
-    type: Literal["unsubscribe"] = "unsubscribe"
-    agent_id: WireId
-
-
-class UserMessageFrame(BaseModel):
-    type: Literal["user_message"] = "user_message"
-    command_id: WireId
     text: str
-    attachments: list[Attachment] = Field(default_factory=list)
+    attachments: list[Attachment]
 
 
-class AskResponseFrame(BaseModel):
-    type: Literal["ask_response"] = "ask_response"
-    command_id: WireId
-    ask_id: WireId
-    response: str
+class SocketTicketRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    mode: Literal["read", "write"] = "write"
 
 
-class CancelFrame(BaseModel):
-    type: Literal["cancel"] = "cancel"
-    command_id: WireId
+class SocketTicketOut(BaseModel):
+    ticket: str
+    expires_at: datetime
+    login_expires_at: datetime
+    user_id: str
 
 
-ClientFrame = Annotated[
-    SubscribeFrame | UnsubscribeFrame | UserMessageFrame | AskResponseFrame | CancelFrame,
-    Discriminator("type"),
-]
+class HeaderNotice(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
 
-
-class EventFrame(BaseModel):
-    type: Literal["event"] = "event"
-    agent_id: WireId
-    seq: int = Field(ge=1)
-    event: SessionEvent
-
-
-class SubscriptionReadyFrame(BaseModel):
-    type: Literal["subscription_ready"] = "subscription_ready"
-    agent_id: WireId
-    seq: int = Field(ge=0)
-    active: bool
-
-
-class AskExpiredFrame(BaseModel):
-    type: Literal["ask_expired"] = "ask_expired"
-    agent_id: WireId
-    ask_id: WireId
-    command_id: WireId | None = None
-    message: str
-
-
-class TitleUpdatedFrame(BaseModel):
-    type: Literal["title_updated"] = "title_updated"
-    title: str
-
-
-class HeaderUpdatedFrame(BaseModel):
     type: Literal["header_updated"] = "header_updated"
-    title: str | None = None
-    model: str | None = None
-
-
-class ServerErrorFrame(BaseModel):
-    type: Literal["server_error"] = "server_error"
-    code: str = "internal_error"
-    message: str
-    command_id: WireId | None = None
-    retryable: bool = False
-
-
-ServerFrame = (
-    EventFrame | SubscriptionReadyFrame | AskExpiredFrame | TitleUpdatedFrame | HeaderUpdatedFrame | ServerErrorFrame
-)
+    title: str | None
+    model: str | None

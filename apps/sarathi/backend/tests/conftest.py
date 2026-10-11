@@ -12,7 +12,7 @@ from httpx_ws.transport import ASGIWebSocketTransport
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from sarathi.agent import SKILLS_DIR, RuntimeResources, Sarathi, _wire_tools, deps_factory
+from sarathi.agent import SKILLS_DIR, RuntimeResources, Sarathi, TitleHook, _wire_tools, deps_factory
 from sarathi.config import get_settings
 from sarathi.db import get_db
 from sarathi.models import Base
@@ -87,6 +87,7 @@ async def resources(store: SharedStore, provider: SharedProvider) -> AsyncIterat
     _wire_tools()
     await store.setup()
     memory = BuiltinMemory(store)
+    title_hook = TitleHook(provider, store)
     runtime = Runtime(
         provider,
         store,
@@ -95,13 +96,16 @@ async def resources(store: SharedStore, provider: SharedProvider) -> AsyncIterat
         deps_factory=deps_factory,
         skills=FileSystemSkills(SKILLS_DIR),
         memory=memory,
+        hooks=[title_hook],
     )
+    title_hook.runtime = runtime
     resources = RuntimeResources(
         runtime=runtime,
         provider=provider,
         store=store,
         memory=memory,
         embedder=None,
+        title_hook=title_hook,
     )
     yield resources
     await runtime.aclose()
@@ -112,7 +116,7 @@ async def app(
     session_factory: async_sessionmaker[AsyncSession],
     resources: RuntimeResources,
 ) -> AsyncIterator[FastAPI]:
-    from sarathi.main import create_app
+    from sarathi.main import create_app, mount_session_socket
 
     application = create_app()
 
@@ -122,6 +126,7 @@ async def app(
 
     application.state.resources = resources
     application.dependency_overrides[get_db] = override_get_db
+    mount_session_socket(application, resources, session_factory)
     yield application
     application.dependency_overrides.clear()
 
@@ -139,13 +144,32 @@ Socket = Callable[..., AbstractAsyncContextManager[AsyncWebSocketSession]]
 @pytest.fixture
 def socket(app: FastAPI) -> Socket:
     @asynccontextmanager
-    async def open_socket(sid: str, token: str, view: str | None = None) -> AsyncIterator[AsyncWebSocketSession]:
+    async def open_socket(
+        sid: str,
+        token: str,
+        view: str | None = None,
+        *,
+        origin: str | None = "http://localhost:3000",
+        subprotocols: list[str] | None = None,
+    ) -> AsyncIterator[AsyncWebSocketSession]:
         transport = ASGIWebSocketTransport(app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
-            url = f"/api/ws/sessions/{sid}?token={token}"
-            if view is not None:
-                url += f"&view={view}"
-            async with aconnect_ws(url, http_client, keepalive_ping_interval_seconds=None) as ws:
+            mode = "read" if view == "readonly" else "write"
+            issued = await http_client.post(
+                f"/api/sessions/{sid}/socket-ticket",
+                json={"mode": mode},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert issued.status_code == 200
+            url = f"/api/ws/sessions/{sid}?ticket={issued.json()['ticket']}"
+            headers = {"Origin": origin} if origin is not None else None
+            async with aconnect_ws(
+                url,
+                http_client,
+                keepalive_ping_interval_seconds=None,
+                subprotocols=subprotocols or ["tantra.session.v1"],
+                headers=headers,
+            ) as ws:
                 yield ws
 
     return open_socket

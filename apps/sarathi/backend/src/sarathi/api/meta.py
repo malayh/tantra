@@ -2,14 +2,15 @@ from fastapi import APIRouter, HTTPException
 
 from sarathi.auth import CurrentUser
 from sarathi.config import get_settings
-from sarathi.schemas import ClientFrame, ServerFrame
+from sarathi.schemas import HeaderNotice, SessionInput
+from tantra import SessionEvent
 
 router = APIRouter(prefix="/api/meta", tags=["meta"])
 models_router = APIRouter(prefix="/api", tags=["meta"])
 
 
 @router.post("/ws-types")
-async def ws_types(frame: ClientFrame) -> ServerFrame:
+async def ws_types(frame: SessionInput) -> SessionEvent | HeaderNotice:
     raise HTTPException(status_code=400, detail=repr(frame))
 
 

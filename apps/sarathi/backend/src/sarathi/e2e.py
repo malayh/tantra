@@ -2,8 +2,8 @@ from urllib.parse import quote
 
 import httpx
 
-from tantra import CommandEnvelope, CommandReply, CommandTimeout, PostgresCoordinator, PostgresStore
-from tantra.tools import Tool
+from tantra import Choice, CommandEnvelope, CommandReply, CommandTimeout, FreeText, PostgresCoordinator, PostgresStore
+from tantra.tools import Context, Tool
 
 
 class E2EPostgresCoordinator(PostgresCoordinator):
@@ -36,7 +36,13 @@ class E2EPostgresCoordinator(PostgresCoordinator):
 
 
 def e2e_gate(base_url: str) -> Tool:
-    async def wait(name: str) -> str:
+    async def wait(name: str, ctx: Context) -> str:
+        if name == "choice":
+            response = await ctx.ask(Choice(title="Choose a deployment", options=["Blue", "Green"]))
+            return response.model_dump_json()
+        if name == "free-text":
+            response = await ctx.ask(FreeText(prompt="Describe the deployment"))
+            return response.model_dump_json()
         async with httpx.AsyncClient(timeout=None) as client:
             response = await client.get(f"{base_url.rstrip('/')}/control/gates/{quote(name, safe='')}/wait")
             response.raise_for_status()

@@ -11,5 +11,6 @@ export interface CancellationRequested {
   type?: 'cancellation_requested';
   command_id: string;
   targets?: CancellationRequestedTargets;
+  submitted_by?: string | null;
   [key: string]: unknown;
  }

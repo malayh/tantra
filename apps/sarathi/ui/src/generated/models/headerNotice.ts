@@ -5,8 +5,8 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface HeaderUpdatedFrame {
+export interface HeaderNotice {
   type?: 'header_updated';
-  title?: string | null;
-  model?: string | null;
+  title: string | null;
+  model: string | null;
 }

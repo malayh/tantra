@@ -212,6 +212,63 @@
         ]
       }
     },
+    "/api/sessions/{session_id}/socket-ticket": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Create Session Socket Ticket",
+        "operationId": "create_session_socket_ticket",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SocketTicketRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SocketTicketOut"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/sessions/{root_id}/actors": {
       "get": {
         "tags": [
@@ -447,34 +504,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "oneOf": [
-                  {
-                    "$ref": "#/components/schemas/SubscribeFrame"
-                  },
-                  {
-                    "$ref": "#/components/schemas/UnsubscribeFrame"
-                  },
-                  {
-                    "$ref": "#/components/schemas/UserMessageFrame"
-                  },
-                  {
-                    "$ref": "#/components/schemas/AskResponseFrame"
-                  },
-                  {
-                    "$ref": "#/components/schemas/CancelFrame"
-                  }
-                ],
-                "title": "Frame",
-                "discriminator": {
-                  "propertyName": "type",
-                  "mapping": {
-                    "subscribe": "#/components/schemas/SubscribeFrame",
-                    "unsubscribe": "#/components/schemas/UnsubscribeFrame",
-                    "user_message": "#/components/schemas/UserMessageFrame",
-                    "ask_response": "#/components/schemas/AskResponseFrame",
-                    "cancel": "#/components/schemas/CancelFrame"
-                  }
-                }
+                "$ref": "#/components/schemas/SessionInput"
               }
             }
           },
@@ -488,22 +518,112 @@
                 "schema": {
                   "anyOf": [
                     {
-                      "$ref": "#/components/schemas/EventFrame"
+                      "oneOf": [
+                        {
+                          "$ref": "#/components/schemas/SessionCreated"
+                        },
+                        {
+                          "$ref": "#/components/schemas/InputQueued"
+                        },
+                        {
+                          "$ref": "#/components/schemas/TurnStarted"
+                        },
+                        {
+                          "$ref": "#/components/schemas/SampleStarted"
+                        },
+                        {
+                          "$ref": "#/components/schemas/TextDelta"
+                        },
+                        {
+                          "$ref": "#/components/schemas/ReasoningDelta"
+                        },
+                        {
+                          "$ref": "#/components/schemas/ToolCallDelta"
+                        },
+                        {
+                          "$ref": "#/components/schemas/TextPart"
+                        },
+                        {
+                          "$ref": "#/components/schemas/ReasoningPart"
+                        },
+                        {
+                          "$ref": "#/components/schemas/ToolCallRequested"
+                        },
+                        {
+                          "$ref": "#/components/schemas/ToolCallStarted"
+                        },
+                        {
+                          "$ref": "#/components/schemas/ToolProgress"
+                        },
+                        {
+                          "$ref": "#/components/schemas/ToolCallCompleted"
+                        },
+                        {
+                          "$ref": "#/components/schemas/ChildCreated"
+                        },
+                        {
+                          "$ref": "#/components/schemas/AgentFinished"
+                        },
+                        {
+                          "$ref": "#/components/schemas/AskRaised"
+                        },
+                        {
+                          "$ref": "#/components/schemas/AskAnswered"
+                        },
+                        {
+                          "$ref": "#/components/schemas/SampleCompleted"
+                        },
+                        {
+                          "$ref": "#/components/schemas/CompactionApplied"
+                        },
+                        {
+                          "$ref": "#/components/schemas/CancellationRequested"
+                        },
+                        {
+                          "$ref": "#/components/schemas/TurnCompleted"
+                        },
+                        {
+                          "$ref": "#/components/schemas/TurnFailed"
+                        },
+                        {
+                          "$ref": "#/components/schemas/TurnCancelled"
+                        },
+                        {
+                          "$ref": "#/components/schemas/TurnInterrupted"
+                        }
+                      ],
+                      "discriminator": {
+                        "propertyName": "type",
+                        "mapping": {
+                          "session_created": "#/components/schemas/SessionCreated",
+                          "input_queued": "#/components/schemas/InputQueued",
+                          "turn_started": "#/components/schemas/TurnStarted",
+                          "sample_started": "#/components/schemas/SampleStarted",
+                          "text_delta": "#/components/schemas/TextDelta",
+                          "reasoning_delta": "#/components/schemas/ReasoningDelta",
+                          "tool_call_delta": "#/components/schemas/ToolCallDelta",
+                          "text_part": "#/components/schemas/TextPart",
+                          "reasoning_part": "#/components/schemas/ReasoningPart",
+                          "tool_call_requested": "#/components/schemas/ToolCallRequested",
+                          "tool_call_started": "#/components/schemas/ToolCallStarted",
+                          "tool_progress": "#/components/schemas/ToolProgress",
+                          "tool_call_completed": "#/components/schemas/ToolCallCompleted",
+                          "child_created": "#/components/schemas/ChildCreated",
+                          "agent_finished": "#/components/schemas/AgentFinished",
+                          "ask_raised": "#/components/schemas/AskRaised",
+                          "ask_answered": "#/components/schemas/AskAnswered",
+                          "sample_completed": "#/components/schemas/SampleCompleted",
+                          "compaction_applied": "#/components/schemas/CompactionApplied",
+                          "cancellation_requested": "#/components/schemas/CancellationRequested",
+                          "turn_completed": "#/components/schemas/TurnCompleted",
+                          "turn_failed": "#/components/schemas/TurnFailed",
+                          "turn_cancelled": "#/components/schemas/TurnCancelled",
+                          "turn_interrupted": "#/components/schemas/TurnInterrupted"
+                        }
+                      }
                     },
                     {
-                      "$ref": "#/components/schemas/SubscriptionReadyFrame"
-                    },
-                    {
-                      "$ref": "#/components/schemas/AskExpiredFrame"
-                    },
-                    {
-                      "$ref": "#/components/schemas/TitleUpdatedFrame"
-                    },
-                    {
-                      "$ref": "#/components/schemas/HeaderUpdatedFrame"
-                    },
-                    {
-                      "$ref": "#/components/schemas/ServerErrorFrame"
+                      "$ref": "#/components/schemas/HeaderNotice"
                     }
                   ],
                   "title": "Response Ws Types"
@@ -786,6 +906,19 @@
               }
             ],
             "title": "Answered By"
+          },
+          "submitted_by": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submitted By"
           }
         },
         "additionalProperties": true,
@@ -795,49 +928,6 @@
           "response"
         ],
         "title": "AskAnswered"
-      },
-      "AskExpiredFrame": {
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "ask_expired",
-            "title": "Type",
-            "default": "ask_expired"
-          },
-          "agent_id": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
-            "title": "Agent Id"
-          },
-          "ask_id": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
-            "title": "Ask Id"
-          },
-          "command_id": {
-            "anyOf": [
-              {
-                "type": "string",
-                "pattern": "^[0-9a-f]{32}$"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Command Id"
-          },
-          "message": {
-            "type": "string",
-            "title": "Message"
-          }
-        },
-        "type": "object",
-        "required": [
-          "agent_id",
-          "ask_id",
-          "message"
-        ],
-        "title": "AskExpiredFrame"
       },
       "AskRaised": {
         "properties": {
@@ -898,37 +988,6 @@
         ],
         "title": "AskRaised"
       },
-      "AskResponseFrame": {
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "ask_response",
-            "title": "Type",
-            "default": "ask_response"
-          },
-          "command_id": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
-            "title": "Command Id"
-          },
-          "ask_id": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
-            "title": "Ask Id"
-          },
-          "response": {
-            "type": "string",
-            "title": "Response"
-          }
-        },
-        "type": "object",
-        "required": [
-          "command_id",
-          "ask_id",
-          "response"
-        ],
-        "title": "AskResponseFrame"
-      },
       "Attachment": {
         "properties": {
           "path": {
@@ -940,6 +999,7 @@
             "title": "Name"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "path",
@@ -960,26 +1020,6 @@
           "file"
         ],
         "title": "Body_create_upload"
-      },
-      "CancelFrame": {
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "cancel",
-            "title": "Type",
-            "default": "cancel"
-          },
-          "command_id": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
-            "title": "Command Id"
-          }
-        },
-        "type": "object",
-        "required": [
-          "command_id"
-        ],
-        "title": "CancelFrame"
       },
       "CancellationRequested": {
         "properties": {
@@ -1007,6 +1047,19 @@
             },
             "type": "object",
             "title": "Targets"
+          },
+          "submitted_by": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submitted By"
           }
         },
         "additionalProperties": true,
@@ -1187,139 +1240,6 @@
         "type": "object",
         "title": "CreateSessionRequest"
       },
-      "EventFrame": {
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "event",
-            "title": "Type",
-            "default": "event"
-          },
-          "agent_id": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
-            "title": "Agent Id"
-          },
-          "seq": {
-            "type": "integer",
-            "minimum": 1.0,
-            "title": "Seq"
-          },
-          "event": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/SessionCreated"
-              },
-              {
-                "$ref": "#/components/schemas/InputQueued"
-              },
-              {
-                "$ref": "#/components/schemas/TurnStarted"
-              },
-              {
-                "$ref": "#/components/schemas/SampleStarted"
-              },
-              {
-                "$ref": "#/components/schemas/TextDelta"
-              },
-              {
-                "$ref": "#/components/schemas/ReasoningDelta"
-              },
-              {
-                "$ref": "#/components/schemas/ToolCallDelta"
-              },
-              {
-                "$ref": "#/components/schemas/TextPart"
-              },
-              {
-                "$ref": "#/components/schemas/ReasoningPart"
-              },
-              {
-                "$ref": "#/components/schemas/ToolCallRequested"
-              },
-              {
-                "$ref": "#/components/schemas/ToolCallStarted"
-              },
-              {
-                "$ref": "#/components/schemas/ToolProgress"
-              },
-              {
-                "$ref": "#/components/schemas/ToolCallCompleted"
-              },
-              {
-                "$ref": "#/components/schemas/ChildCreated"
-              },
-              {
-                "$ref": "#/components/schemas/AgentFinished"
-              },
-              {
-                "$ref": "#/components/schemas/AskRaised"
-              },
-              {
-                "$ref": "#/components/schemas/AskAnswered"
-              },
-              {
-                "$ref": "#/components/schemas/SampleCompleted"
-              },
-              {
-                "$ref": "#/components/schemas/CompactionApplied"
-              },
-              {
-                "$ref": "#/components/schemas/CancellationRequested"
-              },
-              {
-                "$ref": "#/components/schemas/TurnCompleted"
-              },
-              {
-                "$ref": "#/components/schemas/TurnFailed"
-              },
-              {
-                "$ref": "#/components/schemas/TurnCancelled"
-              },
-              {
-                "$ref": "#/components/schemas/TurnInterrupted"
-              }
-            ],
-            "title": "Event",
-            "discriminator": {
-              "propertyName": "type",
-              "mapping": {
-                "agent_finished": "#/components/schemas/AgentFinished",
-                "ask_answered": "#/components/schemas/AskAnswered",
-                "ask_raised": "#/components/schemas/AskRaised",
-                "cancellation_requested": "#/components/schemas/CancellationRequested",
-                "child_created": "#/components/schemas/ChildCreated",
-                "compaction_applied": "#/components/schemas/CompactionApplied",
-                "input_queued": "#/components/schemas/InputQueued",
-                "reasoning_delta": "#/components/schemas/ReasoningDelta",
-                "reasoning_part": "#/components/schemas/ReasoningPart",
-                "sample_completed": "#/components/schemas/SampleCompleted",
-                "sample_started": "#/components/schemas/SampleStarted",
-                "session_created": "#/components/schemas/SessionCreated",
-                "text_delta": "#/components/schemas/TextDelta",
-                "text_part": "#/components/schemas/TextPart",
-                "tool_call_completed": "#/components/schemas/ToolCallCompleted",
-                "tool_call_delta": "#/components/schemas/ToolCallDelta",
-                "tool_call_requested": "#/components/schemas/ToolCallRequested",
-                "tool_call_started": "#/components/schemas/ToolCallStarted",
-                "tool_progress": "#/components/schemas/ToolProgress",
-                "turn_cancelled": "#/components/schemas/TurnCancelled",
-                "turn_completed": "#/components/schemas/TurnCompleted",
-                "turn_failed": "#/components/schemas/TurnFailed",
-                "turn_interrupted": "#/components/schemas/TurnInterrupted",
-                "turn_started": "#/components/schemas/TurnStarted"
-              }
-            }
-          }
-        },
-        "type": "object",
-        "required": [
-          "agent_id",
-          "seq",
-          "event"
-        ],
-        "title": "EventFrame"
-      },
       "FreeText": {
         "properties": {
           "kind": {
@@ -1378,7 +1298,7 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
-      "HeaderUpdatedFrame": {
+      "HeaderNotice": {
         "properties": {
           "type": {
             "type": "string",
@@ -1409,8 +1329,13 @@
             "title": "Model"
           }
         },
+        "additionalProperties": false,
         "type": "object",
-        "title": "HeaderUpdatedFrame"
+        "required": [
+          "title",
+          "model"
+        ],
+        "title": "HeaderNotice"
       },
       "InputQueued": {
         "properties": {
@@ -1432,6 +1357,19 @@
           "input": {
             "type": "string",
             "title": "Input"
+          },
+          "submitted_by": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submitted By"
           }
         },
         "additionalProperties": true,
@@ -1654,47 +1592,6 @@
         ],
         "title": "SampleStarted"
       },
-      "ServerErrorFrame": {
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "server_error",
-            "title": "Type",
-            "default": "server_error"
-          },
-          "code": {
-            "type": "string",
-            "title": "Code",
-            "default": "internal_error"
-          },
-          "message": {
-            "type": "string",
-            "title": "Message"
-          },
-          "command_id": {
-            "anyOf": [
-              {
-                "type": "string",
-                "pattern": "^[0-9a-f]{32}$"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Command Id"
-          },
-          "retryable": {
-            "type": "boolean",
-            "title": "Retryable",
-            "default": false
-          }
-        },
-        "type": "object",
-        "required": [
-          "message"
-        ],
-        "title": "ServerErrorFrame"
-      },
       "SessionCreated": {
         "properties": {
           "version": {
@@ -1774,6 +1671,28 @@
         ],
         "title": "SessionCreated"
       },
+      "SessionInput": {
+        "properties": {
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/Attachment"
+            },
+            "type": "array",
+            "title": "Attachments"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "text",
+          "attachments"
+        ],
+        "title": "SessionInput"
+      },
       "SessionOut": {
         "properties": {
           "id": {
@@ -1838,67 +1757,51 @@
         ],
         "title": "SignupRequest"
       },
-      "SubscribeFrame": {
+      "SocketTicketOut": {
         "properties": {
-          "type": {
+          "ticket": {
             "type": "string",
-            "const": "subscribe",
-            "title": "Type",
-            "default": "subscribe"
+            "title": "Ticket"
           },
-          "agent_id": {
+          "expires_at": {
             "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
-            "title": "Agent Id"
+            "format": "date-time",
+            "title": "Expires At"
           },
-          "after": {
-            "type": "integer",
-            "minimum": 0.0,
-            "title": "After",
-            "default": 0
+          "login_expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Login Expires At"
           },
-          "writable": {
-            "type": "boolean",
-            "title": "Writable",
-            "default": false
+          "user_id": {
+            "type": "string",
+            "title": "User Id"
           }
         },
         "type": "object",
         "required": [
-          "agent_id"
+          "ticket",
+          "expires_at",
+          "login_expires_at",
+          "user_id"
         ],
-        "title": "SubscribeFrame"
+        "title": "SocketTicketOut"
       },
-      "SubscriptionReadyFrame": {
+      "SocketTicketRequest": {
         "properties": {
-          "type": {
+          "mode": {
             "type": "string",
-            "const": "subscription_ready",
-            "title": "Type",
-            "default": "subscription_ready"
-          },
-          "agent_id": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
-            "title": "Agent Id"
-          },
-          "seq": {
-            "type": "integer",
-            "minimum": 0.0,
-            "title": "Seq"
-          },
-          "active": {
-            "type": "boolean",
-            "title": "Active"
+            "enum": [
+              "read",
+              "write"
+            ],
+            "title": "Mode",
+            "default": "write"
           }
         },
+        "additionalProperties": false,
         "type": "object",
-        "required": [
-          "agent_id",
-          "seq",
-          "active"
-        ],
-        "title": "SubscriptionReadyFrame"
+        "title": "SocketTicketRequest"
       },
       "TextDelta": {
         "properties": {
@@ -1954,25 +1857,6 @@
           "text"
         ],
         "title": "TextPart"
-      },
-      "TitleUpdatedFrame": {
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "title_updated",
-            "title": "Type",
-            "default": "title_updated"
-          },
-          "title": {
-            "type": "string",
-            "title": "Title"
-          }
-        },
-        "type": "object",
-        "required": [
-          "title"
-        ],
-        "title": "TitleUpdatedFrame"
       },
       "TokenResponse": {
         "properties": {
@@ -2369,26 +2253,6 @@
         ],
         "title": "TurnSummaryOut"
       },
-      "UnsubscribeFrame": {
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "unsubscribe",
-            "title": "Type",
-            "default": "unsubscribe"
-          },
-          "agent_id": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
-            "title": "Agent Id"
-          }
-        },
-        "type": "object",
-        "required": [
-          "agent_id"
-        ],
-        "title": "UnsubscribeFrame"
-      },
       "Usage": {
         "properties": {
           "input_tokens": {
@@ -2415,38 +2279,6 @@
         "additionalProperties": true,
         "type": "object",
         "title": "Usage"
-      },
-      "UserMessageFrame": {
-        "properties": {
-          "type": {
-            "type": "string",
-            "const": "user_message",
-            "title": "Type",
-            "default": "user_message"
-          },
-          "command_id": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
-            "title": "Command Id"
-          },
-          "text": {
-            "type": "string",
-            "title": "Text"
-          },
-          "attachments": {
-            "items": {
-              "$ref": "#/components/schemas/Attachment"
-            },
-            "type": "array",
-            "title": "Attachments"
-          }
-        },
-        "type": "object",
-        "required": [
-          "command_id",
-          "text"
-        ],
-        "title": "UserMessageFrame"
       },
       "UserOut": {
         "properties": {

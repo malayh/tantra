@@ -15,5 +15,6 @@ export interface AskAnswered {
   response: ApprovalResponse | ChoiceResponse | FreeTextResponse;
   command_id?: string | null;
   answered_by?: string | null;
+  submitted_by?: string | null;
   [key: string]: unknown;
  }

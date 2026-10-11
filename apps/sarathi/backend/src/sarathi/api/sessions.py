@@ -1,11 +1,19 @@
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 
 from sarathi.agent import ResourcesDep, Sarathi
-from sarathi.auth import CurrentUser
+from sarathi.auth import CurrentLogin, CurrentUser, create_socket_ticket
 from sarathi.config import get_settings
-from sarathi.schemas import ActorStatusOut, CreateSessionRequest, PatchSessionRequest, SessionOut, TurnSummaryOut
+from sarathi.schemas import (
+    ActorStatusOut,
+    CreateSessionRequest,
+    PatchSessionRequest,
+    SessionOut,
+    SocketTicketOut,
+    SocketTicketRequest,
+    TurnSummaryOut,
+)
 from tantra import ActorStatus, ModelChangeBusy, SessionHeader
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -70,6 +78,31 @@ async def create_session(body: CreateSessionRequest, user: CurrentUser, resource
     header = await resources.store.header(sid.hex)
     assert header is not None
     return _out(header)
+
+
+@router.post("/{session_id}/socket-ticket")
+async def create_session_socket_ticket(
+    session_id: str,
+    body: SocketTicketRequest,
+    login: CurrentLogin,
+    resources: ResourcesDep,
+    response: Response,
+) -> SocketTicketOut:
+    try:
+        root_id = UUID(hex=session_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found") from None
+    header = await resources.store.header(root_id.hex)
+    if header is None or header.parent_id is not None or header.metadata.get("user") != str(login.user.id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    ticket, expires_at = create_socket_ticket(login.user.id, root_id, body.mode, login.expires_at)
+    response.headers["Cache-Control"] = "no-store"
+    return SocketTicketOut(
+        ticket=ticket,
+        expires_at=expires_at,
+        login_expires_at=login.expires_at,
+        user_id=str(login.user.id),
+    )
 
 
 @router.get("/{root_id}/actors")

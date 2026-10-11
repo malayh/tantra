@@ -10,5 +10,6 @@ export interface InputQueued {
   type?: 'input_queued';
   command_id: string;
   input: string;
+  submitted_by?: string | null;
   [key: string]: unknown;
  }

@@ -2,6 +2,8 @@
 
 Manual-but-agent-driven end-to-end pass over the compose stack. Executed by Claude Code with browser tools + shell access. Produces one report per run.
 
+For spec 017 P3, use `coordinator.md` and its isolated deterministic stack. No paid inference is required. Its fixtures cover transport, typed asks, tools, documents, child streams, titles, and model updates. This runbook remains the optional real-provider campaign.
+
 ## Prerequisites
 
 - From `apps/sarathi/`: `cp .env.example .env` and fill:
@@ -238,7 +240,7 @@ Per-page distinctive facts:
 - The theme chosen in step 1 survives the reload (no flash back to the default dark).
 - Re-reload after completion: the finished transcript replays identically and no turn restarts.
 
-**Writer takeover:** opening the same session in a second tab transfers writable authority. The first tab must stop reconnecting and show a reload-to-reclaim banner; reloading it may reclaim authority from the second tab.
+**Writer takeover:** opening an editable session in a second tab acquires writable authority after replay. The first tab remains a reader and shows Reclaim control. Reconnect also stays read-only; click Reclaim control explicitly before sending again.
 
 ---
 
@@ -317,7 +319,7 @@ Copy into `e2e/reports/<YYYY-MM-DD>.md` and fill.
 
 ### 10 — Reconnect + theme · PASS/FAIL/SKIP
 - **Evidence:** persisted deltas replayed, same live turn completed coherently, composer unlocked, theme survived
-- **Writer takeover banner:** PASS/FAIL
+- **Writer takeover and explicit reclaim:** PASS/FAIL
 - **Notes:**
 
 ## Deviations from spec

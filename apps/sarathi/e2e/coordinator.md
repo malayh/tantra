@@ -21,6 +21,12 @@ docker compose -p tantra011e2e -f docker-compose.yaml -f docker-compose.e2e.yaml
 
 Never run `down -v` against the default project. Restore every stopped or paused service before leaving the stack.
 
+## Transport probes
+
+Use HTTP bearer authentication to issue `POST /api/sessions/{root}/socket-ticket` with `{"mode":"read"}` or `{"mode":"write"}`. Dial `/api/ws/sessions/{root}?ticket=...` with the configured browser Origin and `tantra.session.v1`. Root/actor/command/ask/subscription frame UUIDs are canonical; existing HTTP and journal IDs remain hex. Subscribe read-only, wait for `ready`, then acquire the writer explicitly. Receipts confirm acceptance; journal events do not acknowledge commands. Reconnect requires explicit reclaim.
+
+`node apps/sarathi/e2e/session-client.mjs` runs the shared client against both backends and saves behavioral evidence. The disposable account, sessions, memories, and uploads belong only to this Compose project.
+
 ## Gate controls
 
 A gate starts open. Close it before sending a matching prompt, wait until `/control/state` reports a waiter, then open it. Reset releases all current waiters and clears request evidence.
@@ -37,6 +43,9 @@ curl -fsS -X POST http://localhost:18090/control/command-replies/drop-next-send
 |---|---|
 | `[gate:provider=model]` | Provider request waits at `model`, then streams a fixed answer. |
 | `[gate:tool=io]` | Model calls the opt-in `e2e_gate` tool, which waits at `io`. |
+| `[gate:tool=choice]` / `[gate:tool=free-text]` | Root raises a typed choice/text ask. |
+| `[gate:tool=skill]` | Model loads the existing research skill. |
+| Uploaded PDF/Word attachment | Model calls `read_doc` using the uploaded marker path. |
 | `[gate:ask=approval]` | Model calls `memory_write`, producing the real approval card. |
 | `[gate:child=worker]` | Root spawns `Gate worker`; the child provider waits at `worker`, then finishes. |
 | `[gate:child-tool=worker]` | Child calls the gated tool and finishes after release. |
@@ -48,7 +57,7 @@ Markers may be surrounded by ordinary text. Close `io`, `worker`, or `stream` be
 
 Write screenshots and notes under the ignored directory `apps/sarathi/e2e/reports/011-coordinator-2026-09-27/`. For each case record the root ID from the URL, command UUIDs and journal cursors from WebSocket frames, the gate request ID/source, ownership generation before and after, Nginx upstream, and the final journal rows.
 
-Backend Uvicorn access logs are disabled because WebSocket URLs contain authentication query parameters. Use the sanitized Nginx access log for backend routing evidence.
+Backend Uvicorn access logs are disabled because WebSocket URLs contain short-lived handshake tickets. Use the sanitized Nginx access log for backend routing evidence.
 
 Gate sources identify which container made each provider request. Map them to containers with `docker inspect`; close a WebSocket before reading its completed Nginx access-log line. Direct probes can force A or B through ports 18001 and 18002. Brave UI traffic must continue through Nginx on 18000.
 
@@ -83,11 +92,11 @@ Confirm the termination query returned exactly one row. The owner must publish t
 Use three Brave windows on the same session: writer A, writer B, and a viewer opened with `?view=readonly`. Nginx round-robins them; confirm actual routing from its logs. Run each destructive case on a fresh chat, and reset the gate between cases.
 
 1. **Reconnect through B while A works:** close `model`, send `[gate:provider=model]`, close or reload writer A, reconnect a writer routed to B, open `model`, and verify one turn completes with no duplicate UUID or sequence.
-2. **Writer takeover and viewer:** open writer B and confirm writer A closes with 4009/reload banner. Open the read-only URL and confirm it observes without replacing B or enabling mutations.
+2. **Writer takeover and viewer:** open editable page B and confirm page A remains connected as a reader with a Reclaim control action. Open the read-only URL and confirm it observes without replacing B or enabling mutations. Reclaim from A explicitly and verify B is downgraded.
 3. **Active child while root idle:** close `worker`, send `[gate:child=worker]`, wait for the root turn to become idle while the child stays active, disconnect all writers, and verify ownership/activity remain. Open `worker` and refresh the child drawer.
 4. **FIFO while working:** close `model`, send `[gate:provider=model]`, enqueue a second UUID with a direct authenticated WebSocket probe, open `model`, and verify journal acceptance and execution order.
 5. **Remote answer and Stop:** route the owner to A, take writer authority through B, answer `[gate:ask=approval]` from B, then repeat with a closed provider/tool gate and Stop from B. Release the gate and verify the durable terminal.
-6. **Committed reply loss:** arm `drop-next-send`, submit a fixed command UUID through non-owner B, observe `command_timeout`, then resend the identical frame UUID. `/control/state` must show one dropped transport reply and the journal must contain exactly one matching `input_queued`.
+6. **Committed reply loss:** arm `drop-next-send`, submit a fixed command UUID through non-owner B, observe an uncertain error or lost receipt, then retry the identical frozen command UUID. A duplicate committed receipt confirms acceptance. `/control/state` must show one dropped transport reply and the journal must contain exactly one matching `input_queued`.
 7. **Notification catch-up:** hold the owner on `model`, terminate the paused observer's exact `LISTEN` connection with the procedure above, publish while it is absent, then unpause it. Verify the viewer catches up from its old cursor without duplicates.
 8. **Backend B death:** with A owning a closed gate, stop B and verify A continues. Restore B and reconnect through it before the next case.
 9. **Owner A death and expiry:** kill A while `[gate:provider=model]` waits. Before six seconds, B must not start replacement work. After expiry, claim from B and verify the abandoned started turn is interrupted rather than replayed.
@@ -104,7 +113,7 @@ For kill/pause cases identify the current owner from the gate source, activity, 
 
 ## Real-provider smoke
 
-The deterministic override is not a substitute for the existing real-provider runbook. After this matrix, use `e2e/runbook.md` against the normal stack for streaming, delegation, child communication, drawer history, approval, cancellation, refresh, reconnect, and upload behavior. Missing external credentials or services leaves verification pending; it is not a deterministic-gate pass.
+Spec 017 P3 uses deterministic fixtures and makes no paid requests. Run the transport/browser workflows here for its gate. The existing `e2e/runbook.md` remains available for a separately requested real-provider smoke; missing provider/search credentials do not block the deterministic P3 campaign.
 
 ## Failure interpretation
 

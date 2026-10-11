@@ -1,13 +1,25 @@
+FROM node:22-slim AS client
+WORKDIR /repo/packages/tantra-client
+COPY packages/tantra-client/package.json packages/tantra-client/package-lock.json ./
+RUN npm ci
+COPY packages/tantra-client/tsconfig.json ./
+COPY packages/tantra-client/src ./src
+RUN npm run build
+
 FROM node:22-slim AS deps
-WORKDIR /app
-COPY package.json yarn.lock ./
+WORKDIR /repo
+COPY packages/tantra-client/package.json packages/tantra-client/package.json
+COPY --from=client /repo/packages/tantra-client/dist packages/tantra-client/dist
+WORKDIR /repo/apps/sarathi/ui
+COPY apps/sarathi/ui/package.json apps/sarathi/ui/yarn.lock ./
 RUN yarn install --frozen-lockfile
 
 FROM node:22-slim AS builder
-WORKDIR /app
+WORKDIR /repo/apps/sarathi/ui
 ENV NEXT_TELEMETRY_DISABLED=1
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+COPY --from=deps /repo/apps/sarathi/ui/node_modules ./node_modules
+COPY --from=deps /repo/packages/tantra-client /repo/packages/tantra-client
+COPY apps/sarathi/ui ./
 RUN yarn build
 
 FROM node:22-slim AS runner
@@ -16,8 +28,8 @@ ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
     HOSTNAME=0.0.0.0
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static ./.next/static
+COPY --from=builder /repo/apps/sarathi/ui/public ./apps/sarathi/ui/public
+COPY --from=builder /repo/apps/sarathi/ui/.next/standalone ./
+COPY --from=builder /repo/apps/sarathi/ui/.next/static ./apps/sarathi/ui/.next/static
 EXPOSE 3000
-CMD ["node", "server.js"]
+CMD ["node", "apps/sarathi/ui/server.js"]

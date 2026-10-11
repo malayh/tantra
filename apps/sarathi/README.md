@@ -19,6 +19,16 @@ A deep-search chat system in the style of Perplexity — ask anything, watch it 
 - **Document grounding** — upload a PDF, the agent reads it with `read_doc` and answers from it.
 - **Model switching** — per-session model updates are atomic and apply to the next turn.
 
+## Session transport
+
+Sarathi uses Tantra `SessionSocket` and the local `tantra-session-client` package. HTTP routes, authentication, attachment validation, transcript reduction, and actor polling remain application-owned.
+
+The browser requests a root-scoped ticket through `POST /api/sessions/{id}/socket-ticket` before each dial. Tickets are reusable for at most 30 seconds; socket lifetime follows the original login expiry. WebSocket URLs carry the ticket rather than the login token. Both backends must share `SECRET_KEY`, and `CORS_ORIGINS` must include the actual browser origin.
+
+Editable pages acquire control once after initial replay. Reconnect and writer replacement leave history readable and require **Reclaim control** before Send, Stop, answers, or model changes. `?view=readonly` requests a read-only ticket and never claims control. Receipts confirm durable acceptance; uncertain commands retry their original IDs. Refresh rebuilds the full transcript, while an open page resumes from its applied cursors.
+
+Deploy both backends and the UI together; pages using the previous wire protocol require refresh. Local UI development builds `packages/tantra-client` before consuming its file dependency. The UI Compose build context is the repository root so its standalone image includes that package.
+
 ## Stack
 
 - `backend/` — two FastAPI + tantra processes, a PostgreSQL coordinator and event-sourced store, and WebSockets served through Nginx.
@@ -61,10 +71,12 @@ For deterministic coordinator tests, start the isolated E2E project with `docker
 
 Backend (from `backend/`): `uv sync --dev`, then `just runserver` / `just test` / `just lint` / `just migrate`.
 
-UI (from `ui/`): `yarn install`, then `just runserver`; `yarn typegen` regenerates the API client after backend schema changes (never edit `ui/src/generated/`).
+UI: run `npm ci && npm run build` in `packages/tantra-client`, then run `yarn install` and `yarn dev` from `apps/sarathi/ui`; `yarn typegen` regenerates the API client after backend schema changes (never edit `ui/src/generated/`).
 
 ## E2E
 
 `e2e/runbook.md` — scenarios driven live through a browser agent, reports land in `e2e/reports/`.
 
 `e2e/coordinator.md` — disposable two-backend failure matrix, deterministic gate controls, evidence queries, and recovery notes.
+
+The automated native-client workflow is `node apps/sarathi/e2e/session-client.mjs` from the repository root after installing the UI dependencies and building the shared client. It targets the disposable two-backend stack and writes `e2e/reports/017-p3/client-behavior.json`. Set `SARATHI_E2E_API`, `SARATHI_E2E_A`, `SARATHI_E2E_B`, `SARATHI_E2E_GATE`, and `SARATHI_E2E_ORIGIN` when ports differ. It uses only the deterministic provider.

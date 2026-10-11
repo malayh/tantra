@@ -3,8 +3,19 @@ from uuid import uuid4
 
 import pytest
 
-from sarathi.e2e import E2EPostgresCoordinator
-from tantra import CommandEnvelope, CommandReply, CommandTimeout, PostgresCoordinator, SendPayload, WriterToken
+from sarathi.e2e import E2EPostgresCoordinator, e2e_gate
+from tantra import (
+    Choice,
+    ChoiceResponse,
+    CommandEnvelope,
+    CommandReply,
+    CommandTimeout,
+    FreeText,
+    FreeTextResponse,
+    PostgresCoordinator,
+    SendPayload,
+    WriterToken,
+)
 
 
 class GateResponse:
@@ -78,3 +89,24 @@ async def test_reply_drop_happens_after_commit_and_same_uuid_retry_adds_one_inpu
     assert accepted == [command_id]
     assert [probe["command_id"] for probe in probes] == [str(command_id), str(command_id)]
     assert probes[0]["request_id"] != probes[1]["request_id"]
+
+
+async def test_e2e_gate_exposes_typed_choice_and_free_text_asks() -> None:
+    seen = []
+
+    class Context:
+        async def ask(self, request):
+            seen.append(request)
+            if isinstance(request, Choice):
+                return ChoiceResponse(selected="Green")
+            return FreeTextResponse(text="Canary")
+
+    tool = e2e_gate("http://gate")
+    context = Context()
+
+    assert await tool.fn("choice", context) == '{"kind":"choice","selected":"Green"}'
+    assert await tool.fn("free-text", context) == '{"kind":"free_text","text":"Canary"}'
+    assert seen == [
+        Choice(title="Choose a deployment", options=["Blue", "Green"]),
+        FreeText(prompt="Describe the deployment"),
+    ]

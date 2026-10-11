@@ -158,6 +158,6 @@ Persisted actor cursors are validated but never blindly restored as replay bound
 
 `timing` overrides receipt timeout, the three retry delays, reconnect base/cap, and capacity timeout. Defaults are ten seconds for receipts and capacity, one/two/four seconds for command retries, and jittered reconnect backoff from one to 30 seconds for at most ten consecutive failed dials.
 
-Sarathi migration remains separate. This endpoint and package do not install application routes or adopt existing wire clients automatically.
+Sarathi supplies an application integration in `apps/sarathi`: root-scoped handshake tickets, explicit ownership/approval policies, a raw owner-only event view, header notices, and a React adapter around the client. See `apps/sarathi/README.md` for deployment and development. Osuite adoption remains separate. The endpoint and package do not install application HTTP routes or UI reducers automatically.
 
 A root subscription with pending commands cannot be unsubscribed. Use `disconnect()` to leave safely while retaining its unresolved outbox.

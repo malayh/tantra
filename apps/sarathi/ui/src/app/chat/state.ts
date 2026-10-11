@@ -1,29 +1,16 @@
 import { createStore } from "zustand/vanilla";
 
-import type {
-  ActorStatusOut,
-  AskExpiredFrame,
-  AskRaised,
-  AskResponseFrame,
-  Attachment,
-  CancelFrame,
-  EventFrame,
-  HeaderUpdatedFrame,
-  ServerErrorFrame,
-  SubscribeFrame,
-  SubscriptionReadyFrame,
-  TitleUpdatedFrame,
-  UnsubscribeFrame,
-  UserMessageFrame,
-} from "@/generated/models";
+import type { ActorStatusOut, AskRaised, Attachment, HeaderNotice } from "@/generated/models";
+import type { WsTypesMutationResult } from "@/generated/api/meta/meta";
 
-export type ServerFrame =
-  EventFrame | SubscriptionReadyFrame | AskExpiredFrame | TitleUpdatedFrame | HeaderUpdatedFrame | ServerErrorFrame;
+export type SessionEvent = Exclude<WsTypesMutationResult, HeaderNotice>;
 
-export type ClientFrame = SubscribeFrame | UnsubscribeFrame | UserMessageFrame | AskResponseFrame | CancelFrame;
-export type CommandFrame = UserMessageFrame | AskResponseFrame | CancelFrame;
-
-export type SessionEvent = EventFrame["event"];
+export type EventFrame = {
+  type: "event";
+  agent_id: string;
+  seq: number;
+  event: SessionEvent;
+};
 
 export type TextKind = "thinking" | "text";
 
@@ -52,9 +39,9 @@ export type AskItem = ItemBase & {
   kind: "ask";
   callId: string | null;
   askId: string;
+  request: AskRaised["request"];
   title: string;
   body: string;
-  requestKind: string;
   status: "pending" | "answered" | "expired";
   allow?: boolean;
 };
@@ -79,11 +66,10 @@ export type JournalState = {
 
 export type Banner = { kind: "error" | "writer" | "retry"; message: string; commandId?: string };
 
-export type OutboxEntry = {
-  frame: CommandFrame;
-  attempts: number;
-  status: "pending" | "manual";
-};
+export const bannerControls = (banner: Banner | null, reclaimRequired: boolean) => ({
+  reclaim: reclaimRequired,
+  retryCommandId: banner?.kind === "retry" ? (banner.commandId ?? null) : null,
+});
 
 export type PendingMessage = { text: string; attachments: Attachment[] };
 
@@ -93,21 +79,13 @@ export type ChatState = JournalState & {
   children: Record<string, JournalState>;
   actors: ActorStatusOut[];
   openChildId: string | null;
-  outbox: OutboxEntry[];
-  writerLost: boolean;
   dispatch: (frame: EventFrame) => void;
-  subscriptionReady: (frame: SubscriptionReadyFrame) => void;
-  expireAsk: (frame: AskExpiredFrame) => void;
-  setReady: (ready: boolean) => void;
+  advanceCursor: (agentId: string, seq: number) => void;
+  setSubscriptionReady: (agentId: string, ready: boolean, active?: boolean) => void;
+  expireAsk: (askId: string, message: string) => void;
   setBanner: (banner: Banner | null) => void;
   setActors: (actors: ActorStatusOut[]) => void;
   setOpenChild: (agentId: string | null) => void;
-  enqueueCommand: (frame: CommandFrame) => void;
-  markCommandSent: (commandId: string) => void;
-  requireRetry: (commandId: string) => void;
-  retryCommand: (commandId: string) => void;
-  failCommand: (commandId: string, message: string) => void;
-  loseWriter: () => void;
 };
 
 export type ChatStore = ReturnType<typeof createChatStore>;
@@ -181,7 +159,7 @@ export const associateChild = (
 
 const askText = (request: AskRaised["request"]): { title: string; body: string } => {
   if (request.kind === "free_text") return { title: request.prompt, body: "" };
-  if (request.kind === "choice") return { title: request.title, body: (request.options ?? []).join("\n") };
+  if (request.kind === "choice") return { title: request.title, body: "" };
   if (request.kind === "approval") return { title: request.title, body: request.body ?? "" };
   return { title: "", body: "" };
 };
@@ -198,10 +176,10 @@ const updateAsks = (
       : item,
   );
 
-export const pendingAsk = (turns: Turn[]): { askId: string } | null => {
+export const pendingAsk = (turns: Turn[]): string | null => {
   for (let turnIndex = turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
     const found = turns[turnIndex].items.find((item) => item.kind === "ask" && item.status === "pending");
-    if (found?.kind === "ask") return { askId: found.askId };
+    if (found?.kind === "ask") return found.askId;
   }
   return null;
 };
@@ -268,9 +246,9 @@ const reduceItems = (scope: ItemScope, event: SessionEvent, allowAsk: boolean): 
             kind: "ask",
             askId: event.ask_id,
             callId: event.call_id ?? null,
+            request: event.request,
             title,
             body,
-            requestKind: event.request.kind ?? "approval",
             status: "pending",
             sampleId: openSample,
             content: "",
@@ -429,49 +407,24 @@ export const isNearBottom = (scrollHeight: number, scrollTop: number, clientHeig
 export const composerDisabled = (
   ready: boolean,
   connected: boolean,
-  writerLost: boolean,
+  writable: boolean,
   askPending: boolean,
   readonly = false,
-): boolean => !ready || !connected || writerLost || askPending || readonly;
+): boolean => !ready || !connected || !writable || askPending || readonly;
 
 export const treeRunning = (turns: Turn[], actors: ActorStatusOut[]): boolean =>
   (pendingAsk(turns) === null && turns.some((turn) => turn.status === "queued" || turn.status === "running")) ||
   actors.some((actor) => actor.parent_id !== null && (actor.state === "queued" || actor.state === "running"));
 
-export const subscriptionFrames = (state: ChatState, rootId: string, writable = true): SubscribeFrame[] => {
-  const ids = state.openChildId === null ? [rootId] : [rootId, state.openChildId];
-  return ids.map((agentId) => ({
-    type: "subscribe",
-    agent_id: agentId,
-    after: state.cursors[agentId] ?? 0,
-    writable: writable && agentId === rootId,
-  }));
-};
-
-export const acknowledgedCommandId = (event: SessionEvent): string | null => {
-  if (event.type === "input_queued" || event.type === "cancellation_requested") return event.command_id;
-  if (event.type === "ask_answered") return event.command_id ?? null;
-  return null;
-};
-
 export const reduceEventFrame = (state: ChatState, frame: EventFrame, rootId: string): Partial<ChatState> => {
-  const commandId = acknowledgedCommandId(frame.event);
-  const acknowledged =
-    commandId === null
-      ? {}
-      : {
-          outbox: state.outbox.filter((entry) => entry.frame.command_id !== commandId),
-          banner: state.banner?.commandId === commandId ? null : state.banner,
-        };
-  if (frame.seq <= (state.cursors[frame.agent_id] ?? 0)) return acknowledged;
+  if (frame.seq <= (state.cursors[frame.agent_id] ?? 0)) return {};
   const cursors = { ...state.cursors, [frame.agent_id]: frame.seq };
   if (frame.agent_id === rootId) {
     const reduced = reduceJournal(state, frame.event, true, true);
-    return { ...reduced, ...acknowledged, cursors };
+    return { ...reduced, cursors };
   }
   const current = state.children[frame.agent_id] ?? EMPTY_JOURNAL;
   return {
-    ...acknowledged,
     cursors,
     children: {
       ...state.children,
@@ -480,82 +433,52 @@ export const reduceEventFrame = (state: ChatState, frame: EventFrame, rootId: st
   };
 };
 
-export const reduceEventFrames = (state: ChatState, frames: EventFrame[], rootId: string): ChatState =>
-  frames.reduce((next, frame) => ({ ...next, ...reduceEventFrame(next, frame, rootId) }), state);
-
-const journalReady = (state: ChatState, agentId: string, rootId: string): boolean =>
-  agentId === rootId ? state.ready : (state.children[agentId]?.ready ?? false);
-
 const subscribed = (state: ChatState, agentId: string, rootId: string): boolean =>
   agentId === rootId || agentId === state.openChildId;
 
-export const createChatStore = (sessionId: string) => {
-  const replayBuffers = new Map<string, EventFrame[]>();
-
-  return createStore<ChatState>((set, get) => ({
+export const createChatStore = (sessionId: string) =>
+  createStore<ChatState>((set, get) => ({
     ...EMPTY_JOURNAL,
     banner: null,
     cursors: {},
     children: {},
     actors: [],
     openChildId: null,
-    outbox: [],
-    writerLost: false,
     dispatch: (frame) => {
       const state = get();
       if (!subscribed(state, frame.agent_id, sessionId)) return;
-      if (journalReady(state, frame.agent_id, sessionId)) {
-        set((current) => reduceEventFrame(current, frame, sessionId));
-        return;
-      }
-      const frames = replayBuffers.get(frame.agent_id) ?? [];
-      frames.push(frame);
-      replayBuffers.set(frame.agent_id, frames);
+      set((current) => reduceEventFrame(current, frame, sessionId));
     },
-    subscriptionReady: (frame) => {
-      if (!subscribed(get(), frame.agent_id, sessionId)) return;
-      const frames = replayBuffers.get(frame.agent_id) ?? [];
-      replayBuffers.delete(frame.agent_id);
+    advanceCursor: (agentId, seq) => {
+      if (!subscribed(get(), agentId, sessionId)) return;
+      set((state) => (seq > (state.cursors[agentId] ?? 0) ? { cursors: { ...state.cursors, [agentId]: seq } } : state));
+    },
+    setSubscriptionReady: (agentId, ready, active = true) => {
+      if (!subscribed(get(), agentId, sessionId)) return;
       set((state) => {
-        const reduced = reduceEventFrames(state, frames, sessionId);
-        if (frame.agent_id === sessionId) {
-          const journal = frame.active ? reduced : interruptJournal(reduced);
-          return { ...journal, ready: true };
+        if (agentId === sessionId) {
+          const journal = active ? state : interruptJournal(state);
+          return { ...journal, ready };
         }
-        const journal = reduced.children[frame.agent_id] ?? EMPTY_JOURNAL;
+        const journal = state.children[agentId] ?? EMPTY_JOURNAL;
         return {
-          ...reduced,
           children: {
-            ...reduced.children,
-            [frame.agent_id]: { ...journal, ready: true },
+            ...state.children,
+            [agentId]: { ...journal, ready },
           },
         };
       });
     },
-    expireAsk: (frame) =>
+    expireAsk: (askId, message) =>
       set((state) => ({
-        turns: state.turns.map((turn) => ({ ...turn, items: updateAsks(turn.items, frame.ask_id, "expired") })),
-        banner: { kind: "error", message: frame.message },
+        turns: state.turns.map((turn) => ({ ...turn, items: updateAsks(turn.items, askId, "expired") })),
+        banner: { kind: "error", message },
       })),
-    setReady: (ready) => {
-      if (!ready) replayBuffers.clear();
-      set((state) => {
-        if (ready) return { ready };
-        return {
-          ready,
-          children: Object.fromEntries(
-            Object.entries(state.children).map(([agentId, journal]) => [agentId, { ...journal, ready: false }]),
-          ),
-        };
-      });
-    },
     setBanner: (banner) => set({ banner }),
     setActors: (actors) => set({ actors }),
     setOpenChild: (openChildId) => {
       const current = get().openChildId;
       if (current === openChildId) return;
-      if (current !== null) replayBuffers.delete(current);
-      if (openChildId !== null) replayBuffers.delete(openChildId);
       set((state) => ({
         openChildId,
         children:
@@ -564,51 +487,7 @@ export const createChatStore = (sessionId: string) => {
             : { ...state.children, [openChildId]: { ...(state.children[openChildId] ?? EMPTY_JOURNAL), ready: false } },
       }));
     },
-    enqueueCommand: (frame) =>
-      set((state) =>
-        state.outbox.some((entry) => entry.frame.command_id === frame.command_id)
-          ? state
-          : { outbox: [...state.outbox, { frame, attempts: 0, status: "pending" }] },
-      ),
-    markCommandSent: (commandId) =>
-      set((state) => ({
-        outbox: state.outbox.map((entry) =>
-          entry.frame.command_id === commandId ? { ...entry, attempts: entry.attempts + 1 } : entry,
-        ),
-      })),
-    requireRetry: (commandId) =>
-      set((state) => ({
-        outbox: state.outbox.map((entry) =>
-          entry.frame.command_id === commandId ? { ...entry, status: "manual" } : entry,
-        ),
-        banner: {
-          kind: "retry",
-          message: "The command was not acknowledged. Retry with the same command ID?",
-          commandId,
-        },
-      })),
-    retryCommand: (commandId) =>
-      set((state) => ({
-        outbox: state.outbox.map((entry) =>
-          entry.frame.command_id === commandId ? { ...entry, attempts: 0, status: "pending" } : entry,
-        ),
-        banner: state.banner?.commandId === commandId ? null : state.banner,
-      })),
-    failCommand: (commandId, message) =>
-      set((state) => ({
-        outbox: state.outbox.filter((entry) => entry.frame.command_id !== commandId),
-        banner: { kind: "error", message, commandId },
-      })),
-    loseWriter: () =>
-      set({
-        writerLost: true,
-        banner: {
-          kind: "writer",
-          message: "This chat is open for writing in another tab. Reload to reclaim control.",
-        },
-      }),
   }));
-};
 
 let pending: ({ sessionId: string } & PendingMessage) | null = null;
 
@@ -616,10 +495,11 @@ export const pendingFirstMessage = {
   set: (sessionId: string, text: string, attachments: Attachment[]) => {
     pending = { sessionId, text, attachments };
   },
-  take: (sessionId: string): PendingMessage | null => {
+  peek: (sessionId: string): PendingMessage | null => {
     if (pending?.sessionId !== sessionId) return null;
-    const { text, attachments } = pending;
-    pending = null;
-    return { text, attachments };
+    return { text: pending.text, attachments: pending.attachments };
+  },
+  clear: (sessionId: string) => {
+    if (pending?.sessionId === sessionId) pending = null;
   },
 };

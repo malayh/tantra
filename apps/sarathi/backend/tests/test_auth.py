@@ -2,11 +2,8 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import jwt
-import pytest
-from fastapi import HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from sarathi.auth import TOKEN_TTL, current_user_ws, decode_token
+from sarathi.auth import TOKEN_TTL, decode_token
 from sarathi.config import get_settings
 
 CREDENTIALS = {"email": "a@example.com", "password": "hunter2hunter2"}
@@ -78,20 +75,17 @@ async def test_me_token_for_deleted_user_unauthorized(client: httpx.AsyncClient)
     assert response.status_code == 401
 
 
-async def test_current_user_ws_resolves_token(
-    client: httpx.AsyncClient, session_factory: async_sessionmaker[AsyncSession]
-) -> None:
+async def test_legacy_login_without_purpose_remains_valid(client: httpx.AsyncClient) -> None:
     signup = await client.post("/api/auth/signup", json=CREDENTIALS)
-    token = signup.json()["access_token"]
+    user_id = decode_token(signup.json()["access_token"])
+    now = datetime.now(UTC)
+    legacy = jwt.encode(
+        {"sub": str(user_id), "iat": int(now.timestamp()), "exp": int((now + TOKEN_TTL).timestamp())},
+        get_settings().SECRET_KEY,
+        algorithm="HS256",
+    )
 
-    async with session_factory() as session:
-        user = await current_user_ws(session, token)
-        assert user.email == CREDENTIALS["email"]
+    response = await client.get("/api/auth/me", headers={"Authorization": f"Bearer {legacy}"})
 
-        with pytest.raises(HTTPException) as invalid:
-            await current_user_ws(session, "not-a-jwt")
-        assert invalid.value.status_code == 401
-
-        with pytest.raises(HTTPException) as missing:
-            await current_user_ws(session, None)
-        assert missing.value.status_code == 401
+    assert response.status_code == 200
+    assert response.json()["id"] == user_id

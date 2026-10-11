@@ -161,13 +161,11 @@ export const deleteMemory = (
 
 
 
-export const getDeleteMemoryMutationKey = () => ['deleteMemory'] as const;
-
 export const getDeleteMemoryMutationOptions = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteMemory>>, TError,DeleteMemoryMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof deleteMemory>>, TError,DeleteMemoryMutationVariables, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteMemory>>, TError,{memoryId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof deleteMemory>>, TError,{memoryId: string}, TContext> => {
 
-const mutationKey = getDeleteMemoryMutationKey();
+const mutationKey = ['deleteMemory'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
       options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
       options
@@ -177,7 +175,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof deleteMemory>>, DeleteMemoryMutationVariables> = (props) => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof deleteMemory>>, {memoryId: string}> = (props) => {
           const {memoryId} = props ?? {};
 
           return  deleteMemory(memoryId,requestOptions)
@@ -193,17 +191,16 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type DeleteMemoryMutationResult = NonNullable<Awaited<ReturnType<typeof deleteMemory>>>
 
     export type DeleteMemoryMutationError = ErrorType<HTTPValidationError>
-    export type DeleteMemoryMutationVariables = {memoryId: string}
 
     /**
  * @summary Delete Memory
  */
 export const useDeleteMemory = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteMemory>>, TError,DeleteMemoryMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof deleteMemory>>, TError,{memoryId: string}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof deleteMemory>>,
         TError,
-        DeleteMemoryMutationVariables,
+        {memoryId: string},
         TContext
       > => {
       return useMutation(getDeleteMemoryMutationOptions(options), queryClient);

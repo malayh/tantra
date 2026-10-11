@@ -78,7 +78,8 @@ services:
 
   ui:
     build:
-      context: ./ui
+      context: ../..
+      dockerfile: apps/sarathi/ui/Dockerfile
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8001}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?NEXTAUTH_SECRET is required}

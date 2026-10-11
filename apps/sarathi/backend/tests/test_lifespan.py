@@ -32,13 +32,19 @@ async def test_close_resources_cancels_titles_and_closes_owned_resources() -> No
 
     task = asyncio.create_task(title())
     await started.wait()
+
+    class Titles:
+        async def aclose(self) -> None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     resources = RuntimeResources(
         runtime=AsyncCloser("runtime", calls),
         provider=AsyncCloser("provider", calls),
         store=AsyncCloser("store", calls),
         memory=SimpleNamespace(),
         embedder=AsyncCloser("embedder", calls),
-        title_tasks={"root": task},
+        title_hook=Titles(),
     )
 
     await close_resources(resources)
@@ -64,12 +70,21 @@ async def test_lifespan_installs_resources_and_cleans_up(monkeypatch: Any) -> No
     monkeypatch.setattr("sarathi.main.shutdown_telemetry", lambda: calls.append("telemetry"))
     monkeypatch.setattr("sarathi.main.get_settings", lambda: SimpleNamespace(UPLOAD_DIR="/tmp/sarathi-test-uploads"))
     application = FastAPI()
+    route = object()
+
+    def mount(app: FastAPI, value: Any, factory: Any) -> object:
+        assert value is resources
+        app.router.routes.append(route)
+        calls.append("mount")
+        return route
+
+    monkeypatch.setattr("sarathi.main.mount_session_socket", mount)
 
     async with lifespan(application):
         assert application.state.resources is resources
-        assert calls == ["make"]
+        assert calls == ["make", "mount"]
 
-    assert calls == ["make", "close", "telemetry"]
+    assert calls == ["make", "mount", "close", "telemetry"]
 
 
 async def test_lifespan_fails_startup_when_the_coordinator_is_unavailable(monkeypatch: Any) -> None:

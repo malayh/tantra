@@ -28,7 +28,9 @@ import type {
   CreateSessionRequest,
   HTTPValidationError,
   PatchSessionRequest,
-  SessionOut
+  SessionOut,
+  SocketTicketOut,
+  SocketTicketRequest
 } from '../../models';
 
 import { customInstance } from '../../../lib/apiClient';
@@ -166,13 +168,11 @@ export const createSession = (
 
 
 
-export const getCreateSessionMutationKey = () => ['createSession'] as const;
-
 export const getCreateSessionMutationOptions = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createSession>>, TError,CreateSessionMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof createSession>>, TError,CreateSessionMutationVariables, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createSession>>, TError,{data: BodyType<CreateSessionRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof createSession>>, TError,{data: BodyType<CreateSessionRequest>}, TContext> => {
 
-const mutationKey = getCreateSessionMutationKey();
+const mutationKey = ['createSession'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
       options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
       options
@@ -182,7 +182,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createSession>>, CreateSessionMutationVariables> = (props) => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createSession>>, {data: BodyType<CreateSessionRequest>}> = (props) => {
           const {data} = props ?? {};
 
           return  createSession(data,requestOptions)
@@ -198,20 +198,84 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type CreateSessionMutationResult = NonNullable<Awaited<ReturnType<typeof createSession>>>
     export type CreateSessionMutationBody = BodyType<CreateSessionRequest>
     export type CreateSessionMutationError = ErrorType<HTTPValidationError>
-    export type CreateSessionMutationVariables = {data: BodyType<CreateSessionRequest>}
 
     /**
  * @summary Create Session
  */
 export const useCreateSession = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createSession>>, TError,CreateSessionMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createSession>>, TError,{data: BodyType<CreateSessionRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof createSession>>,
         TError,
-        CreateSessionMutationVariables,
+        {data: BodyType<CreateSessionRequest>},
         TContext
       > => {
       return useMutation(getCreateSessionMutationOptions(options), queryClient);
+    }
+    /**
+ * @summary Create Session Socket Ticket
+ */
+export const createSessionSocketTicket = (
+    sessionId: string,
+    socketTicketRequest: BodyType<SocketTicketRequest>,
+ options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
+) => {
+
+
+      return customInstance<SocketTicketOut>(
+      {url: `/api/sessions/${sessionId}/socket-ticket`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: socketTicketRequest, signal
+    },
+      options);
+    }
+
+
+
+
+export const getCreateSessionSocketTicketMutationOptions = <TError = ErrorType<HTTPValidationError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createSessionSocketTicket>>, TError,{sessionId: string;data: BodyType<SocketTicketRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof createSessionSocketTicket>>, TError,{sessionId: string;data: BodyType<SocketTicketRequest>}, TContext> => {
+
+const mutationKey = ['createSessionSocketTicket'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof createSessionSocketTicket>>, {sessionId: string;data: BodyType<SocketTicketRequest>}> = (props) => {
+          const {sessionId,data} = props ?? {};
+
+          return  createSessionSocketTicket(sessionId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type CreateSessionSocketTicketMutationResult = NonNullable<Awaited<ReturnType<typeof createSessionSocketTicket>>>
+    export type CreateSessionSocketTicketMutationBody = BodyType<SocketTicketRequest>
+    export type CreateSessionSocketTicketMutationError = ErrorType<HTTPValidationError>
+
+    /**
+ * @summary Create Session Socket Ticket
+ */
+export const useCreateSessionSocketTicket = <TError = ErrorType<HTTPValidationError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof createSessionSocketTicket>>, TError,{sessionId: string;data: BodyType<SocketTicketRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof createSessionSocketTicket>>,
+        TError,
+        {sessionId: string;data: BodyType<SocketTicketRequest>},
+        TContext
+      > => {
+      return useMutation(getCreateSessionSocketTicketMutationOptions(options), queryClient);
     }
     /**
  * @summary List Actors
@@ -326,13 +390,11 @@ export const patchSession = (
 
 
 
-export const getPatchSessionMutationKey = () => ['patchSession'] as const;
-
 export const getPatchSessionMutationOptions = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof patchSession>>, TError,PatchSessionMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof patchSession>>, TError,PatchSessionMutationVariables, TContext> => {
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof patchSession>>, TError,{sessionId: string;data: BodyType<PatchSessionRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
+): UseMutationOptions<Awaited<ReturnType<typeof patchSession>>, TError,{sessionId: string;data: BodyType<PatchSessionRequest>}, TContext> => {
 
-const mutationKey = getPatchSessionMutationKey();
+const mutationKey = ['patchSession'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
       options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
       options
@@ -342,7 +404,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof patchSession>>, PatchSessionMutationVariables> = (props) => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof patchSession>>, {sessionId: string;data: BodyType<PatchSessionRequest>}> = (props) => {
           const {sessionId,data} = props ?? {};
 
           return  patchSession(sessionId,data,requestOptions)
@@ -358,17 +420,16 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
     export type PatchSessionMutationResult = NonNullable<Awaited<ReturnType<typeof patchSession>>>
     export type PatchSessionMutationBody = BodyType<PatchSessionRequest>
     export type PatchSessionMutationError = ErrorType<HTTPValidationError>
-    export type PatchSessionMutationVariables = {sessionId: string;data: BodyType<PatchSessionRequest>}
 
     /**
  * @summary Patch Session
  */
 export const usePatchSession = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof patchSession>>, TError,PatchSessionMutationVariables, TContext>, request?: SecondParameter<typeof customInstance>}
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof patchSession>>, TError,{sessionId: string;data: BodyType<PatchSessionRequest>}, TContext>, request?: SecondParameter<typeof customInstance>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof patchSession>>,
         TError,
-        PatchSessionMutationVariables,
+        {sessionId: string;data: BodyType<PatchSessionRequest>},
         TContext
       > => {
       return useMutation(getPatchSessionMutationOptions(options), queryClient);

@@ -5,10 +5,12 @@ import { Bot, ChevronRight, FileText, Globe, Loader2, Search, Wrench } from "luc
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useStore } from "zustand";
+import type { AskResponse } from "tantra-session-client";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { ActorStatusOut } from "@/generated/models";
 import {
@@ -23,7 +25,7 @@ import {
   type Turn,
 } from "../state";
 
-type AskResponder = (askId: string, response: string) => void;
+type AskResponder = (askId: string, response: AskResponse) => void;
 
 const MARKDOWN_CLASS = [
   "text-sm leading-relaxed [&>*+*]:mt-3",
@@ -177,18 +179,20 @@ function AskCard({
   onAskResponse?: AskResponder;
 }) {
   const [sent, setSent] = useState(false);
+  const [text, setText] = useState("");
 
   useEffect(() => {
     if (banner !== null) setSent(false);
   }, [banner]);
 
-  const respond = (response: string) => {
+  const respond = (response: AskResponse) => {
     if (!onAskResponse) return;
     setSent(true);
     onAskResponse(item.askId, response);
   };
 
   const body = formatBody(item.body);
+  const requestKind = item.request.kind ?? "approval";
 
   return (
     <Card size="sm" className="max-w-md">
@@ -201,13 +205,43 @@ function AskCard({
         </CardContent>
       )}
       <CardFooter className="gap-2">
-        {item.status === "pending" && onAskResponse ? (
+        {item.status === "pending" && onAskResponse && requestKind === "approval" ? (
           <>
-            <Button size="sm" disabled={sent} onClick={() => respond("allow")}>
+            <Button size="sm" disabled={sent} onClick={() => respond({ kind: "approval", allow: true })}>
               Approve
             </Button>
-            <Button size="sm" variant="destructive" disabled={sent} onClick={() => respond("deny")}>
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={sent}
+              onClick={() => respond({ kind: "approval", allow: false })}
+            >
               Deny
+            </Button>
+          </>
+        ) : item.status === "pending" && onAskResponse && requestKind === "choice" ? (
+          item.request.kind === "choice" ? (
+            item.request.options?.map((option) => (
+              <Button
+                key={option}
+                size="sm"
+                variant="outline"
+                disabled={sent}
+                onClick={() => respond({ kind: "choice", selected: option })}
+              >
+                {option}
+              </Button>
+            ))
+          ) : null
+        ) : item.status === "pending" && onAskResponse && requestKind === "free_text" ? (
+          <>
+            <Input value={text} disabled={sent} onChange={(event) => setText(event.target.value)} />
+            <Button
+              size="sm"
+              disabled={sent || text.trim().length === 0}
+              onClick={() => respond({ kind: "free_text", text: text.trim() })}
+            >
+              Submit
             </Button>
           </>
         ) : (
@@ -216,9 +250,11 @@ function AskCard({
               ? "Awaiting response"
               : item.status === "expired"
                 ? "Expired"
-                : item.allow === false
-                  ? "Denied"
-                  : "Approved"}
+                : requestKind !== "approval"
+                  ? "Answered"
+                  : item.allow === false
+                    ? "Denied"
+                    : "Approved"}
           </p>
         )}
       </CardFooter>

@@ -27,7 +27,7 @@ class Gate:
 
 @dataclass(frozen=True)
 class Plan:
-    action: Literal["text", "ask", "tool", "child", "child-tool", "finish"] = "text"
+    action: Literal["text", "ask", "tool", "child", "child-tool", "finish", "doc"] = "text"
     name: str = "response"
     wait_for: str | None = None
     drop: bool = False
@@ -161,6 +161,9 @@ def _plan(payload: dict[str, Any]) -> Plan:
         if last_tool == "e2e_gate" and "finish" in directives:
             return Plan(action="finish", name=directives["finish"])
         return Plan(name=last_tool)
+    attachment = re.search(r"\[attachment: .+ path=([^\n]+)\]$", user)
+    if attachment is not None:
+        return Plan(action="doc", name=attachment[1])
     action = next((candidate for candidate in ACTION_ORDER if candidate in directives), "text")
     name = directives.get(action, directives.get("provider", directives.get("drop", "response")))
     return Plan(
@@ -172,6 +175,8 @@ def _plan(payload: dict[str, Any]) -> Plan:
 
 
 def _tool(plan: Plan) -> tuple[str, dict[str, Any]] | None:
+    if plan.action == "doc":
+        return "read_doc", {"path": plan.name}
     if plan.action == "ask":
         return (
             "memory_write",
@@ -184,6 +189,8 @@ def _tool(plan: Plan) -> tuple[str, dict[str, Any]] | None:
             },
         )
     if plan.action == "tool":
+        if plan.name == "skill":
+            return "skill", {"name": "research"}
         return "e2e_gate", {"name": plan.name}
     if plan.action in {"child", "child-tool"}:
         directive = "tool" if plan.action == "child-tool" else "provider"
@@ -206,6 +213,11 @@ def _text(plan: Plan, payload: dict[str, Any]) -> str:
         source = user.rsplit("\n", 1)[-1]
         clean = DIRECTIVE.sub("", source).strip()
         return (clean or "Deterministic E2E")[:50]
+    if plan.name == "read_doc":
+        messages = payload.get("messages") or []
+        return f"Document evidence: {str(messages[-1].get('content') or '')[:1200]}"
+    if plan.name == "skill":
+        return "The research skill loaded successfully."
     if plan.name in {"memory_write", "e2e_gate", "spawn"}:
         return f"{plan.name} completed deterministically."
     return f"Deterministic response for {plan.name}."
@@ -259,6 +271,7 @@ async def _stream(payload: dict[str, Any], source: str):
             yield _chunk(request_id, model, delta)
             yield _chunk(request_id, model, {}, "tool_calls")
         else:
+            yield _chunk(request_id, model, {"role": "assistant", "reasoning_content": "Checking fixture evidence."})
             words = _text(plan, payload).split(" ")
             for index, word in enumerate(words):
                 content = word if index == 0 else f" {word}"

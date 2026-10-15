@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import pytest
@@ -181,6 +182,21 @@ async def test_bash_kills_a_command_that_outlives_the_factory_timeout() -> None:
         await bash(timeout=0.2).invoke({"command": "sleep 5"}, make_ctx([]))
 
     assert "command timed out after 0.2s: sleep 5" in str(info.value)
+
+
+async def test_bash_gives_the_command_no_inherited_stdin() -> None:
+    probe = 'python3 -c "import os; print(os.path.samestat(os.fstat(0), os.stat(os.devnull)))"'
+    read_end, write_end = os.pipe()
+    saved = os.dup(0)
+    os.dup2(read_end, 0)
+    try:
+        result = await bash(timeout=5).invoke({"command": probe}, make_ctx([]))
+    finally:
+        os.dup2(saved, 0)
+        for fd in (saved, read_end, write_end):
+            os.close(fd)
+
+    assert result == "True\n"
 
 
 def test_bash_hides_the_timeout_from_the_model_facing_schema() -> None:

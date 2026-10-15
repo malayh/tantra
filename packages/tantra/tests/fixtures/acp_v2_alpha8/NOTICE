@@ -1,0 +1,20 @@
+Agent Client Protocol schema, version 2.0.0-alpha.8
+
+schema.json and schema.unstable.json are unmodified copies of schema/v2/schema.json and
+schema/v2/schema.unstable.json from https://github.com/agentclientprotocol/agent-client-protocol
+at tag schema-v2.0.0-alpha.8 (commit 4cf3dd858c819fc3ab99ae53f76883ede0345a10). They are used only
+as a test reference.
+
+Copyright 2025 Zed Industries, Inc. and contributors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use these files except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.

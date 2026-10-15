@@ -90,6 +90,7 @@ def bash(*, timeout: float = 120.0) -> Tool:
         await ctx.emit(f"$ {command}")
         process = await asyncio.create_subprocess_shell(
             command,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=str(Path.cwd()),

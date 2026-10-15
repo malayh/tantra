@@ -74,6 +74,7 @@ nav:
       - Agent: reference/agent.md
       - Runtime & Connection: reference/runtime.md
       - ACP server: reference/acp.md
+      - ACP profile proposal: acp/tantra-profile.md
       - Loop & events flow: reference/loop.md
       - Tools: reference/tools.md
       - Context: reference/context.md

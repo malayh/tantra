@@ -2,6 +2,8 @@
 
 `tantra.acp` serves a Runtime over an interface inspired by [ACP](https://agentclientprotocol.com) v2 (`protocolVersion: 2`, reference schema `2.0.0-alpha.8`). It follows v2 shapes and semantics by default and diverges only where durable, multi-client, server-run sessions need it. tantra owns the JSON-RPC 2.0 layer, the transports, and the wire models; no ACP SDK is used and no dependency beyond pydantic is needed. The Runtime core is used only through its public API.
 
+The wire protocol, including the `tantra` profile, is specified in the [ACP profile proposal](../acp/tantra-profile.md).
+
 ```python
 import asyncio
 

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import types
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -40,6 +41,7 @@ from tantra.stores.base import reduce_journal
 from tantra.stores.memory import MemoryStore
 
 FIXTURES = Path(__file__).parent / "fixtures" / "acp_profile"
+PROPOSAL = Path(__file__).parents[3] / "docs" / "acp" / "tantra-profile.md"
 LITERAL = {
     "jsonrpc",
     "method",
@@ -828,6 +830,14 @@ async def test_profile_fixtures_are_valid_and_match_real_messages() -> None:
         methods = {fixture.get("id"): RESPONSE_METHODS[name]} if name in RESPONSE_METHODS else {}
         assert VALIDATOR.frame_errors(fixture, methods) == [], name
         assert shape(fixture) in shapes, name
+
+
+def test_the_proposal_examples_are_the_profile_fixtures() -> None:
+    fixtures = {path.read_text().strip(): path.stem for path in FIXTURES.glob("*.json")}
+    blocks = re.findall(r"^[ \t]*```json\b[^\n]*\n(.*?)^[ \t]*```", PROPOSAL.read_text(), re.M | re.S)
+    used = [fixtures.get(block.strip()) for block in blocks]
+    assert None not in used
+    assert set(used) == set(fixtures.values())
 
 
 def spawning(*children: tuple[str, str]) -> Sample:

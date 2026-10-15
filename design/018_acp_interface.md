@@ -1,6 +1,6 @@
 # 018 — ACP v2–inspired interface and the `tantra` profile
 
-**Status:** P1–P6b ✅ DONE. P7–P8 not started.
+**Status:** P1–P7 ✅ DONE. P8 not started.
 
 ## Goal
 
@@ -85,7 +85,7 @@ No published implementation does fencing, durable cursor replay, or lazy child d
 - Writer loss is only detectable by iterating the writable `Connection`, which raises `WriterReplaced`. `acp/agent.py` catches it the same way.
 - `session/cancel` is a notification, so it can never return an error.
 - Children cannot ask humans (`loop.py:576`). A child that is not being observed therefore never strands a request.
-- A cursor is only stable for one fixed projection: the same client capabilities and the same profile.
+- A cursor is only stable for one fixed projection: the same profile flag and server configuration (`decode_input`, hidden tools, `view`). Client capabilities such as `elicitation.form` change no outputs or indices.
 - Without a coordinator, `patch_header` (title or model) gives no local signal.
 - **P8 risk:** retries compare whole `InputQueued` events (`runtime.py:1727`, `:1817`, `:2458`). New fields must not turn a legacy event plus its retry into `InvalidCommandReuse`.
 - Extension method names must start with `_` on the wire. Assert the exact method names in tests.
@@ -207,21 +207,21 @@ endpoint = server.websocket(bind=bind, allowed_origins={"https://app.example"})
 |---|---|
 | `session/new` | Calls `scope`, then `runtime.create(agent, session_id=uuid4(), metadata={**scope, "acp_cwd": cwd})`, then starts the tail. Returns `{sessionId, configOptions?}`, followed by `session_info_update` and `state_update`. |
 | `session/list` | Roots of `agent` matching `scope` (and `acp_cwd == cwd` if a cwd is given), newest created first, in `store.list` order. Pages of 50 with `cursor` and `nextCursor`. An unknown or child cursor → `-32602`. |
-| `session/resume` | Checks `policy(resume)`, replays according to `replayFrom`, and returns `{configOptions?}` (roots only). Then sends a `state_update` snapshot, any pending-ask requests (if this connection is the writer), then the live tail. Resuming an already-open session replaces it. A child is allowed only for profile clients, and read-only. |
+| `session/resume` | Checks `policy(resume)`, replays according to `replayFrom`, and returns `{configOptions?}` (roots only). Then sends `session_info_update`, a `state_update` snapshot, for profile clients the queue and mirror snapshots and (in `write` mode) `_tantra_writer claimed`, then the live tail. Pending-ask requests to the writer follow and may interleave with live updates. Resuming an already-open session replaces it. A child is allowed only for profile clients, and read-only. |
 | `session/prompt` | Roots only, and the session must be open. Checks `policy(prompt)`, then `encode_prompt`, then claims the writer: implicitly, or by returning `writer_required` to a profile client that isn't writer. Then `writer.send(cid)`. Encoding comes before the claim, so an invalid prompt never fences the current writer. Returns **`{messageId: cid}` once the input is durably accepted**. |
 | `session/cancel` | Checks `policy(cancel)`, claims implicitly if needed, then `writer.cancel()` for the whole tree. The tail then reports `idle` with `cancelled`. |
-| `session/close` | Detaches this connection's tail and cancels its outstanding requests. Never cancels work. Returns `{}`. |
+| `session/close` | Detaches this connection's tail, cancels its outstanding requests and releases its writer. Never cancels work. Returns `{}`. |
 | `session/delete` | Checks `policy(delete)`, then `runtime.delete(root, allow_active=True)`. Tails stop everywhere. |
-| `session/set_config_option` | `model` only. Checks `policy(set_model)`, then `patch_header(model=)`. `ModelChangeBusy` → `-32603` with `data.tantra.code: "model_busy"`. |
+| `session/set_config_option` | `model` only. Checks `policy(set_model)`, then `patch_header(model=)`. `ModelChangeBusy` → `-32603` with `data.tantra.code: "model_busy"`; only the PostgreSQL store and coordinator raise it. |
 
 **Errors**
 
 | Condition | Code | `data.tantra.code` |
 |---|---|---|
 | Session unknown, unauthorized, or not open | `-32002` | — |
-| Invalid input, or a mutation on a child | `-32602` | — |
+| Invalid input, or a mutation on a child open on this connection (otherwise `-32002`) | `-32602` | — |
 | Mutation from a connection that isn't writer | `-32603` | `writer_required` |
-| Still failing after 3 retries with the same command ID | `-32603` | `unavailable` |
+| `CoordinatorUnavailable`, `CommandTimeout` or `LeaseLost` from any method; prompts and profile cancels first retry 3 times with the same command ID | `-32603` | `unavailable` |
 | Profile `commandId` reused with different content (`InvalidCommandReuse`) | `-32602` | `command_conflict` |
 
 Error messages never carry exception details.
@@ -248,13 +248,13 @@ Profile clients get `_meta.tantra.cursor = "<seq>.<index>"` on every output deri
 
 | Tantra event | v2 output |
 |---|---|
-| `ToolCallRequested` | `tool_call_update {toolCallId, name, title: name, kind: "other", status: "pending", rawInput}`. `spawn`, `send` and `finish` are not shown as tool calls. Instead they produce an outgoing `session_message` (`messageId` = `uuid5(sender, f"{sample_id}:{call_id}")`): `spawn` at `ChildCreated`, `send` and `finish` when they complete successfully. If one fails, it is emitted as a failed `tool_call_update`. |
+| `ToolCallRequested` | `tool_call_update {toolCallId, name, title: name, kind: "other", status: "pending", rawInput, content: []}`. `spawn`, `send` and `finish` are not shown as tool calls. Instead they produce an outgoing `session_message` (`messageId` = `uuid5(sender, f"{sample_id}:{call_id}")`): `spawn` at `ChildCreated`, `send` and `finish` when they complete successfully. If one fails, it is emitted as a failed `tool_call_update`. |
 | `ToolCallStarted` | `tool_call_update {status: "in_progress"}` |
 | `ToolProgress` | `tool_call_content_chunk` |
 | `ToolCallCompleted` | `tool_call_update {status: completed\|failed, rawOutput}`, plus a result content chunk |
 | `ChildCreated` | `subagent_update {sessionId, title: name or agent}`, sent before any traffic from the child |
-| `AskRaised` | `state_update requires_action` and `_meta.tantra.ask {state: "pending"}`. To the writer: `request_permission` (Approval; `subject: {type: "tool_call"}`; options `allow` / `deny`) or `elicitation/create` (Choice / FreeText, only if the client supports `elicitation.form`). |
-| `AskAnswered` | `_meta.tantra.ask {state: "answered"}`, then `state_update running`. Cancels any outstanding requests for that ask. |
+| `AskRaised` | `state_update requires_action` and `_meta.tantra.ask {askId, state: "pending"}`. To the writer: `request_permission` (Approval; `subject: {type: "tool_call"}`; options `allow` / `deny`) or `elicitation/create` (Choice / FreeText, only if the client supports `elicitation.form`). |
+| `AskAnswered` | One `state_update` with `_meta.tantra.ask {askId, state: "answered"}`: `running`, or `requires_action` while other asks are pending. Cancels any outstanding requests for that ask. |
 
 **Usage, compaction and turn ends**
 
@@ -262,7 +262,7 @@ Profile clients get `_meta.tantra.cursor = "<seq>.<index>"` on every output deri
 |---|---|
 | `SampleCompleted` | `usage_update {used, size: provider.limits(model).context_window}` |
 | `CompactionApplied` | `compaction_update {status: "completed"}` and `compaction_summary_chunk` |
-| `TurnCompleted` | `state_update idle` with `end_turn`, or `max_turn_requests` when it hit `max_steps` |
+| `TurnCompleted` | `state_update idle` with `end_turn`, `max_turn_requests` when it hit `max_steps`, or `_tantra_finished` for `finish` |
 | `TurnCancelled` | `state_update idle` with `cancelled` |
 | `TurnFailed` | `state_update idle` with `error {code: -32603, message}` |
 | `TurnInterrupted` | `state_update idle` with `_tantra_interrupted` |
@@ -287,12 +287,12 @@ Negotiated with `_meta.tantra = {"version": 1}` in both directions: the client s
 | Feature | Wire | Semantics |
 |---|---|---|
 | Command IDs | `_meta.tantra.commandId` (canonical UUID) on `session/prompt` and `session/cancel` | Becomes the Runtime `command_id`. A retry is a duplicate and gets the same `messageId`. Reusing it with different content → `-32602`, `command_conflict`; on cancel, a `command_conflict` notice. A non-UUID → `-32602`. |
-| Cursor replay | `replayFrom: {"type": "_tantra_after", "cursor": "<seq>.<index>"}` | Exclusive, like `Last-Event-ID`. A cursor beyond the end of the journal → `-32602`. If capabilities changed, replay from `start`. |
+| Cursor replay | `replayFrom: {"type": "_tantra_after", "cursor": "<seq>.<index>"}` | Exclusive, like `Last-Event-ID`. A cursor beyond the end of the journal → `-32602`. If the profile or server configuration changed, replay from `start`. |
 | Writer mode | `_meta.tantra.mode` on `session/new` / `session/resume` | Defaults to `write` on new and `read` on resume. `write` claims before responding, so a denied claim fails the request with `-32002`; pending-ask requests follow the response. Profile clients never claim implicitly: a non-writer's prompt → `writer_required` every time. |
-| Claim | `_tantra/session/claim_writer {sessionId}` | Checks `policy(claim_writer)`, then fences the current writer. Returns `{}`. |
-| Writer state | `_tantra_writer {writer, reason: "claimed" \| "replaced" \| "lost"}` session update | Sent only on this connection, never replayed. `claimed`: this connection became writer. `replaced`: fenced by another writer. `lost`: the writer connection dropped (`LeaseLost` / `CoordinatorUnavailable`); reclaim is explicit. |
+| Claim | `_tantra/session/claim_writer {sessionId}` | A no-op without a policy check if this connection already writes. Otherwise checks `policy(claim_writer)`, then fences the current writer. Returns `{}`. |
+| Writer state | `_tantra_writer {writer, reason: "claimed" \| "replaced" \| "lost"}` session update | Sent only on this connection, never replayed. `claimed`: this connection became writer. `replaced`: fenced by another writer. `lost`: the Runtime writer lease was lost (`LeaseLost` / `CoordinatorUnavailable`); reclaim is explicit. |
 | Notices | `_tantra_notice {level: "warning", code, message}` session update | Live-only. `writer_required` for a non-writer's cancel (a notification can't error); `command_conflict` for a cancel reusing a command ID; `unavailable` for a profile cancel still failing after retries. An invalid `commandId` on cancel is only logged. |
-| Queue | `_tantra_queue_update {entries: [{commandId, content, submittedBy}]}` session update | Full list of accepted but not yet inserted root user inputs. Sent on every change and after resume. |
+| Queue | `_tantra_queue_update {entries: [{commandId, content, submittedBy?}]}` session update | Full list of accepted but not yet inserted root user inputs. Sent on every change and as a snapshot after `session/new` and `session/resume`. |
 | Re-resume | `session/resume` on an already-open root | Replaces it: its open children close and the writer follows the new `mode` (`write` sends `claimed` again, `read` releases silently). A rejected `replayFrom` or a denied `write` claim leaves the open session untouched. |
 | Lazy children | `session/resume` / `session/close` on a child ID | Read-only (`mode: write` → `-32602`). The child's root must be open on the same connection (else `-32002`) and the child must be in that tree. Counts toward the 8-session limit; closing the root closes its children. Policy `resume` gets `root` = root header, `actor` = child header. The child transcript gets its own cursor. Profile clients never receive child transcripts automatically; announcements and state always flow through the mirror. |
 
@@ -861,32 +861,101 @@ Deploy backend and UI together. Old pages need a refresh.
   - `test_bench_behavior` hung once, with its schema drop blocked by its own idle-in-transaction connection. Two full suites were running against one database at the time. Run alone, it passes in 12 s.
   - One `pytest` test failed in 2 of 5 full runs with `CancelledError` raised from `asyncio/locks.py`. The other 3 runs passed 1134/1134. Its name wasn't captured. P6b changed no package code, so the flake predates it. Rerun with `-rf` to name it.
 
-### Phase 7 — Upstream proposal · deps: P6 · —
+### Phase 7 — Upstream proposal · deps: P6 · ✅ DONE
 
 **Deliverables**
-- `docs/acp/tantra-profile.md`, a public, RFD-shaped proposal: *a durable, multi-client profile for ACP v2*. It covers:
-  - **Motivation:** server-run, multi-tenant, durable harnesses.
-  - **Principles:** the v2 shape first.
-  - **Each divergence and extension:** the problem, the wire format with examples taken from `tests/fixtures/acp_profile/`, and how plain v2 clients still conform.
-  - **Mapping to upstream threads:**
-    - A#954 correlation token
-    - A#2208 durable cursor
-    - A#2394 / A#2286 resume rules
-    - A#533 fenced writer
-    - A#1992 selective subscription
-    - A#1261 queue visibility
-  - **Reference implementation:** `tantra.acp`, `tantra-acp-client`, and Sarathi.
-- `design/018_upstream_posts.md`: one short draft comment per thread, for the user to post.
+- `docs/acp/tantra-profile.md`: a public, RFD-shaped proposal, *a durable, multi-client profile for ACP v2*. It uses upstream's RFD headings, and tables over prose.
+  1. **Elevator pitch.**
+  2. **Status quo:** a table of the upstream threads (`agentclientprotocol/agent-client-protocol`) and what each proposes today:
+     - #2208 durable transport
+     - #2394 last change
+     - #2286 state after resume
+     - #954 / #2175 correlation token
+     - #533 multi-client
+     - #1992 subagents
+     - #1261 inject
+  3. **The model:**
+     - The session is a durable journal on the server, and a connection is an authenticated view of it.
+     - From that follow:
+       - the cursor is a journal position
+       - acceptance is durable
+       - there is one fenced writer per root
+       - asks go to the writer
+       - `close` detaches
+  4. **Why it works better, thread by thread,** with evidence: P6b numbers and test names.
+  5. **One protocol for any tenancy:**
+     - Tenancy lives in `bind`, `scope` and `policy`, never on the wire. Unauthorized equals unknown.
+     - Single tenant (stdio) and multi tenant (Sarathi WebSocket) use the identical wire, projection, profile and client.
+  6. **Specification as implemented:**
+     - normative and wire-only
+     - covers negotiation, methods, projection, errors, every profile feature, the divergences, writer and ask rules, transports and client obligations
+  7. **Plain v2 clients.**
+  8. **Costs and limits.**
+  9. **Reference implementation and evidence.**
+  10. **FAQ.**
+  11. **Revision history.**
+- **Example rule:**
+  - Every `json` block is a verbatim fixture from `packages/tantra/tests/fixtures/acp_profile/`, and every fixture appears in the doc.
+  - A new example means a new fixture, which passes the existing shape and schema test.
+- **Accuracy rule:**
+  - The code is the source of truth.
+  - Where this spec or `docs/reference/acp.md` disagrees with it, the doc follows the code and the mismatch is recorded here.
+  - Bugs found are follow-ups. P7 changes no `src/`.
+- `design/018_upstream_posts.md`:
+  - One draft of 150 words or fewer per thread, written after re-reading it.
+  - Closed threads are framed as a new discussion.
+  - The user posts them.
+- `mkdocs.yml` nav entry under Reference, and a link line in `docs/reference/acp.md`.
 
 **Verify**
-- A test loads every example in the doc, validates it against the vendored alpha.8 schema plus the profile allowlist, and checks it matches the P2 fixture byte-for-byte.
+- `test_the_proposal_examples_are_the_profile_fixtures`: every doc `json` block equals a fixture, and every fixture is used. Validity follows from the existing fixture test.
 - `mkdocs build --strict`.
+- `git diff` touches no `src/`.
 - The user reviews it before anything is posted.
 
 **Checklist**
-- [ ] Proposal
-- [ ] Draft posts
-- [ ] Fixture parity test
+- [x] Proposal
+- [x] Draft posts
+- [x] Fixture parity test
+- [x] Nav and reference link
+
+**Verified**
+- **Checks:**
+  - ruff is clean.
+  - `mkdocs build --strict` is clean.
+  - `pytest` gave 1135 passed with zero skips, on owned PostgreSQL.
+  - The diff touches no `src/`.
+- **Doc:**
+  - It is 849 lines and has 20 `json` blocks, one per fixture.
+  - Every cited test name exists.
+- **Posts:** 7 drafts, each 150 words or fewer.
+- **Review:** one round found 11 defects and some nits, all fixed. The largest: the profile's client-chosen `messageId` goes against the Message ID RFD's "Only the Agent generates protocol message IDs". It is now listed as a profile-only divergence.
+
+**As built**
+- The doc lists four divergences: two for every client, and two for profile clients only (child resume, and `messageId` = `commandId`).
+- **Fixture change:** `queue_update.json` now uses `submittedBy: "user-1"`. No personal names appear in public examples.
+- **Spec text fixed to match the code:**
+  - `unavailable` can come from any method.
+  - `AskAnswered` produces a single `state_update`.
+  - The projection details that were missing are added.
+  - `lost` means a lost lease.
+  - Cursors depend on the profile and server configuration, not on client capabilities.
+  - The queue's `submittedBy?`, and the queue snapshot on `session/new`.
+  - The order of updates after `resume`, and asks may interleave with live updates.
+  - `close` releases the writer.
+  - A claim is a no-op for the current writer.
+  - Child error codes.
+  - Only PostgreSQL raises `model_busy`.
+
+**Follow-up**
+- `docs/reference/acp.md` still describes these the old way: `unavailable`, cursor validity, child error codes and `model_busy`. The proposal is correct.
+- **Existence oracle:** some paths answer an existing id differently from an unknown one.
+  - A child id answers `-32602` before the policy check (`agent.py:270-271`).
+  - Profile `_resume_child` checks the mode first (`:484-485`).
+  - The `session/list` cursor is checked only for existence (`:427-431`).
+  - Each needs the id already. The proposal lists this.
+- **Silent delete:** other connections get no update when a session is deleted (`agent.py:822-825`).
+- **Lost session on a failed re-resume:** a write-mode re-resume shuts down the old session (`agent.py:472-474`) before claiming (`:477-478`). A claim that fails after the policy pre-check therefore loses it.
 
 ### Phase 8 — Runtime additions · deps: P1 · —
 
@@ -987,7 +1056,7 @@ Deploy backend and UI together. Old pages need a refresh.
   - Generic clients may expect the response at insertion; they get it at acceptance instead.
 - **Few v2 clients exist today,** and fencing may stay tantra-only.
 - **Fragile prefix parsing:** until P8, classification breaks if the runtime's text formats change. Round-trip tests guard this.
-- **Cursors depend on capabilities:** a cursor is only valid for the client capabilities it was issued under.
+- **Cursors depend on projection config:** a cursor is only valid for the profile flag and server configuration it was issued under.
 - **Replay cost:** a full replay is proportional to history length.
 - **Security:**
   - Client-supplied MCP servers are ignored.

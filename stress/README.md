@@ -65,3 +65,9 @@ Each report distinguishes owner/reader Python process CPU and database cgroup CP
 Reader sequence/content digests are compared against independently decoded SQL journal rows. First/middle/last delta probes check committed watermarks; the dedicated commit-audit case checks every delta. `--cpu-failure order|duplicate|drop|premature` deliberately fails the relevant oracle, writes a FAILED report, and exits nonzero. CPU comparison rejects incompatible instrumentation, fixture/trial identities, failed evidence, and changed replay digests.
 
 `cpu --stress` runs package, bench, and PostgreSQL stress tests against its owned durable database and rejects skipped cases. Reports and records stay under ignored `stress/bench/artifacts/`; the owned workers, Compose project, and volume are removed afterward. P0 changes benchmark code only. Runtime CPU reductions and matched before/after comparisons belong to the following phases.
+
+## ACP transport bench
+
+`uv run python -m stress.bench.acp` runs `AcpServer.websocket()` and the built `tantra-acp-client` over real sockets: two workers, 1,000 idle observers for 35 seconds, then 100 synthetic turns with slow readers. Each connection holds one root, like a Sarathi tab. It owns its durable Compose PostgreSQL database and retains CLI/JSON/HTML evidence under `stress/bench/artifacts/`. Node.js/npm and Docker Compose are required; no paid inference runs.
+
+Use `--observers 6 --active 4 --slow-readers 2` for a focused run or `--inject-oracle-failure` to prove a failed journal oracle produces a nonzero exit. This fixture uses static authentication with no application auth SQL; Sarathi ticket behavior is checked by its own suite. Existing Runtime baseline and scale workloads remain unchanged.

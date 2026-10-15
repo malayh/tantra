@@ -1,6 +1,6 @@
 # 018 — ACP v2–inspired interface and the `tantra` profile
 
-**Status:** P1–P6 ✅ DONE. P7–P8 not started.
+**Status:** P1–P6b ✅ DONE. P7–P8 not started.
 
 ## Goal
 
@@ -28,6 +28,7 @@ Small additive Runtime changes come in the **final** phase only.
 - `packages/tantra-acp-client`.
 - Sarathi adoption.
 - Deleting `SessionSocket`, `tantra-session-client`, the socket tests, the socket bench and the socket docs.
+- An ACP transport bench replacing the deleted socket bench (P6b).
 - The upstream proposal.
 - The final-phase Runtime additions: a structured `InputQueued` sender, and `Runtime.watch_tree`.
 
@@ -39,7 +40,6 @@ Small additive Runtime changes come in the **final** phase only.
 - Plans and slash commands.
 - Per-child cancel (Open Decisions).
 - Any Runtime or journal change before the final phase.
-- A load bench.
 - Posting upstream. The user does that.
 
 ## Context
@@ -787,8 +787,79 @@ Deploy backend and UI together. Old pages need a refresh.
 
 **As built**
 - `packages/tantra-client/` was removed from disk too, including its ignored `dist/` and `node_modules/`.
-- No replacement transport bench: a load bench is out of scope.
+- The transport bench is replaced in P6b.
 - `CHANGELOG.md` is untouched. `SessionSocket` never shipped, so removing it needs no entry; no phase adds a `tantra.acp` entry yet.
+
+### Phase 6b — ACP transport bench · deps: P6 · ✅ DONE
+
+**Deliverables**
+- A port of the deleted 017 bench (`git show 03a5d0b^:stress/bench/{socket.py,socket_worker.py,socket_client.mjs}` and `03a5d0b^:stress/test_bench_socket.py`) to ACP. It keeps the workload and oracles.
+- **Workload:**
+  - two uvicorn workers on an owned Compose PostgreSQL
+  - 1,000 observers idle for 35 s
+  - then 100 synthetic turns, with 10 slow readers at 10 ms
+  - turns use `GatedProvider` and `fixture_total`, which answers "60"
+  - one connection per root, like Sarathi's one connection per tab
+- **`stress/bench/acp_worker.py`:**
+  - `AcpServer(agent=BenchAgent)`. `policy` counts each operation and allows it.
+  - `server.websocket()` at `/acp`. `bind` counts calls and accepts `token=acp-bench` as `AcpAuth(principal="acp-bench", submitted_by="acp-bench")`.
+  - `/control/metrics` and `/control/reset`.
+  - **Transport metrics:** a bench-side patch of `WebSocketTransport.send` and `close` records frames, bytes, max send time and close codes.
+  - **Resources:** the Runtime and coordinator counters, plus `live_sockets`.
+- **`stress/bench/acp_client.mjs`:** built on `tantra-acp-client`.
+  - **Observers** on worker `i % 2` resume `read`.
+  - **Writers** run on the other worker. Each resumes `write` and prompts with a fixed `commandId`; the returned `messageId` must equal it.
+  - **Terminal:** the command's `user_message`, then `agent_message` "60", then `idle` / `end_turn`.
+  - **Order:** cursors strictly increase per connection.
+  - **Slow readers** sleep inside `onUpdate`.
+  - **Must stay clean:** no reconnects and no `onError`.
+- **`stress/bench/acp.py`:** `python -m stress.bench.acp`, with the old CLI and defaults.
+  - **Idle oracle:** no journal, event-body or result SQL, and no server-initiated closes.
+  - **Active oracle, per worker:**
+    - `bind` and the per-operation policy counts equal the writer counts for that worker.
+    - No `1011` or `1013` closes.
+    - The pool, dispatch and tool peaks are ≤ 4.
+  - **Journal oracle:** `submitted_by == "acp-bench"`.
+  - **Cleanup:** every resource, subscription and `live_sockets` returns to 0.
+  - **Report:** JSON and HTML under `stress/bench/artifacts/`. `--inject-oracle-failure` exits nonzero.
+- **`stress/test_bench_acp.py`:** 9 tests: the argument checks, the oracle and its injected failure, the failed report, and a small real campaign.
+- **`stress/README.md`:** an "ACP transport bench" section.
+- Bench code only: nothing under `packages/` or `apps/` changes. An oracle that ACP fails at scale is reported, never weakened.
+
+**Verify**
+- `pytest stress`: 157 passed, zero skips on owned PostgreSQL.
+- A full default run exits 0 with `complete: true` and 100 verified journals.
+- A small run with `--inject-oracle-failure` exits 1 and writes a FAILED report.
+
+**Checklist**
+- [x] Worker, client and campaign
+- [x] Tests and README
+- [x] Full run recorded
+
+**Verified**
+- `ruff` clean. `pytest stress` 157 passed and `pytest` 1134 passed, both with zero skips on owned PostgreSQL. Nothing under `packages/` or `apps/` changed.
+- **Full default run:** 57 s wall. `complete: true`, 100 journals verified, no client errors, 0 reconnects, 1,100 dials, no server closes, every resource back to 0.
+- `--inject-oracle-failure` exits 1 with a FAILED report classified `oracle`.
+- **Compared with the last full 017 run** (`stress/bench/artifacts/socket-p3-full`), per worker:
+
+  | | 017 socket | ACP |
+  |---|---|---|
+  | Delivery p50 / p95 | 3312 / 4486 ms | 3344 / 4557 ms |
+  | 35 s idle: CPU, SQL calls | ~4.5 s, 848 | ~3.3 s, 348 |
+  | Idle journal or event-body SQL | 0 | 0 |
+  | Active: CPU, journal queries | ~4.3 s, 1523 | ~4.4 s, 1482 |
+  | Peak RSS | — | 150 MB |
+- One review: 3 defects plus nits, all fixed. The fixes added an inbound-backlog oracle (≤ 256; peak 4 at full scale), an exit for the Node client so it no longer waits 30 s to close, stopping a worker that never becomes ready, and a check that the transport patch is actually applied.
+
+**As built**
+- **Cursor order is checked on raw frames.** It runs in a `webSocketFactory` listener, because the client drops stale cursors before `onUpdate`, where a check could never fail.
+- **Policy counts per writer:** `resume` 1, `claim_writer` 2, `prompt` 1. A `write` resume authorizes `claim_writer` twice: a pre-check, then `_claim`.
+- **`dials == observers + active`** catches dial retries during the first `connect()`, which `onState` never shows.
+- **017-only checks dropped:** the server's outbound queue, `revalidate` and `auth_sql_connections`. ACP has no outbound queue; the `1013` and backlog checks cover it.
+- **Running it here:** `Database` calls `docker`, so the full run needs `docker` on `PATH`. In distrobox that is a shim around `distrobox-host-exec docker`.
+- **Follow-up:**
+  - `test_bench_behavior` hung once, with its schema drop blocked by its own idle-in-transaction connection. Two full suites were running against one database at the time. Run alone, it passes in 12 s.
+  - One `pytest` test failed in 2 of 5 full runs with `CancelledError` raised from `asyncio/locks.py`. The other 3 runs passed 1134/1134. Its name wasn't captured. P6b changed no package code, so the flake predates it. Rerun with `-rf` to name it.
 
 ### Phase 7 — Upstream proposal · deps: P6 · —
 

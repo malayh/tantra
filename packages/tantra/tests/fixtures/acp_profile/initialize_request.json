@@ -1,0 +1,19 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": 2,
+    "info": {
+      "name": "tantra-acp-client",
+      "version": "0.1.0"
+    },
+    "capabilities": {
+      "_meta": {
+        "tantra": {
+          "version": 1
+        }
+      }
+    }
+  }
+}

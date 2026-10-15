@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "session/resume",
+  "params": {
+    "sessionId": "6f1c2a8e-3b4d-4e5f-9a7b-1c2d3e4f5a6b",
+    "cwd": "/work",
+    "_meta": {
+      "tantra": {
+        "mode": "write"
+      }
+    }
+  }
+}

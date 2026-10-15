@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "error": {
+    "code": -32602,
+    "message": "Command conflict",
+    "data": {
+      "tantra": {
+        "code": "command_conflict"
+      }
+    }
+  }
+}

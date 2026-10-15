@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "method": "session/cancel",
+  "params": {
+    "sessionId": "6f1c2a8e-3b4d-4e5f-9a7b-1c2d3e4f5a6b",
+    "_meta": {
+      "tantra": {
+        "commandId": "b7e4c2a1-9d8f-4e6b-a5c3-2f1e0d9c8b7a"
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "6f1c2a8e-3b4d-4e5f-9a7b-1c2d3e4f5a6b",
+    "update": {
+      "sessionUpdate": "agent_message",
+      "messageId": "c1a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5c",
+      "content": [
+        {
+          "type": "text",
+          "text": "There are three open issues."
+        }
+      ],
+      "_meta": {
+        "tantra": {
+          "cursor": "12.3"
+        }
+      }
+    }
+  }
+}

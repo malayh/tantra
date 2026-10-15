@@ -1,0 +1,19 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "session/prompt",
+  "params": {
+    "sessionId": "6f1c2a8e-3b4d-4e5f-9a7b-1c2d3e4f5a6b",
+    "prompt": [
+      {
+        "type": "text",
+        "text": "Summarize the open issues."
+      }
+    ],
+    "_meta": {
+      "tantra": {
+        "commandId": "3d9e5b7a-1f2c-4d6e-8a9b-7c5d3e1f2a4b"
+      }
+    }
+  }
+}

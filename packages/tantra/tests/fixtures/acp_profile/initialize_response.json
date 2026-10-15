@@ -1,0 +1,24 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "result": {
+    "protocolVersion": 2,
+    "capabilities": {
+      "session": {
+        "prompt": {},
+        "mcp": {},
+        "delete": {}
+      },
+      "_meta": {
+        "tantra": {
+          "version": 1
+        }
+      }
+    },
+    "info": {
+      "name": "assistant",
+      "version": "1.5.0"
+    },
+    "authMethods": []
+  }
+}

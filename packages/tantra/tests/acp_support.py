@@ -18,6 +18,7 @@ ANY = frozenset({"*"})
 DIVERGENCES: dict[str, str] = {}
 CONTENT_KINDS = ("user_message", "agent_message", "agent_thought", "session_message")
 IDENTITY = ("sessionUpdate", "sessionId", "messageId", "toolCallId", "compactionId")
+PROFILE = {"_meta": {"tantra": {"version": 1}}}
 
 
 class SchemaValidator:
@@ -183,12 +184,13 @@ class Client:
         capabilities: dict[str, Any] | None = None,
         responder: Responder = _never,
         server_transport: Callable[[Transport], Transport] | None = None,
+        profile: bool = False,
     ) -> None:
         left, right = memory_pair()
         self.transport = RecordingTransport(left)
         served = server_transport(right) if server_transport is not None else right
         self.connection = AcpConnection(server, served, auth or AcpAuth(principal="user", submitted_by="user"))
-        self.capabilities = capabilities or {}
+        self.capabilities = {**(capabilities or {}), **(PROFILE if profile else {})}
         self.responder = responder
         self.updates: list[dict[str, Any]] = []
         self.requests: list[tuple[str, dict[str, Any]]] = []
@@ -243,8 +245,10 @@ class Client:
         result = await self.call("session/new", {"cwd": cwd, "mcpServers": [], **params})
         return result["sessionId"]
 
-    async def prompt(self, session_id: str, text: str) -> Any:
-        return await self.call("session/prompt", {"sessionId": session_id, "prompt": [{"type": "text", "text": text}]})
+    async def prompt(self, session_id: str, text: str, **params: Any) -> Any:
+        return await self.call(
+            "session/prompt", {"sessionId": session_id, "prompt": [{"type": "text", "text": text}], **params}
+        )
 
     async def resume(self, session_id: str, **params: Any) -> Any:
         return await self.call("session/resume", {"sessionId": session_id, "cwd": "/work", **params})
@@ -310,14 +314,32 @@ def merge(content: list[Any], blocks: list[Any]) -> list[Any]:
     return merged
 
 
+def cursor_of(update: dict[str, Any]) -> str | None:
+    return update.get("_meta", {}).get("tantra", {}).get("cursor")
+
+
+def uncursored(update: dict[str, Any]) -> dict[str, Any]:
+    if cursor_of(update) is None:
+        return update
+    tantra = {key: value for key, value in update["_meta"]["tantra"].items() if key != "cursor"}
+    meta = {key: value for key, value in update["_meta"].items() if key != "tantra"}
+    if tantra:
+        meta["tantra"] = tantra
+    stripped = {key: value for key, value in update.items() if key != "_meta"}
+    if meta:
+        stripped["_meta"] = meta
+    return stripped
+
+
 def reduce(updates: list[dict[str, Any]], session_id: str | None = None) -> dict[str, Any]:
     entities: dict[tuple[str, str, str], dict[str, Any]] = {}
     states: dict[str, Any] = {}
+    queues: dict[str, Any] = {}
     for params in updates:
         sid = params["sessionId"]
         if session_id is not None and sid != session_id:
             continue
-        update = params["update"]
+        update = uncursored(params["update"])
         kind = update["sessionUpdate"]
         if kind in CONTENT_KINDS:
             entity = entities.setdefault((sid, kind, update["messageId"]), {"content": []})
@@ -348,7 +370,9 @@ def reduce(updates: list[dict[str, Any]], session_id: str | None = None) -> dict
             entity.update({key: value for key, value in update.items() if key not in IDENTITY})
         elif kind == "state_update":
             states[sid] = {key: value for key, value in update.items() if key != "sessionUpdate"}
-    return {"order": list(entities), "entities": entities, "states": states}
+        elif kind == "_tantra_queue_update":
+            queues[sid] = update["entries"]
+    return {"order": list(entities), "entities": entities, "states": states, "queues": queues}
 
 
 class Scripted:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
@@ -8,6 +9,7 @@ from pydantic.alias_generators import to_camel
 
 ContentBlock = dict[str, Any]
 PROTOCOL_VERSION = 2
+_CURSOR = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
 class Wire(BaseModel):
@@ -229,6 +231,35 @@ class SessionInfoUpdate(Wire):
 class ConfigOptionUpdate(Wire):
     session_update: Literal["config_option_update"] = "config_option_update"
     config_options: list[dict[str, Any]]
+
+
+class WriterUpdate(Wire):
+    session_update: Literal["_tantra_writer"] = "_tantra_writer"
+    writer: bool
+    reason: Literal["claimed", "replaced", "lost"]
+
+
+class QueueEntry(Wire):
+    command_id: str
+    content: list[ContentBlock]
+    submitted_by: str | None = None
+
+
+class QueueUpdate(Wire):
+    session_update: Literal["_tantra_queue_update"] = "_tantra_queue_update"
+    entries: list[dict[str, Any]]
+
+
+class NoticeUpdate(Wire):
+    session_update: Literal["_tantra_notice"] = "_tantra_notice"
+    level: Literal["warning"] = "warning"
+    code: str
+    message: str
+
+
+def parse_cursor(value: Any) -> tuple[int, int] | None:
+    match = _CURSOR.fullmatch(value) if isinstance(value, str) else None
+    return (int(match[1]), int(match[2])) if match is not None else None
 
 
 class PermissionOption(Wire):

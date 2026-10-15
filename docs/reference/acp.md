@@ -43,7 +43,7 @@ Start and close the Runtime in the application. Closing or losing a client never
 
 `AcpAccess(operation, auth, root, actor, meta, ask, response)` carries server-loaded `SessionHeader` copies, the request `_meta`, and for `answer` the durable `LocatedAsk`. `answer` is checked twice: before a request is issued (`response=None`) and again with the mapped `AskResponse`. Prompts check `prompt`; taking the writer additionally checks `claim_writer`.
 
-Fixed limits: 8 open root sessions per connection and 1 MiB inbound frames on stdio.
+Fixed limits: 8 open sessions per connection (roots, plus children resumed through the [profile](#tantra-profile)) and 1 MiB inbound frames on stdio.
 
 ## Wire surface
 
@@ -61,7 +61,7 @@ Fixed limits: 8 open root sessions per connection and 1 MiB inbound frames on st
 |---|---|
 | `session/new` | Calls `scope`, creates a root with metadata `{**scope, "acp_cwd": cwd}`, starts its tail, and returns `{sessionId, configOptions?}`. A `session_info_update` and `state_update` snapshot follow the response. `mcpServers` is ignored. |
 | `session/list` | Roots of `agent` matching `scope` (and `acp_cwd == cwd` when given), newest created first, 50 per page. Pass the returned `nextCursor` as `cursor` for the next page. |
-| `session/resume` | Checks `resume`. `replayFrom` omitted or `null` replays nothing; `{"type": "start"}` replays the root and every descendant before responding. Returns `{configOptions?}`, then a current snapshot, then the live tail. Resuming an open session replaces it. Children are rejected with `-32602`. |
+| `session/resume` | Checks `resume`. `replayFrom` omitted or `null` replays nothing; `{"type": "start"}` replays the root before responding, and for plain v2 clients every descendant too; profile clients replay only the session they resume. Returns `{configOptions?}`, then a current snapshot, then the live tail. Resuming an open session replaces it. Without the profile, children are rejected with `-32602`. |
 | `session/prompt` | Roots only, on an open session. Checks `prompt`, encodes the blocks, takes the writer if needed, and returns `{messageId}` once the input is durably accepted. |
 | `session/cancel` | Notification. Checks `cancel`, takes the writer if needed, and cancels the whole tree. The tail reports `idle` with `cancelled`. |
 | `session/close` | Detaches this connection's tails, cancels its outstanding requests, and releases its writer. It never cancels work. Returns `{}`. |
@@ -75,6 +75,7 @@ Fixed limits: 8 open root sessions per connection and 1 MiB inbound frames on st
 | Mutation from a connection that is not writer | `-32603` | `writer_required` |
 | Still unavailable after 3 retries of the same command ID | `-32603` | `unavailable` |
 | Model change while work is active | `-32603` | `model_busy` |
+| Profile `commandId` reused with different content | `-32602` | `command_conflict` |
 
 Error messages are fixed strings and never carry exception details. If a session stream fails (including a raising `view` or `decode_input`) or the Runtime closes, the server closes the connection so the client reconnects and resumes; transient `CoordinatorUnavailable` and `LeaseLost` are retried from the last applied event. JSON-RPC parse errors, invalid requests, unknown methods, batches, and `$/cancel_request` in both directions follow JSON-RPC 2.0 and the ACP cancellation rules.
 
@@ -84,7 +85,7 @@ Error messages are fixed strings and never carry exception details. If a session
 |---|---|---|
 | `session/prompt` responds at insertion | Responds on durable acceptance (`InputQueued` committed). `user_message` is still emitted at `TurnStarted`. | Acceptance is a durable commitment; holding a request behind a queue invites lost responses. |
 | `session/close` cancels ongoing work | `close` detaches this connection only; cancelling is explicit. | Sessions are durable and shared. |
-| Clients must not resume a child | Reserved for the tantra profile. Without it, children are pushed automatically and cannot be resumed. | Lazy child delivery keeps cost independent of tree size. |
+| Clients must not resume a child | Profile clients may resume a child read-only and close it. Without the profile, children are pushed automatically and cannot be resumed. | Lazy child delivery keeps cost independent of tree size. |
 
 ## Projection
 
@@ -103,13 +104,41 @@ Error messages are fixed strings and never carry exception details. If a session
 | `TurnCompleted` | `idle` with `end_turn`, `max_turn_requests` for `max_steps`, or `_tantra_finished` for `finish` |
 | `TurnCancelled`, `TurnFailed`, `TurnInterrupted` | `idle` with `cancelled`, `error {code: -32603, message}`, or `_tantra_interrupted` |
 
-Replay coalesces streamed deltas into message upserts and reports only the latest `usage_update`, so a replayed transcript reduces to the same state as the live one. Every descendant transcript is pushed on the same connection, and each child's `state_update` is mirrored on its parent's `subagent_update.state`. A finished child also carries `_meta.tantra.finished: true`. Title changes are sent as `session_info_update` and model changes as `config_option_update`; with a coordinator they follow header changes made anywhere, otherwise they are sent on `session/new` and `session/resume`.
+For plain v2 clients, replay coalesces streamed deltas into message upserts and reports only the latest `usage_update`, so a replayed transcript reduces to the same state as the live one. Profile replay is uncoalesced. For plain v2 clients, every descendant transcript is pushed on the same connection, and each child's `state_update` is mirrored on its parent's `subagent_update.state`. A finished child also carries `_meta.tantra.finished: true`. Profile clients never get child transcripts pushed; they resume a child to read it and see child state through the mirror. Title changes are sent as `session_info_update` and model changes as `config_option_update`; with a coordinator they follow header changes made anywhere, otherwise they are sent on `session/new` and `session/resume`.
 
 ## Writer and asks
 
-Each root has one fenced writer. A connection starts as a reader; its first prompt or cancel takes the writer and fences the previous one, which keeps reading from its last applied event. A fenced connection's next prompt fails once with `writer_required`; the one after that takes the writer back. A cancel always takes the writer, because a notification cannot return an error.
+Each root has one fenced writer. Without the profile, a connection starts as a reader; its first prompt or cancel takes the writer and fences the previous one, which keeps reading from its last applied event. A fenced connection's next prompt fails once with `writer_required`; the one after that takes the writer back. A cancel always takes the writer, because a notification cannot return an error.
 
 Pending asks are sent only to the writer: an approval becomes `session/request_permission` with `allow` and `deny` options, and a choice or free-text ask becomes a form `elicitation/create` when the client advertised `capabilities.elicitation.form`. When the writer changes, outstanding requests are cancelled with `$/cancel_request` and re-issued to the new writer. Cancelled, declined, or unmapped responses answer nothing.
+
+## `tantra` profile
+
+A client opts in by sending `"_meta": {"tantra": {"version": 1}}` in `initialize.params.capabilities`; the agent always advertises the same value. Profile-only output (`_tantra_writer`, `_tantra_queue_update`, `_tantra_notice`, `_meta.tantra.cursor`) goes only to profile clients. The `_tantra_finished` / `_tantra_interrupted` stop reasons and `_meta.tantra.ask` / `finished` go to every client. Without the profile, `commandId` and `mode` are ignored, `_tantra_after` is rejected with `-32602`, and `_tantra/session/claim_writer` answers `-32601`.
+
+| Feature | Wire | Semantics |
+|---|---|---|
+| Command IDs | `_meta.tantra.commandId` (canonical lowercase UUID) on `session/prompt` and `session/cancel` | Becomes the Runtime command ID. A retry with the same content is a duplicate and returns the same `messageId`. Different content → `-32602` with `command_conflict`; on cancel, a `command_conflict` notice. A non-canonical UUID → `-32602`. |
+| Cursors | `_meta.tantra.cursor: "<seq>.<index>"` | On every update derived from the journal, merged into any existing `_meta`. `seq` is the journal seq and `index` the position in the projector's output for that event; gaps are normal. Live-only updates carry no cursor. |
+| Cursor replay | `replayFrom: {"type": "_tantra_after", "cursor": "<seq>.<index>"}` | Replays everything after the cursor (exclusive), then the snapshot and the live tail. Malformed, or `seq` beyond the end of the journal → `-32602`. A cursor is valid only for the capabilities it was issued under; after a change, replay from `start`. |
+| Writer mode | `_meta.tantra.mode: "read" \| "write"` on `session/new` and `session/resume` | Defaults to `write` on new and `read` on resume. `write` claims before responding, so a denied claim fails the request with `-32002`. Pending-ask requests follow the response. Profile clients never claim implicitly: a reader's prompt fails with `writer_required` every time, and its cancel yields a `writer_required` notice. |
+| Claim | `_tantra/session/claim_writer {sessionId}` → `{}` | Checks `claim_writer` and fences the current writer. A no-op if this connection already writes. Pending asks move here; the old writer's requests are cancelled. |
+| Writer state | `_tantra_writer {writer, reason}` | `claimed`: this connection became writer. `replaced`: fenced by another writer. `lost`: the writer lease was lost (`LeaseLost` / `CoordinatorUnavailable`); reclaiming is explicit. Sent on this connection only, never replayed. |
+| Notices | `_tantra_notice {level: "warning", code, message}` | Sent for a cancel, since a notification cannot return an error: `writer_required` (this connection is not writer), `command_conflict` (the `commandId` was used for different content), `unavailable` (still failing after 3 retries). A cancel with an invalid `commandId` is only logged. |
+| Queue | `_tantra_queue_update {entries: [{commandId, content, submittedBy?}]}` | Every accepted root user input that has not started. The full list is sent on each change and as a snapshot after `session/new` and `session/resume`. |
+| Lazy children | `session/resume` / `session/close` on a child ID | Read-only: `mode: "write"` → `-32602`. The child's root must be open on the same connection, else `-32002`. Policy `resume` receives the root header as `root` and the child header as `actor`. The child gets its own cursors and `replayFrom` rules. Closing a child detaches its transcript and never stops it; closing the root closes its children. |
+| Re-resume | `session/resume` on an open root | Replaces the session: its open children are closed (`session/close` on one then answers `-32002`), and the writer follows the new `mode`. `write` claims again and sends `claimed`; `read` releases the writer without a `_tantra_writer` update. A rejected `replayFrom` or a denied `write` claim leaves the open session untouched. |
+| Child mirror | `subagent_update {sessionId, title, state}` | Every descendant is mirrored from `Runtime.tree_status` on its parent's session ID, parents first: a snapshot after resume, then each change. Child transcripts are never pushed. With a coordinator, refreshes follow child notices (at most one per 500 ms); without one, the mirror polls once a second while the tree is busy. |
+
+A cursor-bearing update and a lost-response retry:
+
+```json
+{"sessionUpdate": "agent_message", "messageId": "c1a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5c",
+ "content": [{"type": "text", "text": "There are three open issues."}],
+ "_meta": {"tantra": {"cursor": "12.3"}}}
+```
+
+After an uncertain prompt, reconnect, `session/resume` with `{"type": "_tantra_after", "cursor": "<last applied>"}` and `mode: "write"`, then retry the prompt with the same `commandId`: it is accepted once and answers the same `messageId`.
 
 ## stdio
 

@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "error": {
+    "code": -32603,
+    "message": "Writer required",
+    "data": {
+      "tantra": {
+        "code": "writer_required"
+      }
+    }
+  }
+}

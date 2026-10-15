@@ -1,6 +1,6 @@
 # 018 — ACP v2–inspired interface and the `tantra` profile
 
-**Status:** P1 ✅ DONE. P2–P8 not started.
+**Status:** P1–P2 ✅ DONE. P3–P8 not started.
 
 ## Goal
 
@@ -129,7 +129,7 @@ No published implementation does fencing, durable cursor replay, or lazy child d
 - `finish` maps to `idle` with `_tantra_finished`, plus `_meta.tantra.finished: true`.
 - `capabilities` stays empty, because there is no per-child cancel.
 - **Child state, P1:** derived from the child-journal tails, since every descendant transcript is pushed.
-- **Child state, P2:** lazy children are mirrored from `runtime.tree_status`, refreshed on coordinator notices and polled once a second otherwise.
+- **Child state, P2 (profile clients):** every descendant is mirrored from `runtime.tree_status` as `subagent_update {sessionId, title, state}` on its parent's session id, BFS order so parents come first. Snapshot after resume, then on change; live-only. Refresh triggers: coordinator `journal`/`header`/`activity` notices for non-root actors (debounced 500 ms), a root `ChildCreated`, and without a coordinator a 1 s poll while the root or any descendant is `queued`/`running`/`awaiting_input`. One `coordinator.watch` per session feeds both this mirror and the header watch. Non-profile clients keep the P1 tail-derived mirror.
 - **Pending asks** at resume and at claim come from `header.pending_ask` plus `runtime.lookup_ask`.
 
 **Other standard updates**
@@ -219,6 +219,7 @@ endpoint = server.websocket(bind=bind, allowed_origins={"https://app.example"})
 | Invalid input, or a mutation on a child | `-32602` | — |
 | Mutation from a connection that isn't writer | `-32603` | `writer_required` |
 | Still failing after 3 retries with the same command ID | `-32603` | `unavailable` |
+| Profile `commandId` reused with different content (`InvalidCommandReuse`) | `-32602` | `command_conflict` |
 
 Error messages never carry exception details.
 
@@ -226,7 +227,9 @@ Error messages never carry exception details.
 
 `tantra/acp/projection.py::Projector` is pure. Per actor stream it tracks the current turn, the reasoning blocks of each sample, open tool calls, and pending asks. It is configured from the client's capabilities and profile.
 
-Profile clients get `_meta.tantra.cursor = "<seq>.<index>"` on every output derived from the journal. Live-only outputs get no cursor: requests, notices, writer state and the queue.
+Profile clients get `_meta.tantra.cursor = "<seq>.<index>"` on every output derived from the journal: `seq` is the journal seq, `index` the position in `Projector.feed()` output order (internal signals take indices, so gaps are normal). Live-only outputs get no cursor: requests, notices, writer state, the queue, the resume `state_update` snapshot and the profile subagent mirror.
+
+**Profile replay is uncoalesced.** It is exactly the live projection filtered by cursor, including every `usage_update` at its position. Why: P1's replay coalescing shifts output indices, so a coalesced stream has no stable `<seq>.<index>`. Plain v2 clients keep coalesced replay.
 
 **Turns and messages**
 
@@ -262,7 +265,7 @@ Profile clients get `_meta.tantra.cursor = "<seq>.<index>"` on every output deri
 | `TurnInterrupted` | `state_update idle` with `_tantra_interrupted` |
 | `ToolCallDelta`, `SampleStarted`, `CancellationRequested`, `AgentFinished`, `SessionCreated`, `InputQueued` | Nothing (`InputQueued` only feeds the queue) |
 
-Child status is mirrored as the parent's `subagent_update.state`. In P1 it is derived from the child tail. In P2 it comes from `tree_status` for children that are not open.
+Child status is mirrored as the parent's `subagent_update.state`. In P1 it is derived from the child tail. For profile clients (P2) it comes from `tree_status` for every descendant.
 - `queued` or `running` → `running`
 - `idle` → `idle` with the last stop reason
 - `finished` → `idle` with `_tantra_finished`
@@ -270,21 +273,25 @@ Child status is mirrored as the parent's `subagent_update.state`. In P1 it is de
 - `cancelled` → `idle` with `cancelled`
 - `interrupted` → `idle` with `_tantra_interrupted`
 
-The P2 `tree_status` mirror refreshes on coordinator notices for child actors, debounced to at most one refresh per 500 ms. With no coordinator, it polls once a second while any descendant is queued or running.
+The P2 `tree_status` mirror refreshes on coordinator notices for child actors, debounced to at most one refresh per 500 ms, and on a root `ChildCreated`. With no coordinator, it polls once a second while the root or any descendant is queued, running or awaiting input.
 
 ## `tantra` profile
 
-Negotiated with `_meta.tantra = {"version": 1}` in both directions. `_tantra_*` variants are sent only to clients that negotiated it.
+Negotiated with `_meta.tantra = {"version": 1}` in both directions: the client sends it in `initialize.params.capabilities._meta`, the agent answers in `capabilities._meta`.
+- Profile-only output goes only to profile clients: `_tantra_writer`, `_tantra_queue_update`, `_tantra_notice`, `_meta.tantra.cursor`. The `_tantra_finished` / `_tantra_interrupted` stop reasons and `_meta.tantra.ask` / `finished` are v2-legal extension values and go to everyone (frozen P1 projection).
+- From non-profile clients, profile inputs are ignored (`commandId`, `mode`) and profile-only requests are rejected: `_tantra_after` → `-32602`, `_tantra/session/claim_writer` → `-32601`.
 
 | Feature | Wire | Semantics |
 |---|---|---|
-| Command IDs | `_meta.tantra.commandId` on `session/prompt` and `session/cancel` | Becomes the Runtime `command_id`. A retry is a duplicate and gets the same `messageId`. Reusing it with different content → `-32602`, `command_conflict`. |
+| Command IDs | `_meta.tantra.commandId` (canonical UUID) on `session/prompt` and `session/cancel` | Becomes the Runtime `command_id`. A retry is a duplicate and gets the same `messageId`. Reusing it with different content → `-32602`, `command_conflict`; on cancel, a `command_conflict` notice. A non-UUID → `-32602`. |
 | Cursor replay | `replayFrom: {"type": "_tantra_after", "cursor": "<seq>.<index>"}` | Exclusive, like `Last-Event-ID`. A cursor beyond the end of the journal → `-32602`. If capabilities changed, replay from `start`. |
-| Writer mode | `_meta.tantra.mode` on `session/new` / `session/resume` | Defaults to `write` on new and `read` on resume. A `read` connection never receives requests and never claims implicitly. |
+| Writer mode | `_meta.tantra.mode` on `session/new` / `session/resume` | Defaults to `write` on new and `read` on resume. `write` claims before responding, so a denied claim fails the request with `-32002`; pending-ask requests follow the response. Profile clients never claim implicitly: a non-writer's prompt → `writer_required` every time. |
 | Claim | `_tantra/session/claim_writer {sessionId}` | Checks `policy(claim_writer)`, then fences the current writer. Returns `{}`. |
-| Writer state | `_tantra_writer {writer, reason: "claimed" \| "replaced" \| "reconnected"}` session update | Sent only on this connection, never replayed. A non-writer's mutation → `writer_required`. A non-writer's cancel gets a warning `notice`. |
+| Writer state | `_tantra_writer {writer, reason: "claimed" \| "replaced" \| "lost"}` session update | Sent only on this connection, never replayed. `claimed`: this connection became writer. `replaced`: fenced by another writer. `lost`: the writer connection dropped (`LeaseLost` / `CoordinatorUnavailable`); reclaim is explicit. |
+| Notices | `_tantra_notice {level: "warning", code, message}` session update | Live-only. `writer_required` for a non-writer's cancel (a notification can't error); `command_conflict` for a cancel reusing a command ID; `unavailable` for a profile cancel still failing after retries. An invalid `commandId` on cancel is only logged. |
 | Queue | `_tantra_queue_update {entries: [{commandId, content, submittedBy}]}` session update | Full list of accepted but not yet inserted root user inputs. Sent on every change and after resume. |
-| Lazy children | `session/resume` / `session/close` on a child ID | Read-only. The child transcript gets its own cursor. Profile clients never receive child transcripts automatically; announcements and state always flow. |
+| Re-resume | `session/resume` on an already-open root | Replaces it: its open children close and the writer follows the new `mode` (`write` sends `claimed` again, `read` releases silently). A rejected `replayFrom` or a denied `write` claim leaves the open session untouched. |
+| Lazy children | `session/resume` / `session/close` on a child ID | Read-only (`mode: write` → `-32602`). The child's root must be open on the same connection (else `-32002`) and the child must be in that tree. Counts toward the 8-session limit; closing the root closes its children. Policy `resume` gets `root` = root header, `actor` = child header. The child transcript gets its own cursor. Profile clients never receive child transcripts automatically; announcements and state always flow through the mirror. |
 
 ## Implementation phases
 
@@ -376,7 +383,7 @@ Negotiated with `_meta.tantra = {"version": 1}` in both directions. `_tantra_*` 
 - A plain v2 client that resumes a root with a pending ask gets no request until its first mutation claims the writer. P2's explicit `mode: write` covers profile clients.
 - **Runtime issue (for P8 or its own spec):** `_internal_id` (`runtime.py:1611`) keys on `turn_id:call_id`. A provider that repeats `call_0` across samples within one turn makes spawn, send and finish alias each other.
 
-### Phase 2 — `tantra` profile · deps: P1 · —
+### Phase 2 — `tantra` profile · deps: P1 · ✅ DONE
 
 **Deliverables**
 - In `agent.py` and `projection.py`:
@@ -405,18 +412,39 @@ Negotiated with `_meta.tantra = {"version": 1}` in both directions. `_tantra_*` 
     - Pending asks move to the new writer, and `$/cancel_request` goes to the old one.
   - **Queue:** the queue update matches the Runtime's queue.
   - **Lazy children:**
-    - An unresumed child sends no transcript, but still sends `subagent_update`.
+    - An unresumed child sends no transcript, but still sends `subagent_update` (grandchildren on the child's id).
     - Closing a child leaves it running.
-  - **Isolation:** a non-profile client never receives `_tantra_*`.
+  - **Isolation:** a non-profile client never receives profile-only output (`_tantra_writer`, `_tantra_queue_update`, `_tantra_notice`, cursors).
 - PostgreSQL:
   - a claim across runtimes
   - a cursor resume served by the other runtime
+  - the mirror refreshing from coordinator notices for a child on the other runtime
+- `just stress`, zero PostgreSQL skips.
 
 **Checklist**
-- [ ] Command IDs + cursors
-- [ ] Writer mode, claim, queue
-- [ ] Lazy children
-- [ ] Fixtures + docs
+- [x] Command IDs + cursors
+- [x] Writer mode, claim, queue
+- [x] Lazy children
+- [x] Fixtures + docs
+
+**Verified:**
+- 1177 package tests passed with zero skips against an owned Compose PostgreSQL (`fsync=on`). `test_acp_profile.py` (30) plus `test_postgres_acp.py` (7) passed 5 of 5 repeat runs.
+- 157 stress tests passed.
+- `ruff check` and `ruff format --check` clean; `mkdocs build --strict` passes; the Runtime-boundary diff is empty.
+- Two review rounds: 1 major and 10 minor defects, then 4 minor. All fixed, each with a regression test that fails when its fix is reverted.
+
+**As built** (surprising details):
+- **Mirror and `view`:** the profile mirror passes synthetic `ChildCreated` (name) and `TurnFailed` (error) events through `view`. A hidden descendant drops its whole subtree; a hidden error becomes `"Subagent failed"`. `view` reruns only when a descendant's raw `(name, state, error)` changes.
+- **Mirror triggers:** besides notices, the poll and root `ChildCreated`, any live `TurnState` marks the mirror stale. Without that, the no-coordinator poll can't restart once the tree goes idle. If the coordinator watch dies, the mirror falls back to the poll. A failing refresh closes the transport, as tail failures do.
+- **Profile clients still get the journal-derived `subagent_update {sessionId, title}`** at `ChildCreated`, with a cursor. The mirror adds `state`. `awaiting_input` maps to `requires_action`, which children never reach.
+- **Writer announcements:** `replaced` / `lost` go only to a connection that was told `claimed`. The update is spawned before the writer's exit is awaited, so a cancelled request can't skip it. `claim_writer` replies first, then sends `claimed`, then the pending asks.
+- **Plain v2 changes, both intentional:**
+  - A writer that hits `LeaseLost` / `CoordinatorUnavailable` is released at once; backoff applies only to reader retries.
+  - Pending asks found at a claim before go-live are issued after the `state_update` snapshot.
+- **A denied `mode: write` on `session/new`** deletes the root it just created.
+- **Profile cancel** retries like prompt; plain v2 cancel keeps P1's single attempt.
+
+**Follow-up:** when `view` hides a child's `ChildCreated`, that child's lifecycle inputs to its parent no longer count as synthetic. They project as `user_message`, and the raw `[agent <id> …]` text reaches the client. Closing this means the projector must know which children `view` hid; this is P1 projection, so it needs its own decision.
 
 ### Phase 3 — WebSocket transport · deps: P1 · —
 

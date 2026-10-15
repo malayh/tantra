@@ -14,6 +14,7 @@ from tantra.acp.wire import (
     ErrorObject,
     MessageChunk,
     MessageUpdate,
+    QueueEntry,
     SessionMessage,
     State,
     SubagentUpdate,
@@ -28,6 +29,7 @@ from tantra.events import (
     AskRaised,
     ChildCreated,
     CompactionApplied,
+    InputQueued,
     LoggedEvent,
     ReasoningDelta,
     ReasoningPart,
@@ -49,6 +51,7 @@ from tantra.events import (
 )
 
 FRAMEWORK_TOOLS = frozenset({"spawn", "send", "finish"})
+STOP_REASONS = {"max_steps": "max_turn_requests", "finished": "_tantra_finished"}
 _UUID = r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 _TURN_ENDED = re.compile(rf"\[agent {_UUID} turn ended\] ")
 _FINISHED = re.compile(rf"\[agent {_UUID} finished\] (.*)\Z", re.S)
@@ -84,7 +87,12 @@ class UsageSample:
     model: str
 
 
-Output = dict[str, Any] | AskPending | AskResolved | ChildAnnounced | TurnState | UsageSample
+@dataclass(frozen=True)
+class QueueChanged:
+    entries: list[dict[str, Any]]
+
+
+Output = dict[str, Any] | AskPending | AskResolved | ChildAnnounced | TurnState | UsageSample | QueueChanged
 
 
 def entity_id(value: str) -> str:
@@ -114,11 +122,13 @@ class Projector:
         decode_input: Callable[[str], list[ContentBlock]],
         *,
         hidden: Collection[str] = (),
+        profile: bool = False,
     ) -> None:
         self.actor_id = actor_id
         self.parent_id = parent_id
         self.decode_input = decode_input
         self.hidden = FRAMEWORK_TOOLS & set(hidden)
+        self.profile = profile
         self.state: dict[str, Any] = {"state": "idle"}
         self.asks: dict[str, AskPending] = {}
         self._id = str(actor_id)
@@ -131,10 +141,15 @@ class Projector:
         self._children: set[str] = set()
         self._open: list[tuple[str, str]] = []
         self._deltas: dict[tuple[str, str], str] = {}
+        self._queue: dict[str, dict[str, Any]] = {}
 
     @property
     def pending_asks(self) -> list[AskPending]:
         return list(self.asks.values())
+
+    @property
+    def queue(self) -> list[dict[str, Any]]:
+        return list(self._queue.values())
 
     def feed(self, item: LoggedEvent, *, replay: bool = False) -> list[Output]:
         event = item.event
@@ -175,9 +190,11 @@ class Projector:
         ]
 
     def _project(self, seq: int, event: SessionEvent) -> list[Output]:
+        if isinstance(event, InputQueued):
+            return self._enqueue(event)
         if isinstance(event, TurnStarted):
             self._turn = event.turn_id
-            return [*self._input(event), *self._set_state(State(state="running"))]
+            return [*self._input(event), *self._set_state(State(state="running")), *self._dequeue(event.turn_id)]
         if isinstance(event, SampleStarted):
             self._sample = event.sample_id
             self._model = event.model
@@ -252,26 +269,47 @@ class Projector:
                 )
             return outputs
         if isinstance(event, TurnCompleted | TurnCancelled | TurnFailed | TurnInterrupted):
-            return self._terminal(event)
+            return [*self._terminal(event), *self._dequeue(event.turn_id)]
         return []
 
-    def _input(self, event: TurnStarted) -> list[Output]:
-        message_id = entity_id(event.turn_id)
-        ended = _TURN_ENDED.match(event.input)
+    def _synthetic(self, text: str, message_id: str) -> list[Output] | None:
+        ended = _TURN_ENDED.match(text)
         if ended is not None and ended[1] in self._children:
             return []
-        finished = _FINISHED.match(event.input)
+        finished = _FINISHED.match(text)
         if finished is not None and finished[1] in self._children:
             return [self._message(message_id, finished[1], self._id, finished[2], finished=True)]
-        sent = _MESSAGE.match(event.input)
+        sent = _MESSAGE.match(text)
         if sent is not None and (sent[1] in self._children or sent[1] == str(self.parent_id)):
             return [self._message(message_id, sent[1], self._id, sent[2])]
         if self.parent_id is not None:
-            return [self._message(message_id, str(self.parent_id), self._id, event.input)]
+            return [self._message(message_id, str(self.parent_id), self._id, text)]
+        return None
+
+    def _input(self, event: TurnStarted) -> list[Output]:
+        message_id = entity_id(event.turn_id)
+        synthetic = self._synthetic(event.input, message_id)
+        if synthetic is not None:
+            return synthetic
         update = MessageUpdate(
             session_update="user_message", message_id=message_id, content=self.decode_input(event.input)
         )
         return [dump(update)]
+
+    def _enqueue(self, event: InputQueued) -> list[Output]:
+        command_id = entity_id(event.command_id)
+        if not self.profile or self._synthetic(event.input, command_id) is not None:
+            return []
+        entry = QueueEntry(
+            command_id=command_id, content=self.decode_input(event.input), submitted_by=event.submitted_by
+        )
+        self._queue[event.command_id] = dump(entry)
+        return [QueueChanged(self.queue)]
+
+    def _dequeue(self, command_id: str) -> list[Output]:
+        if self._queue.pop(command_id, None) is None:
+            return []
+        return [QueueChanged(self.queue)]
 
     def _message(self, message_id: str, sender: str, recipient: str, text: str, *, finished: bool = False) -> Output:
         message = SessionMessage(
@@ -349,8 +387,7 @@ class Projector:
         resolved: list[Output] = [AskResolved(ask_id) for ask_id in self.asks]
         self.asks = {}
         if isinstance(event, TurnCompleted):
-            reasons = {"max_steps": "max_turn_requests", "finished": "_tantra_finished"}
-            state = State(state="idle", stop_reason=reasons.get(event.stop_reason, "end_turn"))
+            state = State(state="idle", stop_reason=STOP_REASONS.get(event.stop_reason, "end_turn"))
         elif isinstance(event, TurnCancelled):
             state = State(state="idle", stop_reason="cancelled")
         elif isinstance(event, TurnFailed):

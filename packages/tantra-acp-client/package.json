@@ -1,0 +1,32 @@
+{
+  "name": "tantra-acp-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint . && prettier --check .",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:consumer": "npm run build && tsc -p test/tsconfig.json && node --input-type=module --eval \"import('tantra-acp-client')\""
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@typescript-eslint/eslint-plugin": "^8.46.4",
+    "@typescript-eslint/parser": "^8.46.4",
+    "eslint": "^9.39.5",
+    "prettier": "^3.9.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,6 +1,6 @@
 # 018 — ACP v2–inspired interface and the `tantra` profile
 
-**Status:** P1–P3 ✅ DONE. P4–P8 not started.
+**Status:** P1–P4 ✅ DONE. P5–P8 not started.
 
 ## Goal
 
@@ -499,25 +499,51 @@ Negotiated with `_meta.tantra = {"version": 1}` in both directions: the client s
 - **Only the `accept` send treats `OSError` as a client disconnect.** An `OSError` from `connect()` is logged and closes with `1011`.
 - **`1013` is best effort.** A client that has truly stalled usually sees `1006`, because the close frame waits on the same backpressure. The endpoint still returns within about 2× the send limit.
 
-### Phase 4 — `tantra-acp-client` (TS) · deps: P2, P3 · —
+### Phase 4 — `tantra-acp-client` (TS) · deps: P2, P3 · ✅ DONE
 
 **Deliverables**
 - `packages/tantra-acp-client`, published as `tantra-acp-client`:
   - Native ESM with declarations.
   - No runtime dependencies: our own JSON-RPC over native WebSocket, mirroring `tantra/acp/jsonrpc.py`.
   - Tests use Node's test runner.
-- `TantraAcpClient({url: async () => string, identity, onUpdate, onWriter, onQueue, onRequest, onState, onError})`. Methods:
+- `TantraAcpClient({url, cwd?, onUpdate, onRequest?, onState?, onError?, webSocketFactory?, timing?})`.
+  - `url: () => string | Promise<string>`.
+  - `cwd` defaults to `/`.
+  - `webSocketFactory` and `timing` (reconnect base and cap) are test seams. Defaults: native `WebSocket`, 1 s and 30 s.
+- Methods:
   - `connect`, `disconnect`
-  - `newSession`, `listSessions`, `resume(id, {mode})`, `close(id)`
-  - `prompt(id, blocks, {commandId?})`, `cancel(id)`
+  - `newSession`, `listSessions(cursor?)`, `resume(id, {mode})`, `close(id)`
+  - `prompt(id, blocks, {commandId?})`, which returns a promise with a synchronous `.commandId`
+  - `cancel(id, {commandId?})`
   - `claimWriter(id)`, `setModel(id, model)`, `delete(id)`
-- Behavior:
-  - Advertises the profile, `subagents` and `elicitation.form`.
-  - Generates a `commandId` for each command and retries the same ID after an uncertain loss.
-  - Tracks a cursor per session, advancing it only after the handler succeeds.
-  - Reconnects with jittered backoff from 1 s to 30 s, at most 10 dials, calling `url()` on every dial. On reconnect, every open session resumes `read` from its applied cursor, and reclaiming the writer is explicit.
-  - Permission and elicitation requests are surfaced with a `respond()` function and an abort signal.
-  - Transcript reduction is left to the app.
+- **Profile:** advertises the profile and `elicitation.form`. An agent without the profile → `profile_unsupported`, with no reconnect.
+- **Updates:**
+  - Every `session/update`, `_tantra_*` included, goes to `onUpdate(sessionId, update)`.
+  - `onState` exposes the connection state, plus `writer`, `cursor` and `paused` per session.
+  - Why one callback: the app's reducer switches on `sessionUpdate` anyway.
+- **Ordering:**
+  - All inbound frames are handled in one ordered chain.
+  - The cursor advances only after `onUpdate` resolves.
+  - A throwing handler → `failed`, and the cursors are kept.
+  - `onUpdate` must not await client calls, because the response would queue behind it. `onRequest` is called in order but not awaited.
+- **Replay:** from the applied cursor when the client already has the session open, otherwise from `start`.
+- **Reconnect:**
+  - Jittered backoff from 1 s to 30 s, at most 10 dials, with `url()` called on every dial.
+  - Every open session then resumes `read` from its applied cursor, in open order (roots before children).
+  - Reclaiming the writer is explicit.
+- **Uncertain prompts are held until reclaim** (user decision):
+  - A session that was writer when the connection dropped pauses its FIFO prompt outbox.
+  - The outbox resends with the frozen `commandId` once this client is writer again, so dedupe returns the same `messageId`.
+  - `close`, `delete`, `disconnect` or `failed` reject held prompts with `uncertain` (if sent) or `closed`, carrying the `commandId`.
+  - `unavailable` rejects with no automatic retry, because the server already retried.
+- `listSessions` sends no `cwd` filter. Why: Sarathi's existing sessions have no `acp_cwd`.
+- Outbound frames over 1 MiB are rejected locally with `too_large`. Why: the server would close with `1009`, and a held retry would loop.
+- Permission and elicitation requests are surfaced with a `respond()` function and an abort signal.
+- Transcript reduction is left to the app.
+- Deviations:
+  - ~~`identity`~~: no persistence, and `submittedBy` comes from server auth.
+  - ~~`onWriter`, `onQueue`~~: folded into `onUpdate`.
+  - ~~advertising `subagents`~~: alpha.8 `ClientCapabilities` has no such field.
 
 **Verify**
 - Unit tests with a fake stream:
@@ -527,17 +553,47 @@ Negotiated with `_meta.tantra = {"version": 1}` in both directions: the client s
   - writer loss, then reclaim
   - request abort
   - `url()` called on every dial
-- An integration test against the P3 endpoint, a Python fixture server using `FakeProvider` plus PostgreSQL. Covers:
+  - the hold rule
+  - parity with the P2 request fixtures
+- An integration test against the P3 endpoint: a Python fixture server with a deterministic provider, two runtimes and PostgreSQL. It runs through `tests/test_acp_client_integration.py` and covers:
   - prompt and resume
   - recovering a lost response
   - fencing across two clients
   - lazy child resume
+  - an approval answered with `respond()`
+  - every frame the client sent passing `VALIDATOR`
 - Lint, typecheck, build, and an ESM/declaration consumer check.
 
 **Checklist**
-- [ ] API + profile handling
-- [ ] Reconnect + cursors
-- [ ] Unit + integration tests
+- [x] API + profile handling
+- [x] Reconnect + cursors
+- [x] Unit + integration tests
+
+**Verified:**
+- `npm run lint`, `typecheck`, `test:consumer` clean. `npm test`: 49 passed in each of 3 runs.
+- `test_acp_client_integration.py` passed 5 of 5 runs against an owned Compose PostgreSQL.
+- 1206 package tests passed with zero skips. 157 stress tests passed.
+- `ruff check` and `ruff format --check` clean; `mkdocs build --strict` passes.
+- Nothing changed under `packages/tantra/src`, and no dependencies were added.
+- One review: 1 major, 5 minor and 6 nit defects plus 6 test gaps. All fixed, each with a test that fails when its fix is reverted.
+
+**As built** (surprising details):
+- **Updates for sessions that aren't open still reach `onUpdate`**, because the mirror reports grandchildren on child ids that were never resumed. Cursor and writer state are tracked only for open sessions. A cursored update at or before the applied cursor is dropped.
+- **Response side effects run synchronously** while the response frame is handled: registering the session, setting the writer flag, dropping descendants. Otherwise the updates that follow could be handled before the session exists.
+- **Parents are learned from `subagent_update`.** A root's close, delete or re-resume drops its descendants.
+- **A failed re-resume closes the session on both sides.** The client drops it and sends a best-effort `session/close`. Why: the server may already have shut the old session down (`agent.py:474`).
+- **Reconnect:**
+  - Only `-32002` on a resume drops that session. Any other error retires the connection and counts as a failed dial.
+  - The dial count resets only once the connection reaches `open`. Why: a server that closes during every resume would otherwise be redialled forever.
+  - The first `connect()` dials at once; a reconnect waits `min(cap, base·2ⁿ) × U[0.5, 1]` before every dial.
+- **Hold rule:**
+  - A writer pauses at drop time even with an empty outbox, so prompts made while reconnecting are held too.
+  - A retried prompt that gets `writer_required` is held again.
+  - The inbound chain resets on every new connection, so a wedged handler can't block the next one.
+- **Requests:** with no `onRequest`, both request methods answer `-32601`. A throwing or rejecting `onRequest` → `handler_failed` and `-32603`.
+- **Fixture server** (`test/server.py`) stops through `POST /control/shutdown`, because uvicorn re-raises SIGTERM after `serve()`, which would skip `aclose()`. It simulates a lost response by swallowing the prompt response and closing with `1011`.
+
+**Follow-up:** a server whose stream fails right after go-live (`1011` from `agent.py:829`) makes the client reconnect about once a second indefinitely, with no `onError`, because every cycle reaches `open`.
 
 ### Phase 5 — Sarathi on the new interface · deps: P4 · —
 

@@ -195,3 +195,58 @@ Clients that launch agent processes, such as Zed's `agent_servers` setting, can 
   }
 }
 ```
+
+## TypeScript client
+
+`packages/tantra-acp-client` (`tantra-acp-client`) is an ESM client for the WebSocket endpoint. It has no runtime dependencies, uses the native `WebSocket`, always negotiates the `tantra` profile and `elicitation.form`, and owns cursors, command IDs, writer state and reconnects. Transcript reduction stays in the application.
+
+```ts
+import { TantraAcpClient } from "tantra-acp-client";
+
+const client = new TantraAcpClient({
+  url: async () => `wss://app.example/api/acp?ticket=${await ticket()}`,
+  onUpdate: (sessionId, update) => reducer.apply(sessionId, update),
+  onRequest: (request) => asks.show(request),
+  onState: (state) => store.setConnection(state),
+  onError: (error) => console.warn(error.code, error.sessionId),
+});
+
+await client.connect();
+const { sessionId } = await client.newSession();
+const prompt = client.prompt(sessionId, [{ type: "text", text: "Hello" }]);
+console.log(prompt.commandId, (await prompt).messageId);
+```
+
+| Method | Wire |
+|---|---|
+| `connect()` / `disconnect()` | Dial, `initialize`, resume every known session / close with `1000` |
+| `newSession()` | `session/new {cwd}`; the client becomes writer |
+| `listSessions(cursor?)` | `session/list`, without a `cwd` filter |
+| `resume(id, {mode})` | `session/resume`, `mode` defaults to `read`. A failed re-resume closes the session on both sides. |
+| `close(id)` / `delete(id)` | `session/close` / `session/delete` |
+| `prompt(id, blocks, {commandId?})` | `session/prompt`; returns a promise with a synchronous `.commandId` |
+| `cancel(id, {commandId?})` | `session/cancel`; resolves once sent |
+| `claimWriter(id)` / `setModel(id, model)` | `_tantra/session/claim_writer` / `session/set_config_option` |
+
+- **Options:** `url` is called on every dial, so it can mint a fresh ticket. `cwd` defaults to `/`. `webSocketFactory` and `timing` (`reconnectBaseMs`, `reconnectCapMs`) are test seams.
+- **State:** `onState({connection, sessions})` reports `closed`, `connecting`, `open` or `failed`, and `{writer, cursor, paused}` per open session. `paused` means prompts are held until this client is writer again.
+- **Ordering:** every inbound frame (responses, updates, requests) is handled in one ordered chain per connection. `onUpdate` is awaited, and a session's cursor advances only after it resolves. `resume()` resolves after its replayed updates were handled, because replay precedes the response.
+- **`onUpdate` must not await client calls.** The response would queue behind the running handler and never arrive. Start the call and let it finish later.
+- **A throwing `onUpdate`** reports `handler_failed`, closes the socket and moves to `failed`. Cursors are kept, so a later `connect()` resumes after the last applied update on a fresh chain.
+- **Replay:** an open session with a cursor resumes with `_tantra_after` that cursor; otherwise from `start`. Updates at or before the applied cursor are dropped.
+- **Requests:** `onRequest({method, sessionId, params, respond, signal})` receives `session/request_permission` and `elicitation/create`. It is called in order but not awaited, so a dialog can stay open while updates keep flowing; answer later with `respond()`. `$/cancel_request` and disconnects abort `signal`, and `respond()` after that is a no-op. A throwing or rejecting `onRequest` reports `handler_failed` and answers `-32603`. Without `onRequest`, and for any other method, requests answer `-32601`.
+- **Frames over 1 MiB** are rejected locally with `too_large` and never sent.
+
+**Reconnect.** Any close not caused by `disconnect()` waits, then redials with jittered backoff: each wait is `min(30 s, 1 s × 2ⁿ) × [0.5, 1]`. Every open session then resumes `read` from its cursor, in open order, so roots come before their children. A session that answers `-32002` is dropped, its prompts are rejected, and it is reported; any other resume error closes the connection and counts as a failed dial. After 10 failed dials the client is `failed`; the count resets only once the connection is `open` again. Reclaiming the writer is explicit.
+
+**Held prompts.** Each session has a FIFO outbox sent one prompt at a time. A session that was writer when the connection dropped is paused: its unanswered prompt goes back to the head, and nothing is sent until this client is writer again (`claimWriter`, `resume(id, {mode: "write"})`, or a `claimed` update). Prompts made while paused queue behind it. The retry reuses the same `commandId` and blocks, so the server answers the original `messageId`; a retry that gets `writer_required` is held again, since its outcome is still unknown. A prompt that was never sent, from a session that was not paused, sends normally and a non-writer gets `writer_required`. `close`, `delete`, `disconnect` and `failed` reject outstanding prompts with `uncertain` if they were sent, otherwise `closed`.
+
+| `TantraAcpError.code` | Meaning |
+|---|---|
+| `writer_required`, `command_conflict`, `unavailable`, `model_busy` | The server's `data.tantra.code`. `unavailable` is not retried; the server already retried. |
+| `not_found`, `invalid_params`, `internal` | `-32002`, `-32602`, any other server error |
+| `uncertain` | A sent prompt was abandoned before its response; it may have been accepted |
+| `closed` | Not connected, or the session is not open |
+| `too_large`, `profile_unsupported`, `handler_failed`, `dial_failed` | Client-side failures; `profile_unsupported` never reconnects |
+
+Errors carry `rpcCode`, `sessionId` and `commandId` when known. `crypto.randomUUID` requires a secure context (HTTPS or localhost).

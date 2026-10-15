@@ -1,6 +1,6 @@
 # 017 — Pluggable WebSocket interface
 
-**Status:** Complete. P0–P3 verified.
+**Status:** Superseded for transport by 018. P0 Runtime additions retained (`submitted_by`, `lookup_ask`, migration 12).
 
 ## Goal
 

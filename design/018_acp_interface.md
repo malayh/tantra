@@ -1,6 +1,6 @@
 # 018 — ACP v2–inspired interface and the `tantra` profile
 
-**Status:** P1–P5 ✅ DONE. P6–P8 not started.
+**Status:** P1–P6 ✅ DONE. P7–P8 not started.
 
 ## Goal
 
@@ -82,7 +82,7 @@ No published implementation does fencing, durable cursor replay, or lazy child d
 - The root journal holds no child state other than lifecycle inputs. Until P8, the mirror comes from `runtime.tree_status`, polled or triggered by coordinator notices.
 - **Per-child cancel does not exist.** `Connection.cancel` cancels the whole tree (`runtime.py:2539`).
 - `finish` is permanent (`runtime.py:1758`). ACP subagent associations have no terminal state.
-- Writer loss is only detectable by iterating the writable `Connection`, which raises `WriterReplaced`. `websocket.py:505` uses the same pattern.
+- Writer loss is only detectable by iterating the writable `Connection`, which raises `WriterReplaced`. `acp/agent.py` catches it the same way.
 - `session/cancel` is a notification, so it can never return an error.
 - Children cannot ask humans (`loop.py:576`). A child that is not being observed therefore never strands a request.
 - A cursor is only stable for one fixed projection: the same client capabilities and the same profile.
@@ -760,7 +760,7 @@ Deploy backend and UI together. Old pages need a refresh.
 
 **Follow-up:** a user `resume()` that succeeds after `close()` was called for the same session on an open connection leaves it open on the server and untracked on the client. Closing it from the success path could close a newer resume of the same id.
 
-### Phase 6 — Remove the 017 transport · deps: P5 · —
+### Phase 6 — Remove the 017 transport · deps: P5 · ✅ DONE
 
 **Deliverables**
 - Delete:
@@ -772,12 +772,23 @@ Deploy backend and UI together. Old pages need a refresh.
 - Mark 017 "superseded for transport; P0 Runtime additions retained."
 
 **Verify**
-- `git grep -nE "SessionSocket|SocketAuth|tantra-session-client|_socket_protocol|socket-ticket"` matches only `design/017`.
+- `git grep -nE "SessionSocket|SocketAuth|SocketBinding|SocketAccess|SocketLimits|SocketViewContext|InputCodec|tantra-session-client|tantra-client/|_socket_protocol|socket-ticket|tantra\.websocket|stress\.bench\.socket|reference/websocket"` matches only `design/017` and `design/018`.
 - All checks pass.
 
 **Checklist**
-- [ ] Removal
-- [ ] Full checks
+- [x] Removal
+- [x] Full checks
+
+**Verified**
+- `ruff` clean. tantra 1134 passed (was 1207; 73 socket tests removed) and stress 148 passed (was 157; 9 removed), both with zero skips on owned PostgreSQL.
+- `mkdocs build --strict` passes. Sarathi backend 115 passed. Client 61/61, consumer passes.
+- The Verify grep lists only `design/017` and `design/018`. Runtime, `tantra/acp/`, the client and the apps are untouched.
+- One review, no defects.
+
+**As built**
+- `packages/tantra-client/` was removed from disk too, including its ignored `dist/` and `node_modules/`.
+- No replacement transport bench: a load bench is out of scope.
+- `CHANGELOG.md` is untouched. `SessionSocket` never shipped, so removing it needs no entry; no phase adds a `tantra.acp` entry yet.
 
 ### Phase 7 — Upstream proposal · deps: P6 · —
 

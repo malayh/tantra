@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import TypeAdapter
 
@@ -14,6 +14,9 @@ from tantra.agent import Agent, agent_name
 from tantra.ask import AskResponse
 from tantra.events import LoggedEvent, SessionHeader, SubmittedBy
 from tantra.runtime import LocatedAsk, Runtime
+
+if TYPE_CHECKING:
+    from tantra.acp.websocket import AcpWebSocket
 
 Operation = Literal["resume", "prompt", "cancel", "claim_writer", "answer", "set_model", "delete"]
 
@@ -46,6 +49,7 @@ Policy = Callable[[AcpAccess], Awaitable[bool]]
 EncodePrompt = Callable[[AcpAuth, list[ContentBlock], Mapping[str, Any]], Awaitable[str]]
 DecodeInput = Callable[[str], list[ContentBlock]]
 View = Callable[[LoggedEvent], Awaitable[LoggedEvent | None]]
+Bind = Callable[[Mapping[str, Any]], Awaitable[AcpAuth]]
 
 
 async def encode_text(auth: AcpAuth, blocks: list[ContentBlock], meta: Mapping[str, Any]) -> str:
@@ -93,6 +97,13 @@ class AcpServer:
         from tantra.acp.agent import AcpConnection
 
         await AcpConnection(self, transport, auth).run()
+
+    def websocket(
+        self, *, bind: Bind, allowed_origins: Iterable[str], allow_missing_origin: bool = False
+    ) -> AcpWebSocket:
+        from tantra.acp.websocket import AcpWebSocket
+
+        return AcpWebSocket(self, bind=bind, allowed_origins=allowed_origins, allow_missing_origin=allow_missing_origin)
 
     async def serve_stdio(self, auth: AcpAuth) -> None:
         transport = await StdioTransport.open()

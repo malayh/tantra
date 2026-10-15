@@ -43,7 +43,7 @@ Start and close the Runtime in the application. Closing or losing a client never
 
 `AcpAccess(operation, auth, root, actor, meta, ask, response)` carries server-loaded `SessionHeader` copies, the request `_meta`, and for `answer` the durable `LocatedAsk`. `answer` is checked twice: before a request is issued (`response=None`) and again with the mapped `AskResponse`. Prompts check `prompt`; taking the writer additionally checks `claim_writer`.
 
-Fixed limits: 8 open sessions per connection (roots, plus children resumed through the [profile](#tantra-profile)) and 1 MiB inbound frames on stdio.
+Fixed limits: 8 open sessions per connection (roots, plus children resumed through the [profile](#tantra-profile)), 1 MiB inbound frames on stdio and [WebSocket](#websocket), 10 s per outbound WebSocket send, and WebSocket connections close at `expires_at`.
 
 ## Wire surface
 
@@ -139,6 +139,45 @@ A cursor-bearing update and a lost-response retry:
 ```
 
 After an uncertain prompt, reconnect, `session/resume` with `{"type": "_tantra_after", "cursor": "<last applied>"}` and `mode: "write"`, then retry the prompt with the same `commandId`: it is accepted once and answers the same `messageId`.
+
+## WebSocket
+
+`server.websocket(*, bind, allowed_origins, allow_missing_origin=False)` returns an `AcpWebSocket`, a raw ASGI callable that serves one JSON-RPC connection per socket, one message per text frame.
+
+```python
+from starlette.applications import Starlette
+from starlette.routing import WebSocketRoute
+
+from tantra.acp import AcpAuth
+
+async def bind(scope) -> AcpAuth:
+    user = await authenticate(scope)
+    if user is None:
+        raise PermissionError
+    return AcpAuth(principal=user.id, submitted_by=user.id, expires_at=user.expires_at)
+
+endpoint = server.websocket(bind=bind, allowed_origins={"https://app.example"})
+app = Starlette(routes=[WebSocketRoute("/api/acp", endpoint)])
+```
+
+Any ASGI server or router that passes a `websocket` scope works; FastAPI takes the same `WebSocketRoute`, and `await endpoint(scope, receive, send)` mounts it by hand.
+
+- **Handshake order:** Origin, then `bind`, then `accept`. Every denial sends `websocket.close` before `accept`, which uvicorn answers with HTTP 403. A rejected Origin never reaches `bind`.
+- **Origin:** exactly one `Origin` header, matched exactly against `allowed_origins`. A bare string or `"*"` raises `ValueError`. A missing Origin is denied unless `allow_missing_origin=True`; Node's native WebSocket and other non-browser clients send none.
+- **`bind`:** `async (scope) -> AcpAuth`, called with the raw ASGI scope. `PermissionError`, a result that is not an `AcpAuth`, or an `expires_at` at or before now denies with `1008`. Any other exception is logged and closes with `1011`.
+- **Expiry:** the socket closes with `1008` at `auth.expires_at`. Clients reconnect with fresh credentials and resume.
+- **No subprotocol:** none is selected, so clients must not offer one; Chrome fails the handshake when it offers subprotocols and the server selects none. Versioning happens in `initialize`.
+- **Frames:** text only; binary frames are ignored. uvicorn's `ws_max_size` (16 MiB by default) must be at least 1 MiB, or the effective inbound limit shrinks.
+
+| Close code | When |
+|---|---|
+| `1008` | Before `accept`: Origin denied or missing, or `bind` denied. After `accept`: `expires_at` reached. |
+| `1009` | An inbound text frame over 1 MiB of UTF-8. |
+| `1011` | `bind` failed unexpectedly, or the server closed the connection: a session stream or mirror failed, or the Runtime stopped. |
+| `1012` | `AcpWebSocket.aclose()`. uvicorn also sends `1012` to open sockets on its own shutdown. |
+| `1013` | An outbound send did not finish within 10 s. Best effort: a truly stalled client usually sees `1006`, because the close frame waits on the same backpressure; the endpoint still returns within about 20 s. |
+
+**Shutdown:** `await endpoint.aclose()` closes every live socket with `1012`, waits for each connection to unwind, and denies later handshakes with `1012`. Call it before `await runtime.aclose()`, for example at the start of the lifespan shutdown. uvicorn already sends `1012` to open sockets and waits for them before the lifespan shutdown runs; `aclose()` still refuses late handshakes and covers other servers.
 
 ## stdio
 

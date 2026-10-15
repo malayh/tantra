@@ -1,6 +1,6 @@
 # 018 — ACP v2–inspired interface and the `tantra` profile
 
-**Status:** P1–P2 ✅ DONE. P3–P8 not started.
+**Status:** P1–P3 ✅ DONE. P4–P8 not started.
 
 ## Goal
 
@@ -181,7 +181,9 @@ endpoint = server.websocket(bind=bind, allowed_origins={"https://app.example"})
   - `root` and `actor` are `SessionHeader`s loaded on the server.
   - `ask` is a `LocatedAsk`.
   - `answer` is checked twice: before a request is issued (`response=None`), then again with the mapped response.
-- `websocket(bind, allowed_origins, allow_missing_origin=False)`.
+- `websocket(*, bind, allowed_origins, allow_missing_origin=False) -> AcpWebSocket`, an ASGI callable.
+  - `bind`: `async (scope: Mapping[str, Any]) -> AcpAuth`, called with the raw ASGI scope after the Origin check. `PermissionError`, a non-`AcpAuth` result, or an `expires_at` at or before now denies.
+  - `AcpWebSocket.aclose()` closes every live socket with `1012`, waits for them to unwind, and refuses later handshakes. Call it before `runtime.aclose()`.
 - Limits are fixed:
   - 8 client-opened sessions per connection. P1 counts roots only; P2 also counts lazily resumed children.
   - 1 MiB inbound frame. On stdio, an oversized frame ends the connection.
@@ -446,28 +448,56 @@ Negotiated with `_meta.tantra = {"version": 1}` in both directions: the client s
 
 **Follow-up:** when `view` hides a child's `ChildCreated`, that child's lifecycle inputs to its parent no longer count as synthetic. They project as `user_message`, and the raw `[agent <id> …]` text reaches the client. Closing this means the projector must know which children `view` hid; this is P1 projection, so it needs its own decision.
 
-### Phase 3 — WebSocket transport · deps: P1 · —
+### Phase 3 — WebSocket transport · deps: P1 · ✅ DONE
 
 **Deliverables**
-- `tantra/acp/websocket.py`: `server.websocket(...)`, a native ASGI callable.
-  - Origin check and `bind` both run before `accept`.
-  - Text frames only.
-  - Close codes: `1009` oversize, `1013` stalled send after 10 s, `1008` expiry, `1012` shutdown.
-- Docs: how to mount it, auth, and close codes.
+- `tantra/acp/websocket.py`: `server.websocket(...)` returns `AcpWebSocket`, a native ASGI callable wrapping a `WebSocketTransport`.
+  - The Origin check runs first, then `bind`, then `accept`. A bad Origin never reaches app code.
+    - Exactly one `Origin` header, matched exactly against `allowed_origins`.
+    - A missing Origin needs `allow_missing_origin=True`. Node's native WebSocket sends none.
+    - A bare `str` or `"*"` is rejected at construction.
+  - Every denial sends `websocket.close` before `accept`. uvicorn turns that into HTTP 403; returning without a close would give HTTP 500.
+  - No subprotocol is selected, so clients must not offer one. Why: version negotiation happens in `initialize`, and Chrome fails the handshake when it offers subprotocols and none is selected.
+  - Text frames only; binary frames are ignored.
+  - Close codes (frozen after P3):
+
+    | Code | When |
+    |---|---|
+    | `1008` | Before accept: Origin denied or missing, or `bind` denied. After accept: `expires_at` reached. |
+    | `1009` | Inbound text frame over 1 MiB of UTF-8 (`MAX_FRAME`). |
+    | `1011` | `bind` failed unexpectedly, or the agent closed the transport: a stream or mirror failure, or the runtime stopping. |
+    | `1012` | `AcpWebSocket.aclose()`. uvicorn also sends `1012` on its own shutdown, before the lifespan shutdown. |
+    | `1013` | An outbound send didn't finish within 10 s. |
+  - **The endpoint sends the close frame after `connect()` returns.** `close(code)` only records the first code and wakes `receive()`. Why: `AcpConnection.run` cancels its spawned tasks during teardown, the agent's `transport.close()` among them, so a frame sent from inside `close()` would be lost and the client would see `1006`.
+- Docs: how to mount it, auth and Origin, close codes, and shutdown order.
 
 **Verify**
 - ASGI fixtures:
-  - allowed, wrong and missing Origin
-  - `bind` denial before `accept`
-  - close codes `1008`, `1009` and `1013`
+  - allowed, wrong, duplicate and missing Origin; `bind` is never called on an Origin denial
+  - `bind` denial before `accept`, including an expired `expires_at`
+  - close codes `1008`, `1009`, `1011`, `1012` and `1013`; the 1 MiB check counts bytes, not characters
   - binary frames are ignored
   - a disconnect leaves the turn running
 - uvicorn with a `websockets` client on our `Peer`, end to end. Both packages are already in `uv.lock` via Sarathi.
 - `just lint`, `just test`, `just stress` (zero PostgreSQL skips), `mkdocs build --strict`.
 
 **Checklist**
-- [ ] Transport, Origin, bind, limits
-- [ ] Tests + docs
+- [x] Transport, Origin, bind, limits
+- [x] Tests + docs
+
+**Verified:**
+- 1205 package tests passed with zero skips against an owned Compose PostgreSQL (`fsync=on`). `test_acp_websocket.py` (28) passed 5 of 5 repeat runs.
+- 157 stress tests passed.
+- `ruff check` and `ruff format --check` clean; `mkdocs build --strict` passes.
+- The Runtime-boundary diff is empty; `agent.py`, `jsonrpc.py` and the dependencies are unchanged.
+- One review: 1 major and 2 minor defects plus doc nits, all fixed, each with a test that fails when its fix is reverted. The major defect was reproduced on real uvicorn.
+
+**As built** (surprising details):
+- **uvicorn can close a socket by itself** (keepalive timeout, protocol error, its own `ws_max_size`). After that, every ASGI `send` raises `RuntimeError` rather than `OSError`. `send()` maps both to `ConnectionError`, and `finish()` suppresses both, so `aclose()` can't hang on a socket uvicorn already closed.
+- **The close frame is sent by `WebSocketTransport.finish()`**, under the send lock and within 10 s. The endpoint's `finally` always removes the connection from the live set.
+- **The `aclose()` check runs both before the Origin check and after `bind`.** A late handshake never runs `bind`, and a handshake that was inside `bind` when `aclose()` ran is still refused.
+- **Only the `accept` send treats `OSError` as a client disconnect.** An `OSError` from `connect()` is logged and closes with `1011`.
+- **`1013` is best effort.** A client that has truly stalled usually sees `1006`, because the close frame waits on the same backpressure. The endpoint still returns within about 2× the send limit.
 
 ### Phase 4 — `tantra-acp-client` (TS) · deps: P2, P3 · —
 

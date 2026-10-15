@@ -1,6 +1,6 @@
 # 018 — ACP v2–inspired interface and the `tantra` profile
 
-**Status:** P1–P4 ✅ DONE. P5–P8 not started.
+**Status:** P1–P5 ✅ DONE. P6–P8 not started.
 
 ## Goal
 
@@ -108,7 +108,8 @@ No published implementation does fencing, durable cursor replay, or lazy child d
 
   This needs no extra dependency beyond pydantic. Why: the SDKs are pre-release, disagree on the alpha, and would need workarounds for the shapes we use, and we diverge anyway.
 - **Reference schema:** alpha.8 `schema.json` and `schema.unstable.json`, vendored with the Apache-2.0 notice under `packages/tantra/tests/fixtures/acp_v2_alpha8/`. A stdlib-only structural test checks every emitted message against it. Allowlisted divergences document where we deviate; they don't forbid deviating.
-- **Own TS client** `tantra-acp-client` (user decision). It has no runtime dependencies, uses native WebSocket, and implements the profile. Transcript reducers stay with each app. Why: Sarathi and Osuite both need cursor, `commandId` and writer handling.
+- **Own TS client** `tantra-acp-client` (user decision). It has no runtime dependencies, uses native WebSocket, and implements the profile. Why: Sarathi and Osuite both need cursor, `commandId` and writer handling.
+- **The client ships the transcript reducer** (user decision, P5). It is pure and framework-free; apps keep only rendering and their own hooks. ~~Transcript reducers stay with each app~~: every app would rewrite the same generic reducer.
 - **WebSocket endpoint:** a native ASGI wrapper around our `Transport`. It authenticates and checks Origin before `accept`.
 - **IDs:**
   - Session IDs are canonical UUID strings.
@@ -539,7 +540,7 @@ Negotiated with `_meta.tantra = {"version": 1}` in both directions: the client s
 - `listSessions` sends no `cwd` filter. Why: Sarathi's existing sessions have no `acp_cwd`.
 - Outbound frames over 1 MiB are rejected locally with `too_large`. Why: the server would close with `1009`, and a held retry would loop.
 - Permission and elicitation requests are surfaced with a `respond()` function and an abort signal.
-- Transcript reduction is left to the app.
+- ~~Transcript reduction is left to the app.~~ P5 adds the reducer to the client (user decision).
 - Deviations:
   - ~~`identity`~~: no persistence, and `submittedBy` comes from server auth.
   - ~~`onWriter`, `onQueue`~~: folded into `onUpdate`.
@@ -595,66 +596,100 @@ Negotiated with `_meta.tantra = {"version": 1}` in both directions: the client s
 
 **Follow-up:** a server whose stream fails right after go-live (`1011` from `agent.py:829`) makes the client reconnect about once a second indefinitely, with no `onError`, because every cycle reaches `open`.
 
-### Phase 5 — Sarathi on the new interface · deps: P4 · —
+### Phase 5 — Sarathi on the new interface · deps: P4 · ✅ DONE
 
 Deploy backend and UI together. Old pages need a refresh.
+
+**Client: transcript reducer** (user decision; additive, and `client.ts` / `protocol.ts` stay unchanged)
+- New `packages/tantra-acp-client/src/transcript.ts`, exported from `index.ts`. Pure, immutable and framework-free; it returns the same object when nothing changes.
+- **`Transcript`:**
+  - **`sessions`:** a `SessionView` per session id: `entries`, `state`, `title`, `updatedAt`, `configOptions`, `queue`, `writerReason`.
+  - **`roster`:** `{parentId, title, state}` per child id. The parent is the session id the `subagent_update` arrived on, so grandchildren are covered.
+  - **`requests`:** pending requests per session, keyed by `askId`.
+- **Entries:** one ordered list per session, upserted by `(kind, id)`.
+  - `user`: the raw content blocks. Apps map `resource_link`s themselves.
+  - `agent` / `thought`: chunks append; the full update replaces the text and marks it final.
+  - `tool`: fields merged. Content chunks before completion are progress; `rawOutput` is the result.
+  - `message`: a `session_message`.
+  - `status`: only for a **cursored** `state_update idle` with `cancelled`, `_tantra_interrupted` or `error`. Why: the resume snapshot `state_update` has no cursor and would otherwise add a duplicate.
+- **Functions:**
+  - `empty`, `apply(t, sessionId, update)`, `reset`
+  - `addRequest`, `removeRequest`
+  - `askOf(request)`: approval, choice or free_text, plus `respond`
+  - selectors: `descendants`, `treeRunning`, `pendingRequest`
+- `usage_update` and compaction updates are ignored.
+- **Golden fixture:** `packages/tantra/tests/test_acp_transcript_fixture.py` (tests only).
+  - It scripts one session through `AcpServer` with a `FakeProvider`, covering text, reasoning, tool progress, all three ask kinds, spawn, finish, waking the idle child, and cancel.
+  - It records the live stream, a replay from `start`, a mid-cursor replay and the request params into `packages/tantra-acp-client/test/fixtures/session.json`.
+  - UUIDs are normalized and timestamps stripped. `TANTRA_UPDATE_FIXTURES=1` rewrites the file.
 
 **Backend**
 - `api/acp.py` replaces `api/ws.py`:
   - `scope` → `{"user": id, "kind": "root"}`.
-  - `policy`: ownership, the `write` capability, and the existing ask/kind/permission-argument checks.
-  - `encode_prompt` maps text plus `resource_link` `file://` URIs under `UPLOAD_DIR/<user>` to the attachment markers. `decode_input` reverses it.
-  - Mounted as `WebSocketRoute("/api/acp", ...)`.
-- User-scoped tickets:
+  - **`policy`:**
+    - Ownership of both root and actor.
+    - `resume` needs either capability. Every other operation needs `write` and the root actor.
+    - `answer` keeps the existing ask, kind and permission-argument checks. The pre-issue check (`response=None`) only checks that the ask belongs to the root.
+  - **`encode_prompt` / `decode_input`:**
+    - Text plus `resource_link` `file://` URIs under `UPLOAD_DIR/<user>` map to and from the attachment markers.
+    - An escape, a non-`file` URI, a newline in a name, or any other block type → `ValueError`.
+  - Mounted as `WebSocketRoute("/api/acp", ...)`. The lifespan calls `aclose()` before `close_resources`.
+- **User-scoped tickets:**
   - audience `sarathi-acp`
   - `read|write` capability
-  - signed login expiry, valid for `min(now+30s, login expiry)`
+  - signed login expiry; the ticket is valid for `min(now+30s, login expiry)`
   - issued by `POST /api/acp/ticket` with `no-store`
-- Remove:
-  - `/api/sessions` (list and create)
-  - `PATCH /api/sessions/{id}`
-  - the socket-ticket endpoint
-  - `/api/meta/ws-types`
-  - `/api/sessions/{root}/actors`
-  - `/api/models`, if nothing still uses it
-  - `SessionInput` and `HeaderNotice`
+  - **The UI always requests `write`**; the read-only view is `resume(mode: read)`. `read` tickets serve observers.
+- **Revalidation is dropped:** `AcpAuth` has no `revalidate`. The socket closes at login expiry, and Sarathi has no user-deletion route.
+- **Telemetry:** exclude `api/acp` (it was `api/ws`). Why: the ticket is in the query string.
+- **Remove:**
+  - `/api/sessions` (list and create), `PATCH /api/sessions/{id}`, the socket-ticket endpoint
+  - `/api/meta/ws-types`, `/api/sessions/{root}/actors`, `/api/models`
+  - `SessionInput`, `HeaderNotice` and the other session schemas
+- **Tests:** `test_acp.py` replaces `test_ws.py`, `test_sessions.py` and `test_meta.py`. Sarathi backend tests run from `apps/sarathi/backend` on SQLite plus `MemoryStore`, not the root `just test`.
 
 **UI**
-- Dependencies: depend on the local `tantra-acp-client`; remove `tantra-session-client`. Keep the repo-root Docker/Compose context for the local package.
-- `state.ts` becomes an upsert reducer keyed by session and `(entityType, id)`. It tracks:
-  - messages, thoughts, tool calls, session messages
-  - state, the subagent roster
-  - queue, writer state, pending requests
-- Delete `transport.ts`, the old outbox and cursor code, and actor polling.
-- Components:
+- **Dependencies:** depend on the local `tantra-acp-client` and remove `tantra-session-client`. Keep the repo-root Docker/Compose context for the local package.
+- **One ACP connection per tab:**
+  - `chat/layout.tsx` provides one client and one zustand store keyed by session.
+  - `state.ts` is a thin binding over the client's reducer, plus UI-only state.
+- **Session lifecycle:**
+  - Leaving a page closes its session. Coming back resets its entry and replays from `start`. Why: it stays under the 8-session limit, and cursor replay only applies to open sessions.
+  - New chat: `newSession`, then `prompt`, then navigate. The page skips `resume` for a session that is already open.
+- **URLs** use canonical UUIDs; `/chat/<hex>` redirects.
+- **Delete:** `transport.ts`, the old outbox and cursor code, `pendingFirstMessage`, actor polling, and the Retry banner (the hold rule replaces it).
+- **Components:**
   - **Reclaim control** calls `claimWriter`.
-  - **Read-only view** uses `mode: read`.
+  - **Read-only view** uses `mode: read`. Ask details reach only the writer, so readers see "Awaiting input", and answered asks leave no card.
   - **Child drawer** calls resume/close on the child.
   - **Queue strip** shows the queue.
   - **Model picker** uses `configOptions`.
-  - **Sidebar** uses list/new.
+  - **Sidebar** uses list (every page) and new. It refreshes on `session_info_update`.
 - Run `yarn typegen` afterwards.
 
 **E2E and docs**
-- `e2e/session-client.mjs` becomes `e2e/acp-client.mjs`, built on `tantra-acp-client`.
+- `e2e/session-client.mjs` becomes `e2e/acp-client.mjs`, built on `tantra-acp-client`. It passes `ws` through `webSocketFactory`, because native WebSocket can't set Origin.
+- The gate's `drop-next-send` now exercises the server's retry: same `messageId`, one `InputQueued`.
 - Update the runbooks and the README's "Session transport" section.
 
 **Verify**
-- Backend:
+- **Client:**
+  - **Replay equals live:** the golden live stream and the replay from `start` reduce to the same transcript.
+  - **Cursor resume:** the live prefix plus the mid-cursor replay equals the full live stream.
+  - **Profile fixtures:** queue, writer `claimed`/`replaced`/`lost`, and the mirror.
+  - **Asks:** all three kinds through `askOf` and `respond`.
+  - **Subagents:** two-way subagent messages, and an idle child woken again.
+  - **Duplicates:** no duplicate status entry from the snapshot; a duplicate update is a no-op.
+  - **Checks:** the consumer check passes, and the fixture test is deterministic over 5 runs.
+- **Backend:**
   - tickets: purpose, expiry, tampering, read/write
   - the policy matrix
   - attachment-path escape
   - encode/decode round-trip
-  - ACP over ASGI
-- UI `yarn test`: the reducer, fed recorded fixtures. Covers:
-  - replay equals live
-  - resume from a cursor
-  - the queue
-  - writer loss, then reclaim
-  - all three ask kinds
-  - two-way subagent messages
-  - an idle child woken again
-- Durable E2E across two backends:
+  - ACP over ASGI: list, new, prompt, title, model, `model_busy`, delete
+  - the ported title tests
+- **UI `yarn test`:** the store binding, Sarathi's helpers, and the golden fixture end to end.
+- **Durable E2E across two backends:**
   - observing across backends
   - fencing and reclaim
   - answering an ask after a takeover
@@ -664,18 +699,66 @@ Deploy backend and UI together. Old pages need a refresh.
   - title and model updates
   - delete
   - recovering a lost prompt response
-- Browser through Nginx:
+  - the ported approval, typed asks, child and document scenarios
+- **Browser through Nginx:**
   - the full flow
   - read-only view
   - two tabs
   - reconnect after a backend restart
-- `just lint`, `just test`, Sarathi backend tests, `yarn lint`, `yarn tsc --noEmit`, `yarn build`, clean Docker builds.
+- **Checks:**
+  - `just lint`, `just test`, Sarathi backend tests
+  - `yarn lint`, `yarn tsc --noEmit`, `yarn build`
+  - the client's npm checks
+  - clean Docker builds
+  - no diff under `packages/tantra/src`, `client.ts` or `protocol.ts`
 
 **Checklist**
-- [ ] Backend wiring, tickets, route removal
-- [ ] UI reducer + components
-- [ ] E2E + browser
-- [ ] Docs + builds
+- [x] Client transcript reducer + golden fixture
+- [x] Backend wiring, tickets, route removal
+- [x] UI reducer + components
+- [x] E2E + browser
+- [x] Docs + builds
+
+**Verified:**
+- **Client:** lint, typecheck and the consumer check are clean; `npm test` passed 61/61 in each of 3 runs. The golden fixture test passed 5 of 5 runs. `test_acp_client_integration.py` passed 3 of 3 runs on owned PostgreSQL.
+- **tantra:** 1207 passed with zero skips; ruff clean; `mkdocs build --strict` passes. Nothing under `packages/tantra/src` or in `protocol.ts` changed.
+- **Sarathi backend:** 115 passed; ruff clean.
+- **UI:** `yarn lint`, `tsc --noEmit` and `yarn build` are clean; `yarn test` passed 10/10. A second `yarn typegen` gives identical output.
+- **Docker:** clean `--no-cache` builds. `e2e/acp-client.mjs` passed all 13 scenarios in each of 2 runs against two backends behind Nginx.
+- **Browser (through Nginx):**
+  - **Full flow:** signup, new chat, approval, subagent drawer, model switch, title.
+  - **Two tabs:** fencing, ask handoff, reclaim both ways.
+  - **Read-only:** the read-only view, reached through the hex URL redirect.
+  - **Reconnect:** after restarting both backends, then reclaim and prompt.
+- **Review:** one round, finding 6 minor defects and 5 nits. The fixes include every minor and three nits; each has a regression test where it can be tested.
+
+**As built** (surprising details):
+- **`client.ts` changed** (behavior only; the API is unchanged). Found by the P5 review:
+  - `close()` always drops the session locally and sends `session/close` only while open. Before, a chat left during a reconnect was resumed again and leaked against the 8-session limit.
+  - `resumeAll` closes sessions dropped mid-pass.
+  - A failed `resume()` only cleans up the entry it created, so a stale failure no longer drops a newer resume.
+- **Reducer:**
+  - `reset` keeps the roster, because the mirror only sends on change.
+  - Thought blocks are joined with a blank line.
+  - `Ask` carries `askId`.
+  - The ACP tool `kind` is stored as `toolKind`.
+  - Mirror frames sit in the fixture's own `mirror` key, because their timing relative to the journal stream is racy.
+- **A connection does not receive its own `config_option_update`:** `session.model` is updated synchronously. The model picker applies the `setModel` result.
+- **Title and model pushes need a coordinator.** The Sarathi tests mount a second endpoint over a coordinated runtime proxy.
+- **Attachments:**
+  - `encode_prompt` resolves strictly (missing files and symlink loops are rejected).
+  - It rejects ` path=` in names or paths, and rejects marker-shaped lines anywhere in the text.
+  - Why: `decode_input` splits on the last ` path=`, so either one could forge a link to another user's file.
+- **A `read` ticket can still call `session/new`:** `scope` can't see which operation called it. The empty session can't be prompted, and with the profile's default `mode: write` the claim fails and the session is deleted.
+- **The `api/acp` tracing exclusion is a substring match,** so it also untraces `POST /api/acp/ticket`.
+- **The E2E override lists two models** (`e2e-model,e2e-other`), because `set_config_option` only accepts configured models.
+- **Owner-death E2E** uses `kill` (SIGKILL), so lease expiry is exercised.
+- **UI:**
+  - `hooks.ts` is deleted.
+  - `useChat` lives in `client.ts`, because Next.js type-checks layout exports.
+  - A session is ready only while it is open in the client state, so returning to a chat shows the loader rather than stale entries.
+
+**Follow-up:** a user `resume()` that succeeds after `close()` was called for the same session on an open connection leaves it open on the server and untracked on the client. Closing it from the success path could close a newer resume of the same id.
 
 ### Phase 6 — Remove the 017 transport · deps: P5 · —
 
@@ -773,7 +856,7 @@ Deploy backend and UI together. Old pages need a refresh.
   - After P1: hooks, projection tables, divergences, error codes, message-ID rules.
   - After P2: the profile wire.
   - After P3: the `websocket()` signature and close codes.
-  - After P4: the client API.
+  - After P4: the client API. P5 adds the transcript reducer exports; nothing existing changes.
   - Changing any of these means updating this spec first.
 - **Reference schema bumps:** a separate change. Re-vendor the schema, update the wire models and the divergence allowlist, then rerun P1, P2 and P4 verification.
 - **No third-party ACP packages** in Python or TS.

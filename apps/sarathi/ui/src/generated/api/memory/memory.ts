@@ -28,8 +28,8 @@ import type {
   MemoryOut
 } from '../../models';
 
-import { customInstance } from '../../../lib/apiClient';
-import type { ErrorType } from '../../../lib/apiClient';
+import { customInstance } from '../../../lib/apiClient.ts';
+import type { ErrorType } from '../../../lib/apiClient.ts';
 
 
 type SecondParameter<T extends (...args: never) => unknown> = Parameters<T>[1];

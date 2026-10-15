@@ -4,28 +4,27 @@ import { useEffect, useRef, useState } from "react";
 import { Bot, ChevronRight, FileText, Globe, Loader2, Search, Wrench } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import {
+  askOf,
+  type AgentRequest,
+  type Entry,
+  type MessageEntry,
+  type RosterEntry,
+  type StatusEntry,
+  type ToolEntry,
+  type UserEntry,
+} from "tantra-acp-client";
 import { useStore } from "zustand";
-import type { AskResponse } from "tantra-session-client";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import type { ActorStatusOut } from "@/generated/models";
-import {
-  actorStatusLabel,
-  isNearBottom,
-  type AskItem,
-  type Banner,
-  type ChatStore,
-  type TextItem,
-  type ToolItem,
-  type TranscriptItem,
-  type Turn,
-} from "../state";
+import { useChat } from "../client";
+import { actorStatusLabel, attachmentsOf, isNearBottom, isReady, textOf } from "../state";
 
-type AskResponder = (askId: string, response: AskResponse) => void;
+type Opener = (actorId: string) => void;
 
 const MARKDOWN_CLASS = [
   "text-sm leading-relaxed [&>*+*]:mt-3",
@@ -51,8 +50,8 @@ const formatResult = (result: unknown): string => {
   return text.length > RESULT_LIMIT ? `${text.slice(0, RESULT_LIMIT)}\n… truncated` : text;
 };
 
-const summarizeArgs = (args: Record<string, unknown>): string => {
-  const values = Object.values(args);
+const summarizeArgs = (args: unknown): string => {
+  const values = typeof args === "object" && args !== null && !Array.isArray(args) ? Object.values(args) : [];
   if (values.length === 0) return "";
   const text = typeof values[0] === "string" ? values[0] : (JSON.stringify(values[0]) ?? "");
   return text.length > SUMMARY_LIMIT ? `${text.slice(0, SUMMARY_LIMIT)}…` : text;
@@ -66,98 +65,81 @@ const formatBody = (body: string): string => {
   }
 };
 
-const itemKey = (item: TranscriptItem, index: number) => `${item.kind}-${item.sampleId}-${index}`;
-
-function ThinkingBlock({ item }: { item: TextItem }) {
-  const [open, setOpen] = useState(!item.final);
+function ThinkingBlock({ text, final }: { text: string; final: boolean }) {
+  const [open, setOpen] = useState(!final);
 
   useEffect(() => {
-    setOpen(!item.final);
-  }, [item.final]);
+    setOpen(!final);
+  }, [final]);
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger
         className={cn(
           "text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs",
-          !item.final && "animate-pulse",
+          !final && "animate-pulse",
         )}
       >
         <ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} />
         Thinking
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <p className="text-muted-foreground border-border mt-2 border-l pl-3 text-xs whitespace-pre-wrap">
-          {item.content}
-        </p>
+        <p className="text-muted-foreground border-border mt-2 border-l pl-3 text-xs whitespace-pre-wrap">{text}</p>
       </CollapsibleContent>
     </Collapsible>
   );
 }
 
-function TextBlock({ item }: { item: TextItem }) {
+function TextBlock({ text, final }: { text: string; final: boolean }) {
   return (
     <div className={MARKDOWN_CLASS}>
-      <Markdown remarkPlugins={[remarkGfm]}>{item.content}</Markdown>
-      {!item.final && <span className="bg-foreground ml-0.5 inline-block h-4 w-1.5 animate-pulse align-text-bottom" />}
+      <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>
+      {!final && <span className="bg-foreground ml-0.5 inline-block h-4 w-1.5 animate-pulse align-text-bottom" />}
     </div>
   );
 }
 
-function ChildButton({ actor, onOpen }: { actor: ActorStatusOut; onOpen: (agentId: string) => void }) {
-  const running = actor.state === "queued" || actor.state === "running";
-
+function ChildButton({ actorId, actor, onOpen }: { actorId: string; actor: RosterEntry; onOpen: Opener }) {
   return (
-    <Button variant="outline" size="sm" className="max-w-full" onClick={() => onOpen(actor.agent_id)}>
+    <Button variant="outline" size="sm" className="max-w-full" onClick={() => onOpen(actorId)}>
       <Bot />
-      <span className="truncate">{actor.name}</span>
+      <span className="truncate">{actor.title ?? "Subagent"}</span>
       <span className="text-muted-foreground truncate font-normal">{actorStatusLabel(actor.state)}</span>
-      {running && <Loader2 className="animate-spin" />}
+      {actor.state?.state !== "idle" && <Loader2 className="animate-spin" />}
     </Button>
   );
 }
 
-function ToolChip({
-  item,
-  actor,
-  onOpen,
-}: {
-  item: ToolItem;
-  actor?: ActorStatusOut;
-  onOpen?: (agentId: string) => void;
-}) {
-  const [open, setOpen] = useState(!item.final);
+function ToolChip({ entry, live }: { entry: ToolEntry; live: boolean }) {
+  const final = entry.status === "completed" || entry.status === "failed" || !live;
+  const [open, setOpen] = useState(!final);
 
   useEffect(() => {
-    setOpen(!item.final);
-  }, [item.final]);
+    setOpen(!final);
+  }, [final]);
 
-  const Icon = TOOL_ICONS[item.name as keyof typeof TOOL_ICONS] ?? Wrench;
-  const summary = summarizeArgs(item.args);
-  const result = formatResult(item.result);
-
-  if (item.child && actor) {
-    if (actor.state === "queued" || actor.state === "running") return null;
-    if (onOpen) return <ChildButton actor={actor} onOpen={onOpen} />;
-  }
+  const name = entry.name ?? entry.title ?? "tool";
+  const Icon = TOOL_ICONS[name as keyof typeof TOOL_ICONS] ?? Wrench;
+  const summary = summarizeArgs(entry.rawInput);
+  const result = formatResult(entry.rawOutput);
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger
         className={cn(
           "text-muted-foreground hover:text-foreground flex w-full items-center gap-1.5 text-xs",
-          item.isError && "text-destructive",
+          entry.status === "failed" && "text-destructive",
         )}
       >
         <ChevronRight className={cn("size-3 shrink-0 transition-transform", open && "rotate-90")} />
         <Icon className="size-3 shrink-0" />
-        <span className="font-medium">{item.name}</span>
+        <span className="font-medium">{name}</span>
         {summary.length > 0 && <span className="truncate">{summary}</span>}
-        {!item.final && <Loader2 className="size-3 shrink-0 animate-spin" />}
+        {!final && <Loader2 className="size-3 shrink-0 animate-spin" />}
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div className="border-border mt-2 flex flex-col gap-2 border-l pl-3">
-          {item.progress.map((line, index) => (
+          {entry.progress.map((line, index) => (
             <p key={`${index}-${line}`} className="text-muted-foreground text-xs">
               {line}
             </p>
@@ -169,35 +151,95 @@ function ToolChip({
   );
 }
 
-function AskCard({
-  item,
-  banner,
-  onAskResponse,
+function MessageChip({
+  entry,
+  sessionId,
+  roster,
+  onOpen,
 }: {
-  item: AskItem;
-  banner: Banner | null;
-  onAskResponse?: AskResponder;
+  entry: MessageEntry;
+  sessionId: string;
+  roster: Record<string, RosterEntry>;
+  onOpen?: Opener;
 }) {
-  const [sent, setSent] = useState(false);
+  const [open, setOpen] = useState(false);
+  const outgoing = entry.sender === sessionId;
+  const peer = outgoing ? entry.recipient : entry.sender;
+  const actor = peer === null ? undefined : roster[peer];
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <div className="flex flex-wrap items-center gap-2">
+        {peer !== null && actor && onOpen ? (
+          <ChildButton actorId={peer} actor={actor} onOpen={onOpen} />
+        ) : (
+          <span className="text-muted-foreground flex items-center gap-1 text-xs">
+            <Bot className="size-3" />
+            Parent
+          </span>
+        )}
+        <CollapsibleTrigger className="text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs">
+          <ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} />
+          {outgoing ? "Sent" : entry.finished ? "Finished" : "Received"}
+        </CollapsibleTrigger>
+      </div>
+      <CollapsibleContent>
+        <p className="text-muted-foreground border-border mt-2 border-l pl-3 text-xs whitespace-pre-wrap">
+          {entry.text}
+        </p>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+function StatusLine({ entry }: { entry: StatusEntry }) {
+  if (entry.stopReason === "cancelled") return <p className="text-muted-foreground text-xs">Stopped.</p>;
+  if (entry.stopReason === "_tantra_interrupted") return <p className="text-muted-foreground text-xs">Interrupted.</p>;
+  return (
+    <div className="border-destructive/50 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm">
+      {entry.error?.message ?? "The turn failed."}
+    </div>
+  );
+}
+
+function UserMessage({ entry }: { entry: UserEntry }) {
+  const text = textOf(entry.content);
+  const attachments = attachmentsOf(entry.content);
+  if (text.length === 0 && attachments.length === 0) return null;
+
+  return (
+    <div className="flex justify-end">
+      <div className="bg-secondary text-secondary-foreground flex max-w-[80%] flex-col gap-2 rounded-2xl px-4 py-2 text-sm">
+        {attachments.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {attachments.map((attachment) => (
+              <span key={attachment.path} className="bg-muted flex items-center gap-1 rounded-md px-2 py-0.5 text-xs">
+                <FileText className="size-3 shrink-0" />
+                {attachment.name}
+              </span>
+            ))}
+          </div>
+        )}
+        {text.length > 0 && <span className="whitespace-pre-wrap">{text}</span>}
+      </div>
+    </div>
+  );
+}
+
+function AskCard({ request, onAnswer }: { request: AgentRequest; onAnswer: () => void }) {
   const [text, setText] = useState("");
+  const ask = askOf(request);
+  const body = ask.body === null ? "" : formatBody(ask.body);
 
-  useEffect(() => {
-    if (banner !== null) setSent(false);
-  }, [banner]);
-
-  const respond = (response: AskResponse) => {
-    if (!onAskResponse) return;
-    setSent(true);
-    onAskResponse(item.askId, response);
+  const answer = (respond: () => void) => {
+    respond();
+    onAnswer();
   };
-
-  const body = formatBody(item.body);
-  const requestKind = item.request.kind ?? "approval";
 
   return (
     <Card size="sm" className="max-w-md">
       <CardHeader>
-        <CardTitle>{item.title}</CardTitle>
+        <CardTitle>{ask.title}</CardTitle>
       </CardHeader>
       {body.length > 0 && (
         <CardContent>
@@ -205,174 +247,95 @@ function AskCard({
         </CardContent>
       )}
       <CardFooter className="gap-2">
-        {item.status === "pending" && onAskResponse && requestKind === "approval" ? (
+        {ask.kind === "approval" ? (
           <>
-            <Button size="sm" disabled={sent} onClick={() => respond({ kind: "approval", allow: true })}>
+            <Button size="sm" onClick={() => answer(() => ask.respond(true))}>
               Approve
             </Button>
-            <Button
-              size="sm"
-              variant="destructive"
-              disabled={sent}
-              onClick={() => respond({ kind: "approval", allow: false })}
-            >
+            <Button size="sm" variant="destructive" onClick={() => answer(() => ask.respond(false))}>
               Deny
             </Button>
           </>
-        ) : item.status === "pending" && onAskResponse && requestKind === "choice" ? (
-          item.request.kind === "choice" ? (
-            item.request.options?.map((option) => (
-              <Button
-                key={option}
-                size="sm"
-                variant="outline"
-                disabled={sent}
-                onClick={() => respond({ kind: "choice", selected: option })}
-              >
-                {option}
-              </Button>
-            ))
-          ) : null
-        ) : item.status === "pending" && onAskResponse && requestKind === "free_text" ? (
+        ) : ask.kind === "choice" ? (
+          ask.options.map((option) => (
+            <Button key={option} size="sm" variant="outline" onClick={() => answer(() => ask.respond(option))}>
+              {option}
+            </Button>
+          ))
+        ) : (
           <>
-            <Input value={text} disabled={sent} onChange={(event) => setText(event.target.value)} />
+            <Input value={text} onChange={(event) => setText(event.target.value)} />
             <Button
               size="sm"
-              disabled={sent || text.trim().length === 0}
-              onClick={() => respond({ kind: "free_text", text: text.trim() })}
+              disabled={text.trim().length === 0}
+              onClick={() => answer(() => ask.respond(text.trim()))}
             >
               Submit
             </Button>
           </>
-        ) : (
-          <p className="text-muted-foreground text-xs">
-            {item.status === "pending"
-              ? "Awaiting response"
-              : item.status === "expired"
-                ? "Expired"
-                : requestKind !== "approval"
-                  ? "Answered"
-                  : item.allow === false
-                    ? "Denied"
-                    : "Approved"}
-          </p>
         )}
       </CardFooter>
     </Card>
   );
 }
 
-function Item({
-  item,
-  banner,
-  onAskResponse,
-  actors,
+function EntryView({
+  entry,
+  live,
+  sessionId,
+  roster,
   onOpen,
 }: {
-  item: TranscriptItem;
-  banner: Banner | null;
-  onAskResponse?: AskResponder;
-  actors: ActorStatusOut[];
-  onOpen?: (agentId: string) => void;
+  entry: Entry;
+  live: boolean;
+  sessionId: string;
+  roster: Record<string, RosterEntry>;
+  onOpen?: Opener;
 }) {
-  switch (item.kind) {
-    case "thinking":
-      return <ThinkingBlock item={item} />;
-    case "text":
-      return <TextBlock item={item} />;
+  switch (entry.kind) {
+    case "user":
+      return <UserMessage entry={entry} />;
+    case "thought":
+      return entry.text.length > 0 && <ThinkingBlock text={entry.text} final={entry.final || !live} />;
+    case "agent":
+      return entry.text.length > 0 && <TextBlock text={entry.text} final={entry.final || !live} />;
     case "tool":
-      return (
-        <ToolChip
-          item={item}
-          actor={item.child ? actors.find((actor) => actor.agent_id === item.child?.agent_id) : undefined}
-          onOpen={onOpen}
-        />
-      );
-    case "ask":
-      return <AskCard item={item} banner={banner} onAskResponse={onAskResponse} />;
+      return <ToolChip entry={entry} live={live} />;
+    case "message":
+      return <MessageChip entry={entry} sessionId={sessionId} roster={roster} onOpen={onOpen} />;
+    case "status":
+      return <StatusLine entry={entry} />;
   }
 }
 
-function TurnBlock({
-  turn,
-  banner,
-  onAskResponse,
-  actors,
-  onOpen,
-}: {
-  turn: Turn;
-  banner: Banner | null;
-  onAskResponse?: AskResponder;
-  actors: ActorStatusOut[];
-  onOpen?: (agentId: string) => void;
-}) {
-  const empty = turn.items.every((item) => item.kind !== "tool" && item.kind !== "ask" && item.content.length === 0);
-
-  return (
-    <div className="flex flex-col gap-3">
-      {!turn.synthetic && (turn.input.length > 0 || turn.attachments.length > 0) && (
-        <div className="flex justify-end">
-          <div className="bg-secondary text-secondary-foreground flex max-w-[80%] flex-col gap-2 rounded-2xl px-4 py-2 text-sm">
-            {turn.attachments.length > 0 && (
-              <div className="flex flex-wrap gap-1.5">
-                {turn.attachments.map((attachment) => (
-                  <span
-                    key={attachment.path}
-                    className="bg-muted flex items-center gap-1 rounded-md px-2 py-0.5 text-xs"
-                  >
-                    <FileText className="size-3 shrink-0" />
-                    {attachment.name}
-                  </span>
-                ))}
-              </div>
-            )}
-            {turn.input.length > 0 && <span className="whitespace-pre-wrap">{turn.input}</span>}
-          </div>
-        </div>
-      )}
-
-      {turn.items.map((item, index) => (
-        <div key={itemKey(item, index)}>
-          <Item item={item} banner={banner} onAskResponse={onAskResponse} actors={actors} onOpen={onOpen} />
-        </div>
-      ))}
-
-      {turn.status === "running" && empty && <p className="text-muted-foreground animate-pulse text-sm">Thinking…</p>}
-      {turn.status === "cancelled" && <p className="text-muted-foreground text-xs">Stopped.</p>}
-      {turn.status === "interrupted" && <p className="text-muted-foreground text-xs">Interrupted.</p>}
-      {turn.status === "failed" && (
-        <div className="border-destructive/50 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-sm">
-          {turn.error ?? "The turn failed."}
-        </div>
-      )}
-    </div>
-  );
-}
-
-export function JournalTranscript({
-  turns,
-  ready,
-  banner = null,
-  onAskResponse,
-  actors = [],
+export function Transcript({
+  sessionId,
+  readonly = false,
   onOpen,
   emptyText,
 }: {
-  turns: Turn[];
-  ready: boolean;
-  banner?: Banner | null;
-  onAskResponse?: AskResponder;
-  actors?: ActorStatusOut[];
-  onOpen?: (agentId: string) => void;
+  sessionId: string;
+  readonly?: boolean;
+  onOpen?: Opener;
   emptyText: string;
 }) {
+  const { store } = useChat();
+  const view = useStore(store, (state) => state.transcript.sessions[sessionId]);
+  const requests = useStore(store, (state) => state.transcript.requests[sessionId]);
+  const roster = useStore(store, (state) => state.transcript.roster);
+  const ready = useStore(store, (state) => isReady(state, sessionId));
+  const writer = useStore(store, (state) => state.client.sessions[sessionId]?.writer ?? false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(true);
+  const entries = ready ? (view?.entries ?? []) : [];
+  const live = !!view?.state && view.state.state !== "idle";
+  const thinking = view?.state?.state === "running" && entries.at(-1)?.kind === "user";
+  const awaiting = ready && (readonly || !writer) && view?.state?.ask?.state === "pending";
 
   useEffect(() => {
     const element = scrollRef.current;
     if (element && followingRef.current) element.scrollTop = element.scrollHeight;
-  }, [turns]);
+  }, [view, requests]);
 
   return (
     <div
@@ -383,46 +346,22 @@ export function JournalTranscript({
         followingRef.current = isNearBottom(element.scrollHeight, element.scrollTop, element.clientHeight);
       }}
     >
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-8 px-6 py-8">
-        {ready && turns.length === 0 && <p className="text-muted-foreground py-16 text-center text-sm">{emptyText}</p>}
+      <div className="mx-auto flex w-full max-w-3xl flex-col gap-3 px-6 py-8">
+        {ready && entries.length === 0 && (
+          <p className="text-muted-foreground py-16 text-center text-sm">{emptyText}</p>
+        )}
         {!ready && <Loader2 className="text-muted-foreground mx-auto my-16 size-4 animate-spin" />}
-        {turns.map((turn) => (
-          <TurnBlock
-            key={turn.id}
-            turn={turn}
-            banner={banner}
-            onAskResponse={onAskResponse}
-            actors={actors}
-            onOpen={onOpen}
-          />
+        {entries.map((entry, index) => (
+          <div key={`${entry.kind}-${entry.id}`} className={cn(entry.kind === "user" && index > 0 && "mt-5")}>
+            <EntryView entry={entry} live={live} sessionId={sessionId} roster={roster} onOpen={onOpen} />
+          </div>
         ))}
+        {thinking && <p className="text-muted-foreground animate-pulse text-sm">Thinking…</p>}
+        {Object.entries(ready ? (requests ?? {}) : {}).map(([askId, request]) => (
+          <AskCard key={askId} request={request} onAnswer={() => store.getState().removeRequest(sessionId, askId)} />
+        ))}
+        {awaiting && <p className="text-muted-foreground text-xs">Awaiting input</p>}
       </div>
     </div>
-  );
-}
-
-export function Transcript({
-  store,
-  onAskResponse,
-  onOpen,
-}: {
-  store: ChatStore;
-  onAskResponse?: AskResponder;
-  onOpen: (agentId: string) => void;
-}) {
-  const turns = useStore(store, (state) => state.turns);
-  const banner = useStore(store, (state) => state.banner);
-  const ready = useStore(store, (state) => state.ready);
-  const actors = useStore(store, (state) => state.actors);
-  return (
-    <JournalTranscript
-      turns={turns}
-      ready={ready}
-      banner={banner}
-      onAskResponse={onAskResponse}
-      actors={actors}
-      onOpen={onOpen}
-      emptyText="Send a message to get started"
-    />
   );
 }

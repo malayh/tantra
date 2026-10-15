@@ -1,33 +1,37 @@
 "use client";
 
 import { Bot, Loader2 } from "lucide-react";
+import { descendants, type RosterEntry } from "tantra-acp-client";
+import { useStore } from "zustand";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import type { ActorStatusOut } from "@/generated/models";
-import { actorStatusLabel, type JournalState } from "../state";
-import { JournalTranscript } from "./transcript";
+import { useChat } from "../client";
+import { actorStatusLabel } from "../state";
+import { Transcript } from "./transcript";
 
-const isRunning = (actor: ActorStatusOut) => actor.state === "queued" || actor.state === "running";
+const isRunning = (actor: RosterEntry) => actor.state?.state !== "idle";
 
 function ActorButton({
+  actorId,
   actor,
   selected,
   onOpen,
 }: {
-  actor: ActorStatusOut;
+  actorId: string;
+  actor: RosterEntry;
   selected: boolean;
-  onOpen: (agentId: string) => void;
+  onOpen: (actorId: string) => void;
 }) {
   return (
     <Button
       variant={selected ? "secondary" : "outline"}
       size="sm"
       className="max-w-full"
-      onClick={() => onOpen(actor.agent_id)}
+      onClick={() => onOpen(actorId)}
     >
       <Bot />
-      <span className="truncate">{actor.name}</span>
+      <span className="truncate">{actor.title ?? "Subagent"}</span>
       <span className="text-muted-foreground truncate font-normal">{actorStatusLabel(actor.state)}</span>
       {isRunning(actor) && <Loader2 className="animate-spin" />}
     </Button>
@@ -35,71 +39,67 @@ function ActorButton({
 }
 
 export function ActorStrip({
-  actors,
+  rootId,
   selected,
   onOpen,
 }: {
-  actors: ActorStatusOut[];
+  rootId: string;
   selected: string | null;
-  onOpen: (agentId: string) => void;
+  onOpen: (actorId: string) => void;
 }) {
-  const descendants = actors.filter((actor) => actor.parent_id !== null && isRunning(actor));
-  if (descendants.length === 0) return null;
+  const transcript = useStore(useChat().store, (state) => state.transcript);
+  const running = descendants(transcript, rootId).filter((id) => isRunning(transcript.roster[id]));
+  if (running.length === 0) return null;
 
   return (
     <div className="flex flex-wrap gap-2 pb-2" aria-label="Subagents">
-      {descendants.map((actor) => (
-        <ActorButton key={actor.agent_id} actor={actor} selected={actor.agent_id === selected} onOpen={onOpen} />
+      {running.map((id) => (
+        <ActorButton key={id} actorId={id} actor={transcript.roster[id]} selected={id === selected} onOpen={onOpen} />
       ))}
     </div>
   );
 }
 
 export function ChildDrawer({
-  actor,
-  actors,
-  journal,
+  rootId,
+  childId,
   onSelect,
   onClose,
 }: {
-  actor: ActorStatusOut | undefined;
-  actors: ActorStatusOut[];
-  journal: JournalState | undefined;
-  onSelect: (agentId: string) => void;
+  rootId: string;
+  childId: string | null;
+  onSelect: (actorId: string) => void;
   onClose: () => void;
 }) {
-  const descendants = actors.filter((item) => item.parent_id !== null);
+  const transcript = useStore(useChat().store, (state) => state.transcript);
+  const tree = descendants(transcript, rootId);
+  const actor = childId === null ? undefined : transcript.roster[childId];
 
   return (
-    <Dialog open={actor !== undefined} onOpenChange={(open) => !open && onClose()}>
+    <Dialog open={childId !== null && actor !== undefined} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="!top-0 !right-0 !bottom-0 !left-auto flex !h-dvh !w-full !max-w-xl !translate-x-0 !translate-y-0 flex-col gap-0 !rounded-none p-0 sm:!max-w-xl">
-        {actor && (
+        {childId !== null && actor && (
           <>
             <DialogHeader className="border-border gap-3 border-b p-4 pr-12">
               <div>
-                <DialogTitle>{actor.name}</DialogTitle>
+                <DialogTitle>{actor.title ?? "Subagent"}</DialogTitle>
                 <DialogDescription>{actorStatusLabel(actor.state)}</DialogDescription>
               </div>
-              {descendants.length > 1 && (
+              {tree.length > 1 && (
                 <div className="flex gap-2 overflow-x-auto pb-1">
-                  {descendants.map((item) => (
+                  {tree.map((id) => (
                     <ActorButton
-                      key={item.agent_id}
-                      actor={item}
-                      selected={item.agent_id === actor.agent_id}
+                      key={id}
+                      actorId={id}
+                      actor={transcript.roster[id]}
+                      selected={id === childId}
                       onOpen={onSelect}
                     />
                   ))}
                 </div>
               )}
             </DialogHeader>
-            <JournalTranscript
-              turns={journal?.turns ?? []}
-              ready={journal?.ready ?? false}
-              actors={actors}
-              onOpen={onSelect}
-              emptyText="No journal entries yet"
-            />
+            <Transcript sessionId={childId} readonly onOpen={onSelect} emptyText="No journal entries yet" />
           </>
         )}
       </DialogContent>

@@ -1,16 +1,20 @@
 import asyncio
+import itertools
+import json
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 from fastapi import FastAPI
-from httpx_ws import AsyncWebSocketSession, aconnect_ws
+from httpx_ws import AsyncWebSocketSession, WebSocketDisconnect, aconnect_ws
 from httpx_ws.transport import ASGIWebSocketTransport
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
+from starlette.types import ASGIApp
 
 from sarathi.agent import SKILLS_DIR, RuntimeResources, Sarathi, TitleHook, _wire_tools, deps_factory
 from sarathi.config import get_settings
@@ -20,6 +24,8 @@ from tantra import BuiltinMemory, FakeProvider, FileSystemSkills, MemoryStore, R
 from tantra.providers.base import ProviderEvent, SampleRequest, TextDelta
 
 PASSWORD = "hunter2hunter2"
+ORIGIN = "http://localhost:3000"
+TIMEOUT = 5.0
 
 
 def pytest_configure() -> None:
@@ -116,7 +122,7 @@ async def app(
     session_factory: async_sessionmaker[AsyncSession],
     resources: RuntimeResources,
 ) -> AsyncIterator[FastAPI]:
-    from sarathi.main import create_app, mount_session_socket
+    from sarathi.main import create_app, mount_acp
 
     application = create_app()
 
@@ -126,7 +132,7 @@ async def app(
 
     application.state.resources = resources
     application.dependency_overrides[get_db] = override_get_db
-    mount_session_socket(application, resources, session_factory)
+    mount_acp(application, resources)
     yield application
     application.dependency_overrides.clear()
 
@@ -138,41 +144,111 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
         yield http_client
 
 
-Socket = Callable[..., AbstractAsyncContextManager[AsyncWebSocketSession]]
+@asynccontextmanager
+async def dial(app: ASGIApp, url: str, origin: str | None = ORIGIN) -> AsyncIterator[AsyncWebSocketSession]:
+    transport = ASGIWebSocketTransport(app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        headers = {"Origin": origin} if origin is not None else {}
+        async with aconnect_ws(url, http_client, keepalive_ping_interval_seconds=None, headers=headers) as ws:
+            yield ws
+
+
+class Rpc:
+    def __init__(self, ws: AsyncWebSocketSession) -> None:
+        self.ws = ws
+        self.ids = itertools.count(1)
+        self.responses: dict[int, asyncio.Future[dict[str, Any]]] = {}
+        self.updates: list[dict[str, Any]] = []
+        self.requests: list[dict[str, Any]] = []
+        self.changed = asyncio.Event()
+        self.initialized: dict[str, Any] = {}
+
+    async def run(self) -> None:
+        try:
+            while True:
+                message = json.loads(await self.ws.receive_text())
+                if "method" not in message:
+                    self.responses.pop(message["id"]).set_result(message)
+                elif message["method"] == "session/update":
+                    self.updates.append(message["params"])
+                elif "id" in message:
+                    self.requests.append(message)
+                self.changed.set()
+        except WebSocketDisconnect:
+            for future in self.responses.values():
+                future.cancel()
+
+    async def _send(self, message: dict[str, Any]) -> None:
+        await self.ws.send_text(json.dumps({"jsonrpc": "2.0", **message}))
+
+    async def request(self, method: str, params: Any = None) -> dict[str, Any]:
+        request_id = next(self.ids)
+        self.responses[request_id] = future = asyncio.get_running_loop().create_future()
+        await self._send({"id": request_id, "method": method, **({} if params is None else {"params": params})})
+        return await asyncio.wait_for(future, TIMEOUT)
+
+    async def call(self, method: str, params: Any = None) -> Any:
+        response = await self.request(method, params)
+        assert "error" not in response, response
+        return response["result"]
+
+    async def notify(self, method: str, params: Any) -> None:
+        await self._send({"method": method, "params": params})
+
+    async def reply(self, request: dict[str, Any], result: Any) -> None:
+        await self._send({"id": request["id"], "result": result})
+
+    async def new(self, cwd: str = "/work") -> str:
+        return str((await self.call("session/new", {"cwd": cwd, "mcpServers": []}))["sessionId"])
+
+    async def prompt(self, session_id: str, *blocks: dict[str, Any]) -> dict[str, Any]:
+        return await self.request("session/prompt", {"sessionId": session_id, "prompt": list(blocks)})
+
+    def of(self, session_id: str, kind: str) -> list[dict[str, Any]]:
+        return [
+            params["update"]
+            for params in self.updates
+            if params["sessionId"] == session_id and params["update"]["sessionUpdate"] == kind
+        ]
+
+    async def until(self, condition: Callable[[], Any], timeout: float = TIMEOUT) -> Any:
+        async def poll() -> Any:
+            while True:
+                self.changed.clear()
+                if found := condition():
+                    return found
+                await self.changed.wait()
+
+        return await asyncio.wait_for(poll(), timeout)
+
+
+Acp = Callable[..., AbstractAsyncContextManager[Rpc]]
 
 
 @pytest.fixture
-def socket(app: FastAPI) -> Socket:
+def acp(app: FastAPI, client: httpx.AsyncClient) -> Acp:
     @asynccontextmanager
-    async def open_socket(
-        sid: str,
-        token: str,
-        view: str | None = None,
-        *,
-        origin: str | None = "http://localhost:3000",
-        subprotocols: list[str] | None = None,
-    ) -> AsyncIterator[AsyncWebSocketSession]:
-        transport = ASGIWebSocketTransport(app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
-            mode = "read" if view == "readonly" else "write"
-            issued = await http_client.post(
-                f"/api/sessions/{sid}/socket-ticket",
-                json={"mode": mode},
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            assert issued.status_code == 200
-            url = f"/api/ws/sessions/{sid}?ticket={issued.json()['ticket']}"
-            headers = {"Origin": origin} if origin is not None else None
-            async with aconnect_ws(
-                url,
-                http_client,
-                keepalive_ping_interval_seconds=None,
-                subprotocols=subprotocols or ["tantra.session.v1"],
-                headers=headers,
-            ) as ws:
-                yield ws
+    async def connect(token: str, *, mode: str = "write", path: str = "/api/acp") -> AsyncIterator[Rpc]:
+        issued = await client.post("/api/acp/ticket", json={"mode": mode}, headers={"Authorization": f"Bearer {token}"})
+        assert issued.status_code == 200
+        async with dial(app, f"{path}?ticket={issued.json()['ticket']}") as ws:
+            rpc = Rpc(ws)
+            reader = asyncio.create_task(rpc.run())
+            try:
+                rpc.initialized = await rpc.call(
+                    "initialize",
+                    {
+                        "protocolVersion": 2,
+                        "info": {"name": "test", "version": "0"},
+                        "capabilities": {"_meta": {"tantra": {"version": 1}}},
+                    },
+                )
+                yield rpc
+            finally:
+                reader.cancel()
+                await asyncio.gather(reader, return_exceptions=True)
 
-    return open_socket
+    return connect
 
 
 @pytest.fixture
@@ -186,12 +262,9 @@ def signup(client: httpx.AsyncClient) -> Callable[..., Awaitable[str]]:
 
 
 @pytest.fixture
-def new_session(client: httpx.AsyncClient) -> Callable[..., Awaitable[str]]:
-    async def create(token: str, model: str | None = None) -> str:
-        response = await client.post(
-            "/api/sessions", json={"model": model}, headers={"Authorization": f"Bearer {token}"}
-        )
-        assert response.status_code == 201
-        return str(response.json()["id"])
+def new_session(acp: Acp) -> Callable[..., Awaitable[str]]:
+    async def create(token: str) -> str:
+        async with acp(token) as rpc:
+            return await rpc.new()
 
     return create

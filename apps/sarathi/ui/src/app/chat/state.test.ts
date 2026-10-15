@@ -1,356 +1,250 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import type { ActorStatusOut } from "../../generated/models/index.ts";
 import {
-  bannerControls,
-  treeRunning,
+  apply,
+  askOf,
+  empty,
+  type AgentRequest,
+  type ContentBlock,
+  type SessionUpdate,
+  type StateBody,
+  type Transcript,
+} from "tantra-acp-client";
+
+import {
   actorStatusLabel,
+  attachmentsOf,
   composerDisabled,
   createChatStore,
   isNearBottom,
+  isReady,
+  stopOffered,
+  textOf,
   type ChatStore,
-  pendingAsk,
-  type EventFrame,
 } from "./state.ts";
 
-const root = "11111111111111111111111111111111";
-const child = "22222222222222222222222222222222";
-const grandchild = "33333333333333333333333333333333";
-const command = "44444444444444444444444444444444";
+type Frame = { sessionId: string; update: SessionUpdate };
+type Asked = {
+  method: AgentRequest["method"];
+  params: AgentRequest["params"];
+  result: { outcome?: { optionId: string }; content?: { text?: string; choice?: string } };
+};
+type Golden = { live: Frame[]; mirror: (Frame & { at: number })[]; requests: Asked[] };
 
-const ready = (store: ChatStore, agentId = root) => store.getState().setSubscriptionReady(agentId, true);
+const golden = JSON.parse(
+  readFileSync(
+    new URL("../../../../../../packages/tantra-acp-client/test/fixtures/session.json", import.meta.url),
+    "utf8",
+  ),
+) as Golden;
+const ROOT = golden.live[0].sessionId;
+const CHILD = (golden.mirror[0].update as { sessionId: string }).sessionId;
+const askIdOf = (asked: Asked) => (asked.params._meta as { tantra: { askId: string } }).tantra.askId;
 
-const event = (agentId: string, seq: number, value: EventFrame["event"]): EventFrame => ({
-  type: "event",
-  agent_id: agentId,
-  seq,
-  event: value,
+const requested = (asked: Asked, signal = new AbortController().signal) => {
+  const results: unknown[] = [];
+  const request = {
+    method: asked.method,
+    sessionId: asked.params.sessionId,
+    params: asked.params,
+    signal,
+    respond: (result: unknown) => results.push(result),
+  } as AgentRequest;
+  return { request, results };
+};
+
+const notifications = (store: ChatStore) => {
+  const seen = { count: 0 };
+  store.subscribe(() => seen.count++);
+  return seen;
+};
+
+test("the store applies updates through the client's reducer and skips no-op updates", () => {
+  const store = createChatStore();
+  const seen = notifications(store);
+  const [info, idle] = golden.live;
+  store.getState().apply(info.sessionId, info.update);
+  store.getState().apply(idle.sessionId, idle.update);
+  const once = store.getState().transcript;
+  assert.deepEqual(once, apply(apply(empty(), info.sessionId, info.update), idle.sessionId, idle.update));
+  assert.equal(seen.count, 2);
+
+  store.getState().apply(idle.sessionId, structuredClone(idle.update));
+  store.getState().apply(ROOT, { sessionUpdate: "usage_update", used: 1, size: 2 });
+  assert.equal(store.getState().transcript, once);
+  assert.equal(seen.count, 2);
 });
 
-const actor = (agentId: string, state: ActorStatusOut["state"], parentId: string | null = root): ActorStatusOut => ({
-  agent_id: agentId,
-  root_id: root,
-  parent_id: parentId,
-  agent: parentId === null ? "sarathi" : "subagent",
-  name: parentId === null ? "sarathi" : "Research scout",
-  state,
-  active: state === "running",
-  current_turn_id: state === "running" ? command : null,
-  last_turn: null,
-  last_seq: 0,
-  updated_at: "2026-01-01T00:00:00Z",
+test("requests go through the reducer and an abort removes only that request", () => {
+  const store = createChatStore();
+  const askId = askIdOf(golden.requests[0]);
+  const controller = new AbortController();
+  const { request } = requested(golden.requests[0], controller.signal);
+
+  store.getState().addRequest(request);
+  assert.equal(store.getState().transcript.requests[ROOT][askId], request);
+  controller.abort();
+  assert.deepEqual(store.getState().transcript.requests, {});
+
+  const aborted = new AbortController();
+  aborted.abort();
+  store.getState().addRequest(requested(golden.requests[0], aborted.signal).request);
+  assert.deepEqual(store.getState().transcript.requests, {});
+
+  const stale = new AbortController();
+  const fresh = requested(golden.requests[0]).request;
+  store.getState().addRequest(requested(golden.requests[0], stale.signal).request);
+  store.getState().addRequest(fresh);
+  stale.abort();
+  assert.equal(store.getState().transcript.requests[ROOT][askId], fresh);
+  store.getState().removeRequest(ROOT, askId);
+  assert.deepEqual(store.getState().transcript.requests, {});
 });
 
-test("root is the only default subscription and spawn remains an ordinary tool", () => {
-  const store = createChatStore(root);
-  ready(store);
-  const dispatch = store.getState().dispatch;
-  dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "research" }));
-  dispatch(event(root, 2, { type: "turn_started", turn_id: command, input: "research" }));
-  dispatch(event(root, 3, { type: "sample_started", turn_id: command, sample_id: "sample", model: "m" }));
-  dispatch(
-    event(root, 4, {
-      type: "tool_call_requested",
-      turn_id: command,
-      sample_id: "sample",
-      call_id: "spawn",
-      name: "spawn",
-      args: { agent_name: "subagent", input: "look" },
-    }),
-  );
-  dispatch(
-    event(root, 5, {
-      type: "child_created",
-      child_id: child,
-      agent: "subagent",
-      turn_id: command,
-      call_id: "spawn",
-    }),
-  );
-  dispatch(
-    event(root, 6, {
-      type: "tool_call_completed",
-      turn_id: command,
-      call_id: "spawn",
-      result: { child_id: child },
-      is_error: false,
-    }),
-  );
+test("reset clears a session's view, requests and readiness but keeps the roster", () => {
+  const store = createChatStore();
+  for (const { sessionId, update } of [...golden.live, ...golden.mirror]) store.getState().apply(sessionId, update);
+  store.getState().addRequest(requested(golden.requests[0]).request);
+  store.getState().setReady(ROOT);
+  const { roster } = store.getState().transcript;
+  assert.equal(store.getState().ready[ROOT], true);
 
-  assert.equal(store.getState().cursors[root], 6);
-  assert.deepEqual(store.getState().children, {});
-  const item = store.getState().turns[0].items[0];
-  assert.equal(item.kind, "tool");
-  assert.equal(item.final, true);
-  if (item.kind === "tool") {
-    assert.equal(item.name, "spawn");
-    assert.deepEqual(item.child, { agent_id: child, agent: "subagent" });
-  }
+  store.getState().reset(ROOT);
+  assert.equal(store.getState().transcript.sessions[ROOT], undefined);
+  assert.deepEqual(store.getState().transcript.requests, {});
+  assert.equal(store.getState().transcript.roster, roster);
+  assert.equal(store.getState().ready[ROOT], false);
 });
 
-test("child journals keep independent cursors, history, readiness, and deduplication", () => {
-  const store = createChatStore(root);
-  ready(store);
-  store.getState().dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "root" }));
-  store.getState().setOpenChild(grandchild);
-  store
-    .getState()
-    .dispatch(event(grandchild, 1, { type: "input_queued", command_id: command, input: "direct nested work" }));
-  store
-    .getState()
-    .dispatch(event(grandchild, 2, { type: "turn_started", turn_id: command, input: "direct nested work" }));
-  store
-    .getState()
-    .dispatch(event(grandchild, 3, { type: "sample_started", turn_id: command, sample_id: "nested", model: "m" }));
-  store.getState().dispatch(event(grandchild, 4, { type: "text_delta", text: "deep" }));
-  store.getState().dispatch(event(grandchild, 4, { type: "text_delta", text: " duplicate" }));
-  store.getState().setSubscriptionReady(grandchild, true);
-
-  assert.deepEqual(store.getState().cursors, { [root]: 1, [grandchild]: 4 });
-  assert.equal(store.getState().turns[0].items.length, 0);
-  assert.equal(store.getState().children[grandchild].turns[0].items[0].content, "deep");
-  assert.equal(store.getState().children[grandchild].ready, true);
-
-  const retained = store.getState().children[grandchild];
-  store.getState().setOpenChild(null);
-  assert.equal(store.getState().children[grandchild], retained);
-  store.getState().setOpenChild(grandchild);
-  assert.equal(store.getState().cursors[grandchild], 4);
-});
-
-test("switching the open child reconnects only root and the selected journal", () => {
-  const store = createChatStore(root);
-  ready(store);
-  store.getState().setOpenChild(child);
-  ready(store, child);
-  store.getState().dispatch(event(child, 1, { type: "input_queued", command_id: command, input: "child" }));
-  store.getState().setOpenChild(grandchild);
-  store.getState().dispatch(event(grandchild, 1, { type: "input_queued", command_id: command, input: "nested" }));
-  ready(store, grandchild);
-
-  assert.equal(store.getState().openChildId, grandchild);
-  assert.equal(store.getState().cursors[grandchild], 1);
-  assert.equal(store.getState().children[child].turns[0].input, "child");
-});
-
-test("lifecycle and finish inputs are hidden while queued human messages remain FIFO", () => {
-  const store = createChatStore(root);
-  ready(store);
-  const next = "55555555555555555555555555555555";
-  const finish = "66666666666666666666666666666666";
-  const lifecycle = "77777777777777777777777777777777";
-  const dispatch = store.getState().dispatch;
-  dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "first" }));
-  dispatch(event(root, 2, { type: "turn_started", turn_id: command, input: "first" }));
-  dispatch(event(root, 3, { type: "input_queued", command_id: next, input: "second" }));
-  dispatch(event(root, 4, { type: "input_queued", command_id: lifecycle, input: `[agent ${child} turn ended] {}` }));
-  dispatch(event(root, 5, { type: "input_queued", command_id: finish, input: `[agent ${child} finished] done` }));
-
-  assert.deepEqual(
-    store.getState().turns.map((turn) => [turn.input, turn.status, turn.synthetic]),
-    [
-      ["first", "running", false],
-      ["second", "queued", false],
-      [`[agent ${child} turn ended] {}`, "queued", true],
-      [`[agent ${child} finished] done`, "queued", true],
-    ],
-  );
-});
-
-test("only root asks enter interactive state", () => {
-  const store = createChatStore(root);
-  ready(store);
-  const askId = "55555555555555555555555555555555";
-  store.getState().dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "root" }));
-  store.getState().dispatch(event(root, 2, { type: "turn_started", turn_id: command, input: "root" }));
-  store
-    .getState()
-    .dispatch(event(root, 3, { type: "sample_started", turn_id: command, sample_id: "root-sample", model: "m" }));
-  store.getState().dispatch(
-    event(root, 4, {
-      type: "ask_raised",
-      ask_id: askId,
-      call_id: "call",
-      request: { kind: "approval", title: "Approve", body: "root" },
-    }),
-  );
-  const selectedAsk = pendingAsk(store.getState().turns);
-  assert.equal(selectedAsk, askId);
-  assert.equal(pendingAsk(store.getState().turns), selectedAsk);
-  assert.equal(treeRunning(store.getState().turns, store.getState().actors), false);
-
-  store.getState().dispatch(
-    event(root, 5, {
-      type: "ask_answered",
-      ask_id: askId,
-      response: { kind: "approval", allow: true },
-    }),
-  );
-  assert.equal(pendingAsk(store.getState().turns), null);
-  assert.equal(treeRunning(store.getState().turns, store.getState().actors), true);
-
-  store.getState().dispatch(event(root, 6, { type: "turn_completed", turn_id: command, stop_reason: "completed" }));
-  assert.equal(treeRunning(store.getState().turns, store.getState().actors), false);
-
-  store.getState().setOpenChild(child);
-  ready(store, child);
-  store.getState().dispatch(event(child, 1, { type: "input_queued", command_id: command, input: "child" }));
-  store.getState().dispatch(event(child, 2, { type: "turn_started", turn_id: command, input: "child" }));
-  store
-    .getState()
-    .dispatch(event(child, 3, { type: "sample_started", turn_id: command, sample_id: "child-sample", model: "m" }));
-  store.getState().dispatch(
-    event(child, 4, {
-      type: "ask_raised",
-      ask_id: "66666666666666666666666666666666",
-      call_id: "child-call",
-      request: { kind: "approval", title: "Ignore", body: "child" },
-    }),
-  );
-
-  assert.equal(pendingAsk(store.getState().turns), null);
-  assert.equal(store.getState().children[child].turns[0].items.length, 0);
-});
-
-test("approval, choice, and free-text asks retain their request descriptors", () => {
-  const store = createChatStore(root);
-  ready(store);
-  store.getState().dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "root" }));
-  store.getState().dispatch(event(root, 2, { type: "turn_started", turn_id: command, input: "root" }));
-  store
-    .getState()
-    .dispatch(event(root, 3, { type: "sample_started", turn_id: command, sample_id: "sample", model: "m" }));
-  const requests = [
-    { kind: "approval" as const, title: "Approve", body: "body" },
-    { kind: "choice" as const, title: "Pick", options: ["one", "two"] },
-    { kind: "free_text" as const, prompt: "Explain" },
+test("attachments and text come from user content blocks", () => {
+  const content: ContentBlock[] = [
+    { type: "text", text: "Read these" },
+    { type: "resource_link", name: "a b#1.pdf", uri: "file:///data/uploads/7/0f_a%20b%231.pdf" },
+    { type: "resource_link", name: "Ünïcode.docx", uri: "file:///data/uploads/7/1e_%C3%9Cn%C3%AFcode.docx" },
+    { type: "image", data: "", mimeType: "image/png" },
   ];
-  requests.forEach((request, index) => {
-    store.getState().dispatch(
-      event(root, index + 4, {
-        type: "ask_raised",
-        ask_id: (index + 5).toString().repeat(32),
-        request,
-      }),
-    );
-  });
-
-  const retained = store
-    .getState()
-    .turns[0].items.filter((item) => item.kind === "ask")
-    .map((item) => item.request);
-  assert.deepEqual(retained, requests);
+  assert.deepEqual(attachmentsOf(content), [
+    { name: "a b#1.pdf", path: "/data/uploads/7/0f_a b#1.pdf" },
+    { name: "Ünïcode.docx", path: "/data/uploads/7/1e_Ünïcode.docx" },
+  ]);
+  assert.equal(textOf(content), "Read these");
+  assert.deepEqual(attachmentsOf([{ type: "text", text: "" }]), []);
+  assert.equal(textOf([{ type: "resource_link", name: "x", uri: "file:///x" }]), "");
 });
 
-test("actor statuses drive running controls and complete labels", () => {
-  const states: ActorStatusOut["state"][] = [
-    "queued",
-    "running",
-    "awaiting_input",
-    "idle",
-    "finished",
-    "failed",
-    "cancelled",
-    "interrupted",
+test("actor status labels cover every state", () => {
+  const states: (StateBody | null)[] = [
+    null,
+    { state: "running" },
+    { state: "requires_action" },
+    { state: "idle" },
+    { state: "idle", stopReason: "end_turn" },
+    { state: "idle", stopReason: "max_turn_requests" },
+    { state: "idle", stopReason: "_tantra_finished" },
+    { state: "idle", stopReason: "error", error: { code: -32603, message: "boom" } },
+    { state: "idle", stopReason: "cancelled" },
+    { state: "idle", stopReason: "_tantra_interrupted" },
   ];
   assert.deepEqual(states.map(actorStatusLabel), [
     "Queued",
     "Running",
     "Awaiting input",
     "Idle — awaiting parent",
+    "Idle — awaiting parent",
+    "Idle — awaiting parent",
     "Finished",
     "Failed",
     "Cancelled",
     "Interrupted",
   ]);
+});
+
+test("the composer needs readiness, a connection, write control, no pending ask and a writable view", () => {
   assert.equal(composerDisabled(true, true, true, false), false);
+  assert.equal(composerDisabled(false, true, true, false), true);
+  assert.equal(composerDisabled(true, false, true, false), true);
   assert.equal(composerDisabled(true, true, false, false), true);
   assert.equal(composerDisabled(true, true, true, true), true);
   assert.equal(composerDisabled(true, true, true, false, true), true);
 });
 
-test("readiness remains separate from write authority", () => {
-  const store = createChatStore(root);
-  ready(store);
-  assert.equal(store.getState().ready, true);
-  assert.equal(composerDisabled(store.getState().ready, true, false, false), true);
+test("Stop is offered only to a writable running chat without a pending ask", () => {
+  assert.equal(stopOffered(true, true, false), true);
+  assert.equal(stopOffered(false, true, false), false);
+  assert.equal(stopOffered(true, false, false), false);
+  assert.equal(stopOffered(true, true, true), false);
+  assert.equal(stopOffered(true, true, false, true), false);
 });
 
-test("retry and reclaim controls remain available together", () => {
-  assert.deepEqual(bannerControls({ kind: "retry", message: "Unknown", commandId: "command" }, true), {
-    reclaim: true,
-    retryCommandId: "command",
-  });
-  assert.deepEqual(bannerControls(null, true), { reclaim: true, retryCommandId: null });
-});
-
-test("disconnect preserves transcript, cursors, and pending asks", () => {
-  const store = createChatStore(root);
-  const askId = "55555555555555555555555555555555";
-  ready(store);
-  store.getState().dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "queued" }));
-  store.getState().dispatch(event(root, 2, { type: "turn_started", turn_id: command, input: "queued" }));
+test("a session is ready only while marked ready and open in the client", () => {
+  const store = createChatStore();
+  store.getState().setReady(ROOT);
+  assert.equal(isReady(store.getState(), ROOT), false);
   store
     .getState()
-    .dispatch(event(root, 3, { type: "sample_started", turn_id: command, sample_id: "sample", model: "m" }));
-  store.getState().dispatch(
-    event(root, 4, {
-      type: "ask_raised",
-      ask_id: askId,
-      call_id: "call",
-      request: { kind: "approval", title: "Approve", body: "root" },
-    }),
-  );
-
-  store.getState().setSubscriptionReady(root, false);
-
-  assert.equal(store.getState().ready, false);
-  assert.equal(store.getState().cursors[root], 4);
-  assert.equal(store.getState().turns[0].input, "queued");
-  assert.equal(pendingAsk(store.getState().turns), askId);
-});
-
-test("root journal drives busy state immediately and clears before the next poll", () => {
-  const store = createChatStore(root);
-  ready(store);
-  store.getState().setActors([actor(root, "idle", null)]);
-
-  store.getState().dispatch(event(root, 1, { type: "input_queued", command_id: command, input: "queued" }));
-  assert.equal(treeRunning(store.getState().turns, store.getState().actors), true);
-
-  store.getState().dispatch(event(root, 2, { type: "turn_started", turn_id: command, input: "queued" }));
-  assert.equal(treeRunning(store.getState().turns, store.getState().actors), true);
-
-  store.getState().setActors([actor(root, "running", null)]);
-  store.getState().dispatch(event(root, 3, { type: "turn_completed", turn_id: command, stop_reason: "completed" }));
-  assert.equal(treeRunning(store.getState().turns, store.getState().actors), false);
-
-  store.getState().setActors([actor(root, "running", null), actor(child, "queued")]);
-  assert.equal(treeRunning(store.getState().turns, store.getState().actors), true);
-});
-
-test("replay and live reduction share cursor deduplication", () => {
-  const buffered = createChatStore(root);
-  const live = createChatStore(root);
-  const frames = [
-    event(root, 1, { type: "input_queued", command_id: command, input: "queued" }),
-    event(root, 2, { type: "turn_started", turn_id: command, input: "queued" }),
-    event(root, 2, { type: "turn_started", turn_id: command, input: "duplicate" }),
-  ];
-
-  for (const frame of frames) buffered.getState().dispatch(frame);
-  ready(buffered);
-  ready(live);
-  for (const frame of frames) live.getState().dispatch(frame);
-
-  assert.deepEqual(
-    { cursors: buffered.getState().cursors, turns: buffered.getState().turns },
-    { cursors: live.getState().cursors, turns: live.getState().turns },
-  );
+    .setClient({ connection: "open", sessions: { [ROOT]: { writer: true, cursor: null, paused: false } } });
+  assert.equal(isReady(store.getState(), ROOT), true);
+  store.getState().setClient({ connection: "open", sessions: {} });
+  assert.equal(isReady(store.getState(), ROOT), false);
+  store
+    .getState()
+    .setClient({ connection: "open", sessions: { [ROOT]: { writer: false, cursor: "3.0", paused: false } } });
+  store.getState().reset(ROOT);
+  assert.equal(isReady(store.getState(), ROOT), false);
 });
 
 test("near-bottom threshold follows at 80px and stops above it", () => {
   assert.equal(isNearBottom(1_000, 900, 20), true);
   assert.equal(isNearBottom(1_000, 899, 20), false);
+});
+
+test("the golden session reduces end to end through the store", () => {
+  const store = createChatStore();
+  const asks = new Map(golden.requests.map((asked) => [askIdOf(asked), asked]));
+  const frames = golden.live.flatMap((frame, index) => [...golden.mirror.filter(({ at }) => at === index), frame]);
+  frames.push(...golden.mirror.filter(({ at }) => at >= golden.live.length));
+  const answered: string[] = [];
+
+  for (const { sessionId, update } of frames) {
+    store.getState().apply(sessionId, update);
+    const marker = (update._meta?.tantra as { ask?: { askId: string; state: string } } | undefined)?.ask;
+    if (update.sessionUpdate !== "state_update" || marker?.state !== "pending") continue;
+    const asked = asks.get(marker.askId)!;
+    const { request, results } = requested(asked);
+    store.getState().addRequest(request);
+    const view = store.getState().transcript.sessions[ROOT];
+    assert.equal(composerDisabled(true, true, true, view.state?.state === "requires_action"), true);
+
+    const ask = askOf(store.getState().transcript.requests[ROOT][marker.askId]);
+    if (ask.kind === "approval") ask.respond(asked.result.outcome?.optionId === "allow");
+    else if (ask.kind === "choice") ask.respond(asked.result.content!.choice!);
+    else ask.respond(asked.result.content!.text!);
+    store.getState().removeRequest(ROOT, ask.askId);
+    assert.deepEqual(results, [asked.result]);
+    answered.push(ask.kind);
+  }
+
+  const expected = frames.reduce<Transcript>((t, { sessionId, update }) => apply(t, sessionId, update), empty());
+  const { transcript } = store.getState();
+  assert.deepEqual(transcript, expected);
+  assert.deepEqual(answered, ["approval", "free_text", "choice"]);
+  assert.deepEqual(transcript.requests, {});
+
+  const view = transcript.sessions[ROOT];
+  const [user] = view.entries;
+  assert.equal(user.kind, "user");
+  if (user.kind === "user") {
+    assert.equal(textOf(user.content), "Run the checks.");
+    assert.deepEqual(attachmentsOf(user.content), []);
+  }
+  assert.deepEqual(
+    view.entries.filter((entry) => entry.kind === "message").map((entry) => entry.kind === "message" && entry.finished),
+    [false, false, true],
+  );
+  assert.equal(actorStatusLabel(transcript.roster[CHILD].state), "Finished");
+  assert.equal(actorStatusLabel(view.state), "Cancelled");
+  assert.equal(view.entries.at(-1)?.kind, "status");
+  assert.deepEqual([view.writerReason, view.queue], ["claimed", []]);
 });

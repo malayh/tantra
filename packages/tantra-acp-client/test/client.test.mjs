@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { FakeAgent, cursored, settled, until } from "./fake-socket.mjs";
+import {
+  FakeAgent,
+  INITIALIZED,
+  cursored,
+  settled,
+  until,
+} from "./fake-socket.mjs";
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -811,4 +817,70 @@ test("dropping a root prunes its learned descendants", async () => {
   assert.equal(client.parents.size, 2);
   await client.close(root);
   assert.equal(client.parents.size, 0);
+});
+
+test("close while reconnecting drops the session without resuming or closing it", async () => {
+  const { agent, client, sessionId, state } = await opened();
+  agent.handlers["session/prompt"] = () => {};
+  const sent = client.prompt(sessionId, text("sent"));
+  await until(() => agent.sent("session/prompt").length === 1);
+  agent.handlers.initialize = function (socket, frame) {
+    setTimeout(() => this.reply(socket, frame, INITIALIZED), 20);
+  };
+  agent.socket.drop(1012);
+  await until(() => state().connection === "connecting");
+  const held = client.prompt(sessionId, text("held"));
+  assert.deepEqual(await client.close(sessionId), {});
+  await assert.rejects(sent, { code: "uncertain", commandId: sent.commandId });
+  await assert.rejects(held, { code: "closed", commandId: held.commandId });
+  assert.deepEqual(state().sessions, {});
+  await until(() => state().connection === "open");
+  await settled();
+  assert.deepEqual(agent.sockets[1].methods("session/resume"), []);
+  assert.deepEqual(agent.sent("session/close"), []);
+});
+
+test("a session closed during its reconnect resume is closed once the resume returns", async () => {
+  const { agent, client, sessionId, state } = await opened();
+  let release;
+  agent.handlers["session/resume"] = function (socket, frame) {
+    release = () => this.reply(socket, frame, {});
+  };
+  agent.socket.drop(1011);
+  await until(() => release, "resume");
+  assert.equal(state().connection, "connecting");
+  assert.deepEqual(await client.close(sessionId), {});
+  assert.deepEqual(agent.sent("session/close"), []);
+  release();
+  await until(() => agent.sent("session/close").length === 1, "close");
+  assert.deepEqual(agent.sent("session/close")[0].params, { sessionId });
+  await until(() => state().connection === "open");
+  assert.deepEqual(state().sessions, {});
+});
+
+test("a stale failed resume leaves a newer resume of the session open", async () => {
+  const agent = new FakeAgent();
+  const { client, state } = tracked(agent);
+  await client.connect();
+  let calls = 0;
+  agent.handlers["session/resume"] = function (socket, frame) {
+    if (++calls === 1)
+      setTimeout(
+        () => this.fail(socket, frame, -32002, "Session not found"),
+        20,
+      );
+    else {
+      this.reply(socket, frame, {});
+      this.writer(socket, CHILD, "claimed");
+    }
+  };
+  const stale = client.resume(CHILD, { mode: "write" });
+  await client.close(CHILD);
+  await client.resume(CHILD, { mode: "write" });
+  await assert.rejects(stale, { code: "not_found" });
+  await settled();
+  assert.deepEqual(Object.keys(state().sessions), [CHILD]);
+  const prompt = client.prompt(CHILD, text("still open"));
+  assert.deepEqual(await prompt, { messageId: prompt.commandId });
+  assert.deepEqual(agent.sent("session/close").length, 1);
 });

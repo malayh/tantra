@@ -5,57 +5,26 @@
  * OpenAPI spec version: 0.1.0
  */
 import {
-  useMutation,
   useQuery
 } from '@tanstack/react-query';
 import type {
   DataTag,
   DefinedInitialDataOptions,
   DefinedUseQueryResult,
-  MutationFunction,
   QueryClient,
   QueryFunction,
   QueryKey,
   UndefinedInitialDataOptions,
-  UseMutationOptions,
-  UseMutationResult,
   UseQueryOptions,
   UseQueryResult
 } from '@tanstack/react-query';
 
 import type {
-  AgentFinished,
-  AskAnswered,
-  AskRaised,
-  CancellationRequested,
-  ChildCreated,
-  CompactionApplied,
-  HTTPValidationError,
-  HeaderNotice,
-  Health200,
-  InputQueued,
-  ReasoningDelta,
-  ReasoningPart,
-  SampleCompleted,
-  SampleStarted,
-  SessionCreated,
-  SessionInput,
-  TextDelta,
-  TextPart,
-  ToolCallCompleted,
-  ToolCallDelta,
-  ToolCallRequested,
-  ToolCallStarted,
-  ToolProgress,
-  TurnCancelled,
-  TurnCompleted,
-  TurnFailed,
-  TurnInterrupted,
-  TurnStarted
+  Health200
 } from '../../models';
 
-import { customInstance } from '../../../lib/apiClient';
-import type { ErrorType , BodyType } from '../../../lib/apiClient';
+import { customInstance } from '../../../lib/apiClient.ts';
+import type { ErrorType } from '../../../lib/apiClient.ts';
 
 
 type SecondParameter<T extends (...args: never) => unknown> = Parameters<T>[1];
@@ -158,162 +127,6 @@ export function useHealth<TData = Awaited<ReturnType<typeof health>>, TError = E
  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
 
   const queryOptions = getHealthQueryOptions(options)
-
-  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
-
-  return withQueryKey(query, queryOptions.queryKey);
-}
-
-
-
-
-
-
-/**
- * @summary Ws Types
- */
-export const wsTypes = (
-    sessionInput: BodyType<SessionInput>,
- options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
-) => {
-
-
-      return customInstance<SessionCreated | InputQueued | TurnStarted | SampleStarted | TextDelta | ReasoningDelta | ToolCallDelta | TextPart | ReasoningPart | ToolCallRequested | ToolCallStarted | ToolProgress | ToolCallCompleted | ChildCreated | AgentFinished | AskRaised | AskAnswered | SampleCompleted | CompactionApplied | CancellationRequested | TurnCompleted | TurnFailed | TurnCancelled | TurnInterrupted | HeaderNotice>(
-      {url: `/api/meta/ws-types`, method: 'POST',
-      headers: {'Content-Type': 'application/json', },
-      data: sessionInput, signal
-    },
-      options);
-    }
-
-
-
-
-export const getWsTypesMutationOptions = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof wsTypes>>, TError,{data: BodyType<SessionInput>}, TContext>, request?: SecondParameter<typeof customInstance>}
-): UseMutationOptions<Awaited<ReturnType<typeof wsTypes>>, TError,{data: BodyType<SessionInput>}, TContext> => {
-
-const mutationKey = ['wsTypes'];
-const {mutation: mutationOptions, request: requestOptions} = options ?
-      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
-      options
-      : {...options, mutation: {...options.mutation, mutationKey}}
-      : {mutation: { mutationKey, }, request: undefined};
-
-
-
-
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof wsTypes>>, {data: BodyType<SessionInput>}> = (props) => {
-          const {data} = props ?? {};
-
-          return  wsTypes(data,requestOptions)
-        }
-
-
-
-
-
-
-  return  { mutationFn, ...mutationOptions }}
-
-    export type WsTypesMutationResult = NonNullable<Awaited<ReturnType<typeof wsTypes>>>
-    export type WsTypesMutationBody = BodyType<SessionInput>
-    export type WsTypesMutationError = ErrorType<HTTPValidationError>
-
-    /**
- * @summary Ws Types
- */
-export const useWsTypes = <TError = ErrorType<HTTPValidationError>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof wsTypes>>, TError,{data: BodyType<SessionInput>}, TContext>, request?: SecondParameter<typeof customInstance>}
- , queryClient?: QueryClient): UseMutationResult<
-        Awaited<ReturnType<typeof wsTypes>>,
-        TError,
-        {data: BodyType<SessionInput>},
-        TContext
-      > => {
-      return useMutation(getWsTypesMutationOptions(options), queryClient);
-    }
-    /**
- * @summary List Models
- */
-export const listModels = (
-
- options?: SecondParameter<typeof customInstance>,signal?: AbortSignal
-) => {
-
-
-      return customInstance<string[]>(
-      {url: `/api/models`, method: 'GET', signal
-    },
-      options);
-    }
-
-
-
-
-export const getListModelsQueryKey = () => {
-    return [
-    `/api/models`
-    ] as const;
-    }
-
-
-export const getListModelsQueryOptions = <TData = Awaited<ReturnType<typeof listModels>>, TError = ErrorType<unknown>>( options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listModels>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
-) => {
-
-const {query: queryOptions, request: requestOptions} = options ?? {};
-
-  const queryKey =  queryOptions?.queryKey ?? getListModelsQueryKey();
-
-
-
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof listModels>>> = ({ signal }) => listModels(requestOptions, signal);
-
-
-
-
-
-   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listModels>>, TError, TData> & { queryKey: DataTag<QueryKey, TData, TError> }
-}
-
-export type ListModelsQueryResult = NonNullable<Awaited<ReturnType<typeof listModels>>>
-export type ListModelsQueryError = ErrorType<unknown>
-
-
-export function useListModels<TData = Awaited<ReturnType<typeof listModels>>, TError = ErrorType<unknown>>(
-  options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof listModels>>, TError, TData>> & Pick<
-        DefinedInitialDataOptions<
-          Awaited<ReturnType<typeof listModels>>,
-          TError,
-          Awaited<ReturnType<typeof listModels>>
-        > , 'initialData'
-      >, request?: SecondParameter<typeof customInstance>}
- , queryClient?: QueryClient
-  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
-export function useListModels<TData = Awaited<ReturnType<typeof listModels>>, TError = ErrorType<unknown>>(
-  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listModels>>, TError, TData>> & Pick<
-        UndefinedInitialDataOptions<
-          Awaited<ReturnType<typeof listModels>>,
-          TError,
-          Awaited<ReturnType<typeof listModels>>
-        > , 'initialData'
-      >, request?: SecondParameter<typeof customInstance>}
- , queryClient?: QueryClient
-  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
-export function useListModels<TData = Awaited<ReturnType<typeof listModels>>, TError = ErrorType<unknown>>(
-  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listModels>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
- , queryClient?: QueryClient
-  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> }
-/**
- * @summary List Models
- */
-
-export function useListModels<TData = Awaited<ReturnType<typeof listModels>>, TError = ErrorType<unknown>>(
-  options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listModels>>, TError, TData>>, request?: SecondParameter<typeof customInstance>}
- , queryClient?: QueryClient
- ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> } {
-
-  const queryOptions = getListModelsQueryOptions(options)
 
   const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData, TError> };
 

@@ -36,7 +36,7 @@ For spec 017 P3, use `coordinator.md` and its isolated deterministic stack. No p
 - Sidebar: `New chat`, session list (title + relative time), footer = email · brain icon (Memory) · sun/moon (`Toggle theme`) · log out.
 - Header: session title · model `Select` (`aria-label="Model"`) · connection dot (green = WS open).
 - Composer: paperclip (`Attach file`, accepts `.pdf`/`.docx`) · textarea (Enter sends, Shift+Enter newline) · `Send` / `Stop` button (swaps while a turn runs).
-- Transcript items: `Thinking` collapsible (open while streaming, auto-collapses when the sample finishes) · markdown text with a streaming cursor · tool chips (`web_search`, `web_fetch`, `read_doc`, `memory_write`, `memory_recall`, spinner while in flight, click to expand the result) · subagent block badged with its effective display name (or `subagent` when unnamed; bot icon, nested items inside) · approval card titled `Run memory_write?` with `Approve` / `Deny`.
+- Transcript items: `Thinking` collapsible (open while streaming, auto-collapses when the sample finishes) · markdown text with a streaming cursor · tool chips (`web_search`, `web_fetch`, `read_doc`, `memory_write`, `memory_recall`, spinner while in flight, click to expand the result) · subagent chips (bot icon, display name, status; the button opens the child drawer, the toggle shows the message or result) · queue strip above the composer for accepted messages that have not started · approval card titled `Run memory_write?` with `Approve` / `Deny`.
 
 ---
 
@@ -69,7 +69,7 @@ For spec 017 P3, use `coordinator.md` and its isolated deterministic stack. No p
 
 **Expect**
 
-- URL becomes `/chat/<id>` where `<id>` is 32 hex chars, no dashes (`uuid4().hex`); the user bubble renders on the right.
+- URL becomes `/chat/<id>` where `<id>` is a canonical UUID (with dashes); old 32-hex URLs redirect to it. The user bubble renders on the right.
 - A `Thinking…` shimmer (or an open, pulsing `Thinking` block) appears before any answer text.
 - Answer text streams in visibly — partial text with a blinking cursor, growing over time, not one paste at the end.
 - If the endpoint emits reasoning: a `Thinking` block is present and **collapsed** once the sample completes; expanding it shows reasoning text. If no reasoning ever appears → **SKIP this sub-check**, note the model id from `SARATHI_MODELS`.
@@ -136,9 +136,9 @@ Per-page distinctive facts:
 
 **Expect**
 
-- A block badged `Wasm scout` (bot icon) appears with a spinner, showing the delegated task as its summary. It renders **in place of** the delegate tool chip — there must not be both.
-- While the subagent runs the block is open and shows **nested** activity inside its left rule: `web_search` / `web_fetch` chips and the subagent's own text.
-- When the subagent finishes, its spinner clears and the block collapses.
+- A `Wasm scout` chip (bot icon, spinner, `Running`) appears with the delegated task under its `Sent` toggle, and the strip above the composer lists it while it runs. It renders **in place of** the delegate tool chip — there must not be both.
+- Opening the chip shows the subagent's own activity in the child drawer: `web_search` / `web_fetch` chips and its text.
+- When the subagent finishes, its spinner clears and a `Finished` chip carries its result.
 - No approval or human-input card appears in the child drawer. Refresh the page and confirm the child is still named `Wasm scout` and its journal remains inspectable.
 - After the block completes, the root agent streams a **synthesis** answer below it (text outside the block).
 - The composer stays disabled until the *root* turn completes (a subagent turn emits two `turn_completed`s; the composer must not unlock early).
@@ -161,9 +161,9 @@ Per-page distinctive facts:
 **Expect**
 
 - Step 2: a card titled `Run memory_write?` with the tool arguments in a body block and `Approve` / `Deny` buttons; the composer is locked; the `Stop` button is **not** offered while an ask is pending.
-- Step 3–4: after the restart + reload the page reconnects (connection dot green), the transcript replays the whole turn so far, marks the unmatched work interrupted, and shows the approval as expired. It must not offer a live Approve action.
+- Step 3–4: after the restart + reload the page reconnects (connection dot green), the transcript replays the whole turn so far, marks the unmatched work interrupted, and shows no approval card. It must not offer a live Approve action.
 - Step 5: accepting the new human message durably records the prior interruption and starts new work; exactly one new pending approval card appears.
-- Step 6: the card flips to `Approved`, a `memory_write` chip completes, and the panel lists a row carrying the failure-modes preference.
+- Step 6: the card disappears, a `memory_write` chip completes, and the panel lists a row carrying the failure-modes preference.
 - Step 7: in a **fresh session**, the answer states the preference; usually a `memory_recall` chip is visible (chip optional, correct recall is not).
 - Step 8: B's memory panel says `No memories yet`, and B's answer does **not** know A's preference (a `memory_recall` chip returning nothing is fine). FAIL on any leak across accounts.
 - Log back in as A afterwards — the remaining scenarios run as A.
@@ -180,7 +180,7 @@ Per-page distinctive facts:
 
 **Expect**
 
-- The card flips to `Denied`; the composer unlocks; the turn **completes** (no error banner, no hang) and the model acknowledges it did not save.
+- The card disappears; the composer unlocks; the turn **completes** (no error banner, no hang) and the model acknowledges it did not save.
 - The `memory_write` chip, if expanded, shows a denial/error result rather than a memory id.
 - The memory panel is **unchanged** from scenario 6 — the Tuesday-3pm fact is absent.
 
@@ -212,14 +212,14 @@ Per-page distinctive facts:
 2. Send a deliberately long-running prompt (e.g. `Write a 1000-word essay on the history of the relational database.`) — a short one can finish in 1–2s on a cheap model and leave nothing to observe. While it is still streaming, try to open the dropdown.
 3. When idle, switch to the second model in `SARATHI_MODELS`.
 4. Send: `In one short sentence, what model are you?` and watch the turn.
-5. Optional stronger evidence: `docker compose logs --tail=200 backend` and look for the new model id in the request path, or watch the network frames for `sample_started` carrying the model.
+5. Optional stronger evidence: `docker compose logs --tail=200 backend` and look for the new model id in the request path.
 
 **Expect**
 
 - Step 2: the dropdown is **disabled** mid-turn (does not open / cannot change).
-- Step 3: the selection persists in the header after the PATCH; switching back and forth works.
+- Step 3: the selection persists in the header after `session/set_config_option`; switching back and forth works.
 - Step 4: the next turn runs and completes on the new model. Behavioural evidence is acceptable — a self-identification consistent with the new model, or a clearly different response style/latency. A model that misidentifies itself is not a FAIL on its own; prefer the step-5 evidence when it's ambiguous.
-- FAIL only if the selection does not stick, the PATCH errors, or the turn still demonstrably runs on the old model.
+- FAIL only if the selection does not stick, the change errors, or the turn still demonstrably runs on the old model.
 
 ---
 
@@ -236,7 +236,7 @@ Per-page distinctive facts:
 
 - After reload the connection dot goes green and the transcript **replays the persisted turn**: the user message plus every **completed** item — the finished `web_search` chip and any finalised text/thinking blocks — in order, no duplicates.
 - Streaming deltas are persisted. The partial text before reload replays from the root actor journal, then the same process-local task continues without starting a replacement sample.
-- **Pass criterion:** the reconnect subscribes from the browser's fresh cursor, replays each actor without duplicates, continues to a coherent final answer, and unlocks the composer.
+- **Pass criterion:** the reloaded page resumes the chat from the start, replays it without duplicates, continues to a coherent final answer, and unlocks the composer.
 - The theme chosen in step 1 survives the reload (no flash back to the default dark).
 - Re-reload after completion: the finished transcript replays identically and no turn restarts.
 

@@ -3,17 +3,18 @@
 import { useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LogOut, Moon, Plus, Sun } from "lucide-react";
 import { signOut, useSession } from "next-auth/react";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
+import type { SessionInfo } from "tantra-acp-client";
+import { useStore } from "zustand";
 
 import { Button } from "@/components/ui/button";
-import { getListSessionsQueryKey, useCreateSession, useListSessions } from "@/generated/api/sessions/sessions";
 import { clearToken } from "@/lib/apiClient";
-import { errorMessage } from "@/lib/errors";
 import { cn } from "@/lib/utils";
+import { errorText, newChat, SESSIONS_KEY, useChat } from "../client";
 import { MemoryDialog } from "./memory-dialog";
 
 const shortTime = (iso: string): string => {
@@ -28,22 +29,36 @@ export function Sidebar() {
   const router = useRouter();
   const pathname = usePathname();
   const queryClient = useQueryClient();
-  const { data: sessions, error } = useListSessions();
+  const chat = useChat();
+  const connected = useStore(chat.store, (state) => state.client.connection === "open");
+  const { data: sessions, error } = useQuery({
+    queryKey: SESSIONS_KEY,
+    enabled: connected,
+    queryFn: async () => {
+      const found: SessionInfo[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await chat.client.listSessions(cursor);
+        found.push(...page.sessions);
+        cursor = page.nextCursor;
+      } while (cursor !== undefined);
+      return found;
+    },
+  });
   const { data: session } = useSession();
   const { resolvedTheme, setTheme } = useTheme();
 
   useEffect(() => {
-    if (error) toast.error(errorMessage(error, "Could not load sessions."));
+    if (error) toast.error("Could not load sessions.");
   }, [error]);
 
-  const createSession = useCreateSession({
-    mutation: {
-      onSuccess: (created) => {
-        queryClient.invalidateQueries({ queryKey: getListSessionsQueryKey() });
-        router.push(`/chat/${created.id}`);
-      },
-      onError: (failure) => toast.error(errorMessage(failure, "Could not start a new chat.")),
+  const createSession = useMutation({
+    mutationFn: () => newChat(chat),
+    onSuccess: (sessionId) => {
+      queryClient.invalidateQueries({ queryKey: SESSIONS_KEY });
+      router.push(`/chat/${sessionId}`);
     },
+    onError: (failure) => toast.error(errorText(failure)),
   });
 
   const logout = async () => {
@@ -57,8 +72,8 @@ export function Sidebar() {
         <Button
           className="w-full justify-start"
           variant="outline"
-          disabled={createSession.isPending}
-          onClick={() => createSession.mutate({ data: {} })}
+          disabled={createSession.isPending || !connected}
+          onClick={() => createSession.mutate()}
         >
           <Plus />
           New chat
@@ -69,15 +84,17 @@ export function Sidebar() {
         {sessions?.length === 0 && <p className="text-muted-foreground px-2 py-2 text-sm">No sessions yet</p>}
         {sessions?.map((item) => (
           <Link
-            key={item.id}
-            href={`/chat/${item.id}`}
+            key={item.sessionId}
+            href={`/chat/${item.sessionId}`}
             className={cn(
               "hover:bg-accent hover:text-accent-foreground flex items-center gap-2 rounded-lg px-2 py-2 text-sm",
-              pathname === `/chat/${item.id}` && "bg-accent text-accent-foreground",
+              pathname === `/chat/${item.sessionId}` && "bg-accent text-accent-foreground",
             )}
           >
             <span className="min-w-0 flex-1 truncate">{item.title ?? "New chat"}</span>
-            <span className="text-muted-foreground shrink-0 text-xs">{shortTime(item.updated_at)}</span>
+            {item.updatedAt && (
+              <span className="text-muted-foreground shrink-0 text-xs">{shortTime(item.updatedAt)}</span>
+            )}
           </Link>
         ))}
       </nav>

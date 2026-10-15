@@ -210,17 +210,18 @@ export class TantraAcpClient {
   ): Promise<ResumeSessionResult> {
     if (this.connection !== "open") return Promise.reject(closed());
     const existing = this.sessions.has(sessionId);
-    return this.open(sessionId, options.mode ?? "read", true).catch(
-      (error: unknown) => {
-        if (this.sessions.has(sessionId) && existing) this.detach(sessionId);
-        else if (this.sessions.has(sessionId)) this.drop(sessionId, false);
-        throw error;
-      },
-    );
+    const opening = this.open(sessionId, options.mode ?? "read", true);
+    const target = this.sessions.get(sessionId);
+    return opening.catch((error: unknown) => {
+      if (this.sessions.get(sessionId) === target) {
+        if (existing) this.detach(sessionId);
+        else this.drop(sessionId, false);
+      }
+      throw error;
+    });
   }
 
   close(sessionId: string): Promise<EmptyResult> {
-    if (this.connection !== "open") return Promise.reject(closed());
     return this.detach(sessionId);
   }
 
@@ -410,10 +411,12 @@ export class TantraAcpClient {
   }
 
   private async resumeAll(): Promise<void> {
+    const resumed: [string, Session][] = [];
     for (const [sessionId, entry] of [...this.sessions]) {
       if (this.sessions.get(sessionId) !== entry) continue;
       try {
         await this.open(sessionId, "read", false);
+        resumed.push([sessionId, entry]);
       } catch (error) {
         if (!(error instanceof TantraAcpError) || error.rpcCode !== -32002)
           throw error;
@@ -421,6 +424,9 @@ export class TantraAcpClient {
         this.report(error);
       }
     }
+    for (const [sessionId, entry] of resumed)
+      if (this.sessions.get(sessionId) !== entry)
+        this.rpc("session/close", { sessionId }).catch(() => {});
   }
 
   private open(
@@ -684,6 +690,7 @@ export class TantraAcpClient {
 
   private detach(sessionId: string): Promise<EmptyResult> {
     this.drop(sessionId, !this.parents.has(sessionId));
+    if (this.connection !== "open") return Promise.resolve({});
     const closing = this.rpc<EmptyResult>("session/close", { sessionId });
     closing.catch(() => {});
     return closing;

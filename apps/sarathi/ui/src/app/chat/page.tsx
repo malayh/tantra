@@ -1,36 +1,34 @@
 "use client";
 
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { useStore } from "zustand";
 
-import { getListSessionsQueryKey, useCreateSession } from "@/generated/api/sessions/sessions";
 import type { Attachment } from "@/generated/models";
-import { errorMessage } from "@/lib/errors";
+import { blocks, errorText, newChat, SESSIONS_KEY, useChat } from "./client";
 import { Composer } from "./components/composer";
 import { Sidebar } from "./components/sidebar";
-import { pendingFirstMessage } from "./state";
 
 export default function ChatPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const createSession = useCreateSession({
-    mutation: {
-      onError: (failure) => toast.error(errorMessage(failure, "Could not start a new chat.")),
-    },
-  });
+  const chat = useChat();
+  const connected = useStore(chat.store, (state) => state.client.connection === "open");
+  const [pending, setPending] = useState(false);
 
-  const onSend = (text: string, attachments: Attachment[]) => {
-    createSession.mutate(
-      { data: {} },
-      {
-        onSuccess: (created) => {
-          pendingFirstMessage.set(created.id, text, attachments);
-          queryClient.invalidateQueries({ queryKey: getListSessionsQueryKey() });
-          router.push(`/chat/${created.id}`);
-        },
-      },
-    );
+  const onSend = async (text: string, attachments: Attachment[]) => {
+    setPending(true);
+    const sessionId = await newChat(chat).catch((error) => {
+      toast.error(errorText(error));
+      setPending(false);
+      return null;
+    });
+    if (sessionId === null) return;
+    void queryClient.invalidateQueries({ queryKey: SESSIONS_KEY });
+    await chat.client.prompt(sessionId, blocks(text, attachments)).catch((error) => toast.error(errorText(error)));
+    router.push(`/chat/${sessionId}`);
   };
 
   return (
@@ -42,7 +40,7 @@ export default function ChatPage() {
           <p className="text-muted-foreground text-sm">Ask Sarathi anything.</p>
         </div>
         <div className="mx-auto w-full max-w-3xl px-6 pb-6">
-          <Composer disabled={createSession.isPending} onSend={onSend} />
+          <Composer disabled={pending || !connected} onSend={onSend} />
         </div>
       </main>
     </div>

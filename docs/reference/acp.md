@@ -198,7 +198,7 @@ Clients that launch agent processes, such as Zed's `agent_servers` setting, can 
 
 ## TypeScript client
 
-`packages/tantra-acp-client` (`tantra-acp-client`) is an ESM client for the WebSocket endpoint. It has no runtime dependencies, uses the native `WebSocket`, always negotiates the `tantra` profile and `elicitation.form`, and owns cursors, command IDs, writer state and reconnects. Transcript reduction stays in the application.
+`packages/tantra-acp-client` (`tantra-acp-client`) is an ESM client for the WebSocket endpoint. It has no runtime dependencies, uses the native `WebSocket`, always negotiates the `tantra` profile and `elicitation.form`, and owns cursors, command IDs, writer state and reconnects. It also ships a pure transcript reducer (see **Transcript** below).
 
 ```ts
 import { TantraAcpClient } from "tantra-acp-client";
@@ -223,7 +223,8 @@ console.log(prompt.commandId, (await prompt).messageId);
 | `newSession()` | `session/new {cwd}`; the client becomes writer |
 | `listSessions(cursor?)` | `session/list`, without a `cwd` filter |
 | `resume(id, {mode})` | `session/resume`, `mode` defaults to `read`. A failed re-resume closes the session on both sides. |
-| `close(id)` / `delete(id)` | `session/close` / `session/delete` |
+| `close(id)` | Always drops the session (and a root's known descendants) locally and rejects its prompts. Sends `session/close` only while `open`; otherwise resolves `{}`, and a reconnect resume already in flight is closed once it returns. |
+| `delete(id)` | `session/delete` |
 | `prompt(id, blocks, {commandId?})` | `session/prompt`; returns a promise with a synchronous `.commandId` |
 | `cancel(id, {commandId?})` | `session/cancel`; resolves once sent |
 | `claimWriter(id)` / `setModel(id, model)` | `_tantra/session/claim_writer` / `session/set_config_option` |
@@ -250,3 +251,26 @@ console.log(prompt.commandId, (await prompt).messageId);
 | `too_large`, `profile_unsupported`, `handler_failed`, `dial_failed` | Client-side failures; `profile_unsupported` never reconnects |
 
 Errors carry `rpcCode`, `sessionId` and `commandId` when known. `crypto.randomUUID` requires a secure context (HTTPS or localhost).
+
+**Transcript.** `src/transcript.ts` is pure, immutable and framework-free: each function returns a new `Transcript`, or the same object when nothing changed, so it suits React and zustand selectors. Call `apply` from `onUpdate` and `addRequest` from `onRequest`.
+
+| Function | Effect |
+|---|---|
+| `empty()` | `{sessions: {}, roster: {}, requests: {}}` |
+| `apply(t, sessionId, update)` | Folds one `session/update` into `sessions[sessionId]`, or into `roster` for `subagent_update` |
+| `reset(t, sessionId)` | Drops the session's view and pending requests (before a replay from `start`); the roster stays |
+| `addRequest(t, request)` / `removeRequest(t, sessionId, askId)` | Pending requests per session, keyed by `_meta.tantra.askId` |
+| `askOf(request)` | `{kind: "approval" \| "choice" \| "free_text", askId, title, body, options, respond}` |
+| `descendants(t, root)` / `treeRunning(t, root)` / `pendingRequest(t, id)` | Subagent ids breadth-first; whether the root or any descendant is not `idle`; the oldest pending request |
+
+- **`SessionView`:** `entries`, `state` (the last `state_update`, with `_meta.tantra.ask` as `ask`), `title` and `updatedAt`, `configOptions`, `queue`, `writerReason`.
+- **Entries** form one ordered list, upserted by `(kind, id)`:
+  - `user`: the raw content blocks.
+  - `agent` / `thought`: chunks append to `text`; the full message replaces it and sets `final`. Thought blocks are joined by a blank line.
+  - `tool`: fields merged (the ACP `kind` is `toolKind`). Content chunks before `completed`/`failed` go to `progress`; `rawOutput` is the result.
+  - `message`: a `session_message` with `sender`, `recipient`, `text` and `finished`.
+  - `status`: a **cursored** `state_update idle` with `cancelled`, `_tantra_interrupted` or `error`, keyed by its cursor. The uncursored resume snapshot adds none.
+- **Roster:** `{parentId, title, state}` per child id, where `parentId` is the session the `subagent_update` arrived on; missing fields are kept.
+- `usage_update`, compaction updates, `_tantra_notice` and unknown kinds change nothing.
+- `askOf(...).respond` sends exactly what the server accepts: `{outcome: {outcome: "selected", optionId: "allow" | "deny"}}` for approvals, `{action: "accept", content: {choice}}` or `{action: "accept", content: {text}}` for elicitations.
+- `test/fixtures/session.json` is a golden recording of a scripted session (`tests/test_acp_transcript_fixture.py`; `TANTRA_UPDATE_FIXTURES=1` rewrites it). The client tests check that live, `start` replay and cursor resume reduce to the same transcript.

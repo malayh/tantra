@@ -71,20 +71,22 @@ async def test_lifespan_installs_resources_and_cleans_up(monkeypatch: Any) -> No
     monkeypatch.setattr("sarathi.main.get_settings", lambda: SimpleNamespace(UPLOAD_DIR="/tmp/sarathi-test-uploads"))
     application = FastAPI()
     route = object()
+    endpoint = AsyncCloser("endpoint", calls)
 
-    def mount(app: FastAPI, value: Any, factory: Any) -> object:
+    def mount(app: FastAPI, value: Any) -> tuple[object, AsyncCloser]:
         assert value is resources
         app.router.routes.append(route)
         calls.append("mount")
-        return route
+        return route, endpoint
 
-    monkeypatch.setattr("sarathi.main.mount_session_socket", mount)
+    monkeypatch.setattr("sarathi.main.mount_acp", mount)
 
     async with lifespan(application):
         assert application.state.resources is resources
         assert calls == ["make", "mount"]
 
-    assert calls == ["make", "mount", "close", "telemetry"]
+    assert route not in application.router.routes
+    assert calls == ["make", "mount", "endpoint", "close", "telemetry"]
 
 
 async def test_lifespan_fails_startup_when_the_coordinator_is_unavailable(monkeypatch: Any) -> None:

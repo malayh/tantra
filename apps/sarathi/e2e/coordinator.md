@@ -1,6 +1,6 @@
 # Coordinator failure verification
 
-This runbook exercises the normal Sarathi auth, WebSocket, Runtime, Store, and UI against a deterministic external OpenAI-compatible provider and a gated test tool. The controls exist only in the isolated Compose override; Sarathi exposes no fault-injection HTTP routes.
+This runbook exercises the normal Sarathi auth, ACP WebSocket, Runtime, Store, and UI against a deterministic external OpenAI-compatible provider and a gated test tool. The controls exist only in the isolated Compose override; Sarathi exposes no fault-injection HTTP routes.
 
 ## Start and reset
 
@@ -11,7 +11,7 @@ docker compose -p tantra011e2e -f docker-compose.yaml -f docker-compose.e2e.yaml
 docker compose -p tantra011e2e -f docker-compose.yaml -f docker-compose.e2e.yaml ps
 ```
 
-Use `http://localhost:13001` in Brave. Nginx is `http://localhost:18000`, backend A is `http://localhost:18001`, backend B is `http://localhost:18002`, and the gate control API is `http://localhost:18090`. The override forces model `e2e-model`, disables embeddings, and uses a six-second coordinator lease unless `E2E_COORDINATOR_LEASE_TTL` overrides it.
+Use `http://localhost:13001` in Brave. Nginx is `http://localhost:18000`, backend A is `http://localhost:18001`, backend B is `http://localhost:18002`, and the gate control API is `http://localhost:18090`. The override configures models `e2e-model` (default) and `e2e-other`, disables embeddings, and uses a six-second coordinator lease unless `E2E_COORDINATOR_LEASE_TTL` overrides it.
 
 The project name, database, uploads, and network are disposable and isolated. Verify the project name before the destructive reset:
 
@@ -23,9 +23,9 @@ Never run `down -v` against the default project. Restore every stopped or paused
 
 ## Transport probes
 
-Use HTTP bearer authentication to issue `POST /api/sessions/{root}/socket-ticket` with `{"mode":"read"}` or `{"mode":"write"}`. Dial `/api/ws/sessions/{root}?ticket=...` with the configured browser Origin and `tantra.session.v1`. Root/actor/command/ask/subscription frame UUIDs are canonical; existing HTTP and journal IDs remain hex. Subscribe read-only, wait for `ready`, then acquire the writer explicitly. Receipts confirm acceptance; journal events do not acknowledge commands. Reconnect requires explicit reclaim.
+Use HTTP bearer authentication to issue `POST /api/acp/ticket` with `{"mode":"read"}` or `{"mode":"write"}`. Dial `/api/acp?ticket=...` with the configured browser Origin, then send `initialize` with `capabilities._meta.tantra.version = 1` to negotiate the `tantra` profile. Session IDs are canonical UUIDs. `session/resume` defaults to read; `_meta.tantra.mode: "write"` claims the writer, and `_tantra/session/claim_writer` reclaims it. Prompts carry `_meta.tantra.commandId` and respond `{messageId}` (the same UUID) once the input is durably accepted; journal-derived updates carry `_meta.tantra.cursor` (`<seq>.<index>`). A reconnect resumes read-only from the last applied cursor and requires explicit reclaim.
 
-`node apps/sarathi/e2e/session-client.mjs` runs the shared client against both backends and saves behavioral evidence. The disposable account, sessions, memories, and uploads belong only to this Compose project.
+`node apps/sarathi/e2e/acp-client.mjs` runs `tantra-acp-client` against both backends and saves behavioral evidence. Its owner-death case kills (SIGKILL) and restarts `backend_a` through `SARATHI_E2E_COMPOSE`. The disposable account, sessions, memories, and uploads belong only to this Compose project.
 
 ## Gate controls
 
@@ -55,7 +55,7 @@ Markers may be surrounded by ordinary text. Close `io`, `worker`, or `stream` be
 
 ## Evidence
 
-Write screenshots and notes under the ignored directory `apps/sarathi/e2e/reports/011-coordinator-2026-09-27/`. For each case record the root ID from the URL, command UUIDs and journal cursors from WebSocket frames, the gate request ID/source, ownership generation before and after, Nginx upstream, and the final journal rows.
+Write screenshots and notes under the ignored directory `apps/sarathi/e2e/reports/011-coordinator-2026-09-27/`. For each case record the root ID from the URL, command IDs (`_meta.tantra.commandId`, echoed as `messageId`) and cursors (`_meta.tantra.cursor`) from ACP frames, the gate request ID/source, ownership generation before and after, Nginx upstream, and the final journal rows.
 
 Backend Uvicorn access logs are disabled because WebSocket URLs contain short-lived handshake tickets. Use the sanitized Nginx access log for backend routing evidence.
 
@@ -85,26 +85,26 @@ curl -fsS -X POST http://localhost:18090/control/gates/model/open
 docker compose -p tantra011e2e -f docker-compose.yaml -f docker-compose.e2e.yaml unpause backend_b
 ```
 
-Confirm the termination query returned exactly one row. The owner must publish the gated journal change while B is paused. After unpausing B, verify its viewer advances from the old scalar cursor through the durable page without duplicates; that proves catch-up rather than notification delivery. Restore B even if an assertion fails.
+Confirm the termination query returned exactly one row. The owner must publish the gated journal change while B is paused. After unpausing B, verify its viewer's `_meta.tantra.cursor` sequence continues from the last applied cursor through the durable page without duplicates; that proves catch-up rather than notification delivery. Restore B even if an assertion fails.
 
 ## Deterministic matrix
 
 Use three Brave windows on the same session: writer A, writer B, and a viewer opened with `?view=readonly`. Nginx round-robins them; confirm actual routing from its logs. Run each destructive case on a fresh chat, and reset the gate between cases.
 
 1. **Reconnect through B while A works:** close `model`, send `[gate:provider=model]`, close or reload writer A, reconnect a writer routed to B, open `model`, and verify one turn completes with no duplicate UUID or sequence.
-2. **Writer takeover and viewer:** open editable page B and confirm page A remains connected as a reader with a Reclaim control action. Open the read-only URL and confirm it observes without replacing B or enabling mutations. Reclaim from A explicitly and verify B is downgraded.
+2. **Writer takeover and viewer:** open editable page B and confirm page A receives `_tantra_writer` `replaced`, stays connected as a reader, and shows Reclaim control. Open the read-only URL and confirm it resumes with `mode: read`, observes without replacing B, and shows only "Awaiting input" for asks. Reclaim from A explicitly (`_tantra/session/claim_writer`) and verify B is downgraded.
 3. **Active child while root idle:** close `worker`, send `[gate:child=worker]`, wait for the root turn to become idle while the child stays active, disconnect all writers, and verify ownership/activity remain. Open `worker` and refresh the child drawer.
-4. **FIFO while working:** close `model`, send `[gate:provider=model]`, enqueue a second UUID with a direct authenticated WebSocket probe, open `model`, and verify journal acceptance and execution order.
+4. **FIFO while working:** close `model`, send `[gate:provider=model]`, enqueue a second prompt with its own `commandId` from another writer or a direct ACP probe, confirm `_tantra_queue_update` and the queue strip list it, open `model`, and verify acceptance and execution order.
 5. **Remote answer and Stop:** route the owner to A, take writer authority through B, answer `[gate:ask=approval]` from B, then repeat with a closed provider/tool gate and Stop from B. Release the gate and verify the durable terminal.
-6. **Committed reply loss:** arm `drop-next-send`, submit a fixed command UUID through non-owner B, observe an uncertain error or lost receipt, then retry the identical frozen command UUID. A duplicate committed receipt confirms acceptance. `/control/state` must show one dropped transport reply and the journal must contain exactly one matching `input_queued`.
-7. **Notification catch-up:** hold the owner on `model`, terminate the paused observer's exact `LISTEN` connection with the procedure above, publish while it is absent, then unpause it. Verify the viewer catches up from its old cursor without duplicates.
+6. **Committed reply loss:** arm `drop-next-send` and prompt through non-owner B. The ACP server retries the send with the same command ID, so the client receives `{messageId}` equal to its `commandId` without an error. `/control/state` must show one dropped transport reply and the journal must contain exactly one matching `input_queued` (one `user_message` in a replay from start).
+7. **Notification catch-up:** hold the owner on `model`, terminate the paused observer's exact `LISTEN` connection with the procedure above, publish while it is absent, then unpause it. Verify the viewer's ACP cursors catch up from the last applied cursor without duplicates.
 8. **Backend B death:** with A owning a closed gate, stop B and verify A continues. Restore B and reconnect through it before the next case.
 9. **Owner A death and expiry:** kill A while `[gate:provider=model]` waits. Before six seconds, B must not start replacement work. After expiry, claim from B and verify the abandoned started turn is interrupted rather than replayed.
 10. **Paused stale owner:** pause A at a provider gate, wait past expiry, claim/recover through B, unpause A, then open the gate. Verify A cannot append and the ownership generation increased once.
 11. **Ask expiry:** leave `[gate:ask=approval]` unanswered, kill its owner, wait past expiry, reconnect through the other backend, and verify the old ask is expired and cannot be answered.
 12. **Cancellation acceptance crash boundary:** with `[gate:tool=io]` blocked, run one crash before cancellation acceptance and one after. Before acceptance there is no `cancellation_requested`; after acceptance the request, frozen targets, and matching turn terminals commit atomically. Verify no journal state has persisted targets without its terminals, and do not expect recovery to repair such a partial state.
 13. **Database outage:** stop `db` while a viewer and writer are connected. Unavailability must not render as inactive. Start `db`, wait for health, restore backends if needed, and verify replay/catch-up.
-14. **Slow reader:** throttle or suspend one read-only page while turns complete elsewhere, resume it, and verify scalar cursors catch up without blocking the owner.
+14. **Slow reader:** throttle or suspend one read-only page while turns complete elsewhere, resume it, and verify it catches up without blocking the owner. A send stuck for 10 s closes that socket with `1013`; the client then resumes from its applied cursor.
 15. **Graceful shutdown:** stop the owner with Compose rather than kill/pause and verify it writes interruption terminals, clears activity, and releases ownership immediately. The other backend must claim without waiting for lease expiry.
 16. **Child refresh:** complete `[gate:child=worker]`, refresh, open the child drawer, and verify its independent journal and display name.
 17. **Cross-backend upload:** upload through one backend, read through the other, and verify the shared path/content without using the user's default uploads volume.

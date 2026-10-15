@@ -6700,7 +6700,7 @@ tailwindcss@4.3.3, tailwindcss@^4:
   resolved "https://registry.yarnpkg.com/tailwindcss/-/tailwindcss-4.3.3.tgz#c006861611c213c1877893ab5b23daa16be2bb55"
   integrity sha512-gOhV3P7ufE62QDGg1zVaTgCR+EtPv92k2nIhVcVKcLmxT1sUBsQGhnZj175j+MqRt4zLF7ic+sCYjfhxMxj7YQ==
 
-"tantra-session-client@file:../../../packages/tantra-client":
+"tantra-acp-client@file:../../../packages/tantra-acp-client":
   version "0.1.0"
 
 tapable@^2.3.3:

@@ -1,11 +1,25 @@
 import {
   TantraAcpClient,
   TantraAcpError,
+  addRequest,
+  apply,
+  askOf,
   cursorOf,
+  descendants,
+  empty,
+  pendingRequest,
+  removeRequest,
+  reset,
+  treeRunning,
   type AgentRequest,
+  type Ask,
   type ClientState,
+  type Entry,
   type PromptPromise,
+  type RosterEntry,
   type SessionUpdate,
+  type SessionView,
+  type Transcript,
 } from "tantra-acp-client";
 
 const client = new TantraAcpClient({
@@ -51,3 +65,33 @@ async function main(): Promise<void> {
 }
 
 void main;
+
+function render(transcript: Transcript, root: string): void {
+  const view: SessionView | undefined = transcript.sessions[root];
+  for (const entry of view?.entries ?? []) {
+    const shown: Entry = entry;
+    if (shown.kind === "tool") void [shown.progress, shown.rawOutput];
+    else if (shown.kind === "message") void [shown.sender, shown.finished];
+  }
+  const children: RosterEntry[] = descendants(transcript, root).flatMap(
+    (id) => transcript.roster[id] ?? [],
+  );
+  const request = pendingRequest(transcript, root);
+  if (request) {
+    const ask: Ask = askOf(request);
+    if (ask.kind === "approval") ask.respond(true);
+    else if (ask.kind === "choice") ask.respond(ask.options[0] ?? "");
+    else ask.respond("yes");
+  }
+  void [children, treeRunning(transcript, root), view?.state?.ask?.askId];
+}
+
+const track = (transcript: Transcript, request: AgentRequest): Transcript =>
+  addRequest(transcript, request);
+const transcript: Transcript = apply(empty(), "s", {
+  sessionUpdate: "agent_message_chunk",
+  messageId: "m",
+  content: { type: "text", text: "hi" },
+});
+render(removeRequest(reset(transcript, "s"), "s", "a"), "s");
+void track;

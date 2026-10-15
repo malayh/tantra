@@ -1,38 +1,32 @@
 "use client";
 
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { TantraAcpError } from "tantra-acp-client";
+import { useStore } from "zustand";
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useListModels } from "@/generated/api/meta/meta";
-import { getListSessionsQueryKey, usePatchSession } from "@/generated/api/sessions/sessions";
-import { errorMessage } from "@/lib/errors";
+import { errorText, useChat } from "../client";
 
-export function ModelPicker({
-  sessionId,
-  model,
-  disabled = false,
-}: {
-  sessionId: string;
-  model: string | null | undefined;
-  disabled?: boolean;
-}) {
-  const queryClient = useQueryClient();
-  const { data: models } = useListModels();
-
-  const patch = usePatchSession({
-    mutation: {
-      onSuccess: () => queryClient.invalidateQueries({ queryKey: getListSessionsQueryKey() }),
-      onError: (failure) => toast.error(errorMessage(failure, "Could not switch the model.")),
-    },
+export function ModelPicker({ sessionId, disabled = false }: { sessionId: string; disabled?: boolean }) {
+  const { client, store } = useChat();
+  const option = useStore(store, (state) =>
+    state.transcript.sessions[sessionId]?.configOptions.find((item) => item.configId === "model"),
+  );
+  const setModel = useMutation({
+    mutationFn: (model: string) => client.setModel(sessionId, model),
+    onSuccess: (configOptions) =>
+      store.getState().apply(sessionId, { sessionUpdate: "config_option_update", configOptions }),
+    onError: (error) =>
+      toast.error(
+        error instanceof TantraAcpError && error.code === "model_busy"
+          ? errorText(error)
+          : "Could not switch the model.",
+      ),
   });
 
   return (
-    <Select
-      value={model ?? undefined}
-      disabled={disabled || patch.isPending}
-      onValueChange={(value) => patch.mutate({ sessionId, data: { model: value } })}
-    >
+    <Select value={option?.currentValue} disabled={disabled || setModel.isPending} onValueChange={setModel.mutate}>
       <SelectTrigger
         size="sm"
         aria-label="Model"
@@ -41,9 +35,9 @@ export function ModelPicker({
         <SelectValue placeholder="Model" />
       </SelectTrigger>
       <SelectContent>
-        {models?.map((name) => (
-          <SelectItem key={name} value={name} className="text-xs">
-            {name}
+        {option?.options.map((item) => (
+          <SelectItem key={item.value} value={item.value} className="text-xs">
+            {item.name}
           </SelectItem>
         ))}
       </SelectContent>

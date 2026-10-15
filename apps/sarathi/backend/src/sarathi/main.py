@@ -5,24 +5,20 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.routing import APIRoute
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.routing import WebSocketRoute
 
 from sarathi.agent import RuntimeResources, close_resources, make_resources
-from sarathi.api import auth, memory, meta, sessions, uploads, ws
+from sarathi.api import acp, auth, memory, uploads
 from sarathi.config import get_settings
-from sarathi.db import get_session_factory
 from sarathi.telemetry import setup_instrumentation, shutdown_telemetry
+from tantra.acp import AcpWebSocket
 
 
-def mount_session_socket(
-    application: FastAPI,
-    resources: RuntimeResources,
-    session_factory: async_sessionmaker[AsyncSession],
-) -> WebSocketRoute:
-    route = WebSocketRoute("/api/ws/sessions/{session_id}", ws.build_session_socket(resources, session_factory))
+def mount_acp(application: FastAPI, resources: RuntimeResources) -> tuple[WebSocketRoute, AcpWebSocket]:
+    endpoint = acp.build_acp_endpoint(resources)
+    route = WebSocketRoute("/api/acp", endpoint)
     application.router.routes.append(route)
-    return route
+    return route, endpoint
 
 
 @asynccontextmanager
@@ -30,11 +26,12 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     Path(get_settings().UPLOAD_DIR).mkdir(parents=True, exist_ok=True)
     resources = await make_resources()
     application.state.resources = resources
-    socket_route = mount_session_socket(application, resources, get_session_factory())
+    route, endpoint = mount_acp(application, resources)
     try:
         yield
     finally:
-        application.router.routes.remove(socket_route)
+        application.router.routes.remove(route)
+        await endpoint.aclose()
         await close_resources(resources)
         shutdown_telemetry()
 
@@ -62,14 +59,7 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    for router in (
-        auth.router,
-        sessions.router,
-        memory.router,
-        uploads.router,
-        meta.router,
-        meta.models_router,
-    ):
+    for router in (auth.router, memory.router, uploads.router, acp.router):
         application.include_router(router)
     setup_instrumentation(application)
     return application

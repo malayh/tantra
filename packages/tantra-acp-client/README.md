@@ -23,9 +23,44 @@ const { messageId } = await prompt;
 - `onUpdate` must not await client calls: the response would queue behind the handler.
 - `onRequest` is called in order but not awaited; answer with `respond()` whenever the user decides.
 - After a dropped connection, every open session resumes read-only from its cursor. A session that was writer is paused (`paused: true` in `onState`): its unanswered prompt and any prompt made while paused are held until `claimWriter`, `resume(id, { mode: "write" })` or a `claimed` update, then sent with their original `commandId`.
-- Transcript reduction is left to the application.
 
 See `docs/reference/acp.md` ("TypeScript client") for the full contract.
+
+## Transcript
+
+A pure, framework-free reducer folds updates and requests into a `Transcript`: a `SessionView` per session (`entries`, `state`, `title`, `updatedAt`, `configOptions`, `queue`, `writerReason`), a subagent `roster` and the pending requests. Every function returns a new object, or the same one when nothing changed.
+
+```ts
+import {
+  addRequest,
+  apply,
+  askOf,
+  empty,
+  removeRequest,
+} from "tantra-acp-client";
+
+let transcript = empty();
+const client = new TantraAcpClient({
+  url,
+  onUpdate: (sessionId, update) => {
+    transcript = apply(transcript, sessionId, update);
+  },
+  onRequest: (request) => {
+    transcript = addRequest(transcript, request);
+    request.signal.addEventListener("abort", () => {
+      transcript = removeRequest(
+        transcript,
+        request.sessionId,
+        askOf(request).askId,
+      );
+    });
+  },
+});
+```
+
+- Entries are `user`, `agent`, `thought`, `tool`, `message` (subagent traffic) and `status` (a cursored `idle` that was cancelled, interrupted or failed).
+- `askOf(request)` gives `{kind: "approval" | "choice" | "free_text", askId, title, body, options, respond}`.
+- `reset`, `descendants`, `treeRunning` and `pendingRequest` cover reopening a session, the subagent tree and the next ask.
 
 ## Development
 

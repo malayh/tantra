@@ -44,9 +44,9 @@ def test_telemetry_is_off_without_an_endpoint(monkeypatch: pytest.MonkeyPatch, u
 def test_http_instrumentation_excludes_websocket_query_strings() -> None:
     excluded = parse_excluded_urls(_INSTRUMENTATION_EXCLUDED_URLS)
 
-    assert excluded.url_disabled("ws://localhost/api/ws/sessions/root?token=redacted")
+    assert excluded.url_disabled("ws://localhost/api/acp?ticket=redacted")
     assert excluded.url_disabled("http://localhost/api/health")
-    assert not excluded.url_disabled("http://localhost/api/sessions")
+    assert not excluded.url_disabled("http://localhost/api/memory")
 
 
 def test_an_endpoint_wires_an_env_configured_tracer_onto_the_runtime(

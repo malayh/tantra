@@ -10,7 +10,7 @@ A deep-search chat system in the style of Perplexity — ask anything, watch it 
 
 - **Streaming turns with visible thinking** — reasoning deltas render live, collapse when done.
 - **Skill-based research** — Sarathi researches inline by default and can delegate independent work to a named general-purpose `subagent`; both load the same `research` skill with `shallow`, `normal`, or `deep` effort.
-- **Lazy subagent inspection** — lightweight actor status is polled while child journals stream only when their drawers are open.
+- **Lazy subagent inspection** — child status arrives as ACP `subagent_update` while child transcripts stream only when their drawers are open.
 - **Adaptive compaction** — each actor keeps an independent durable summary and bounded recent tail using configured, discovered, or conservative model limits.
 - **Stop that works** — one click sends a durable cancellation command for the whole actor tree, and the thread stays usable.
 - **Human-in-the-loop** — root memory writes suspend behind an approval card; subagents have no approval-gated tools or human asks.
@@ -21,17 +21,17 @@ A deep-search chat system in the style of Perplexity — ask anything, watch it 
 
 ## Session transport
 
-Sarathi uses Tantra `SessionSocket` and the local `tantra-session-client` package. HTTP routes, authentication, attachment validation, transcript reduction, and actor polling remain application-owned.
+Sarathi serves tantra's ACP interface (`tantra.acp` with the `tantra` profile) at WebSocket `/api/acp`; the UI uses the local `tantra-acp-client` package and its transcript reducer. Authentication, scoping, the access policy, and attachment encoding remain application-owned: prompts carry text plus `resource_link` blocks whose `file://` URIs must stay under the user's upload directory.
 
-The browser requests a root-scoped ticket through `POST /api/sessions/{id}/socket-ticket` before each dial. Tickets are reusable for at most 30 seconds; socket lifetime follows the original login expiry. WebSocket URLs carry the ticket rather than the login token. Both backends must share `SECRET_KEY`, and `CORS_ORIGINS` must include the actual browser origin.
+The browser requests a user-scoped ticket through `POST /api/acp/ticket` (`{"mode": "write"}`) before each dial. Tickets are reusable for at most 30 seconds and never outlive the login; the socket closes at login expiry. WebSocket URLs carry the ticket rather than the login token. Both backends must share `SECRET_KEY`, and `CORS_ORIGINS` must include the actual browser origin. `read` tickets serve observers such as the E2E client.
 
-Editable pages acquire control once after initial replay. Reconnect and writer replacement leave history readable and require **Reclaim control** before Send, Stop, answers, or model changes. `?view=readonly` requests a read-only ticket and never claims control. Receipts confirm durable acceptance; uncertain commands retry their original IDs. Refresh rebuilds the full transcript, while an open page resumes from its applied cursors.
+Each tab holds one ACP connection. Opening a chat resumes it from the start and leaving closes it. Editable pages resume as writer. Writer replacement or a dropped connection leaves history readable and requires **Reclaim control** before Send, Stop, answers, or model changes; prompts in flight during a drop are held and resent with their original command IDs after reclaim. `?view=readonly` resumes read-only and never claims control. Ask details reach only the writer, so readers see "Awaiting input". Prompts resolve on durable acceptance and show in the queue strip until they start.
 
-Deploy both backends and the UI together; pages using the previous wire protocol require refresh. Local UI development builds `packages/tantra-client` before consuming its file dependency. The UI Compose build context is the repository root so its standalone image includes that package.
+Deploy both backends and the UI together; pages using the previous wire protocol require refresh. Local UI development builds `packages/tantra-acp-client` before consuming its file dependency. The UI Compose build context is the repository root so its standalone image includes that package.
 
 ## Stack
 
-- `backend/` — two FastAPI + tantra processes, a PostgreSQL coordinator and event-sourced store, and WebSockets served through Nginx.
+- `backend/` — two FastAPI + tantra processes, a PostgreSQL coordinator and event-sourced store, and the ACP WebSocket served through Nginx.
 - `ui/` — Next.js 15, React 19, Tailwind v4, shadcn/ui; API client generated from OpenAPI (Orval).
 
 ## Run it
@@ -59,7 +59,7 @@ Set in `.env`:
 docker compose up --build -d
 ```
 
-Open http://localhost:3001, sign up, chat. Nginx serves the API and WebSockets on http://localhost:8001 and round-robins both backends without affinity.
+Open http://localhost:3001, sign up, chat. Nginx serves the API and the ACP WebSocket on http://localhost:8001 and round-robins both backends without affinity.
 
 Both backends use the same image, configuration, database, and uploads volume. PostgreSQL leases one Runtime as the execution owner for each root while writer claims, commands, journal readers, and recovery work across either backend. Add `?view=readonly` to a chat URL for an observing tab that never claims the writer. Storage created by Tantra 1.0 or 1.1 upgrades additively to 1.2. Pre-1.0 storage still requires a fresh database. Legacy `researcher` history remains readable but cannot resume; new work uses `subagent`.
 
@@ -71,7 +71,7 @@ For deterministic coordinator tests, start the isolated E2E project with `docker
 
 Backend (from `backend/`): `uv sync --dev`, then `just runserver` / `just test` / `just lint` / `just migrate`.
 
-UI: run `npm ci && npm run build` in `packages/tantra-client`, then run `yarn install` and `yarn dev` from `apps/sarathi/ui`; `yarn typegen` regenerates the API client after backend schema changes (never edit `ui/src/generated/`).
+UI: run `npm ci && npm run build` in `packages/tantra-acp-client`, then run `yarn install` and `yarn dev` from `apps/sarathi/ui` (yarn copies the file dependency, so rerun `yarn install` after rebuilding the client); `yarn typegen` regenerates the API client after backend schema changes (never edit `ui/src/generated/`).
 
 ## E2E
 
@@ -79,4 +79,4 @@ UI: run `npm ci && npm run build` in `packages/tantra-client`, then run `yarn in
 
 `e2e/coordinator.md` — disposable two-backend failure matrix, deterministic gate controls, evidence queries, and recovery notes.
 
-The automated native-client workflow is `node apps/sarathi/e2e/session-client.mjs` from the repository root after installing the UI dependencies and building the shared client. It targets the disposable two-backend stack and writes `e2e/reports/017-p3/client-behavior.json`. Set `SARATHI_E2E_API`, `SARATHI_E2E_A`, `SARATHI_E2E_B`, `SARATHI_E2E_GATE`, and `SARATHI_E2E_ORIGIN` when ports differ. It uses only the deterministic provider.
+The automated native-client workflow is `node apps/sarathi/e2e/acp-client.mjs` from the repository root after installing the UI dependencies and building `packages/tantra-acp-client`. It targets the disposable two-backend stack and writes `e2e/reports/018-p5/client-behavior.json`. Set `SARATHI_E2E_API`, `SARATHI_E2E_A`, `SARATHI_E2E_B`, `SARATHI_E2E_GATE`, and `SARATHI_E2E_ORIGIN` when ports differ. Its owner-death case kills (SIGKILL) and restarts `backend_a` through `SARATHI_E2E_COMPOSE` (default `docker compose -p tantra011e2e -f docker-compose.yaml -f docker-compose.e2e.yaml`, run from `apps/sarathi`); `SARATHI_E2E_MODEL` (default `e2e-other`) picks the second model. It uses only the deterministic provider.

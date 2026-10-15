@@ -1,0 +1,2451 @@
+{
+  "live": [
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "session_info_update",
+        "updatedAt": "2026-01-01T00:00:00+00:00"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "idle"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "_tantra_queue_update",
+        "entries": []
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "_tantra_writer",
+        "writer": true,
+        "reason": "claimed"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "_tantra_queue_update",
+        "entries": [
+          {
+            "commandId": "00000000-0000-4000-8000-000000000002",
+            "content": [
+              {
+                "type": "text",
+                "text": "Run the checks."
+              }
+            ],
+            "submittedBy": "user"
+          }
+        ]
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "user_message",
+        "messageId": "00000000-0000-4000-8000-000000000002",
+        "content": [
+          {
+            "type": "text",
+            "text": "Run the checks."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "3.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "running",
+        "_meta": {
+          "tantra": {
+            "cursor": "3.1"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "_tantra_queue_update",
+        "entries": []
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_thought_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "Plan "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "5.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_thought_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "the "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "6.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_thought_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "checks "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "7.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_thought_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "first."
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "8.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "Checking "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "9.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "the "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "10.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "system."
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "11.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_thought",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": [
+          {
+            "type": "text",
+            "text": "Plan the checks first."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "14.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": [
+          {
+            "type": "text",
+            "text": "Checking the system."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "15.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "00000000-0000-4000-8000-000000000004",
+        "name": "deploy",
+        "title": "deploy",
+        "kind": "other",
+        "status": "pending",
+        "content": [],
+        "rawInput": {},
+        "_meta": {
+          "tantra": {
+            "cursor": "16.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "17.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "_meta": {
+          "tantra": {
+            "ask": {
+              "askId": "00000000-0000-4000-8000-000000000005",
+              "state": "pending"
+            },
+            "cursor": "18.0"
+          }
+        },
+        "state": "requires_action"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "_meta": {
+          "tantra": {
+            "ask": {
+              "askId": "00000000-0000-4000-8000-000000000005",
+              "state": "answered"
+            },
+            "cursor": "19.1"
+          }
+        },
+        "state": "running"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "00000000-0000-4000-8000-000000000004",
+        "status": "in_progress",
+        "_meta": {
+          "tantra": {
+            "cursor": "20.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "00000000-0000-4000-8000-000000000004",
+        "status": "completed",
+        "rawOutput": "deployed",
+        "_meta": {
+          "tantra": {
+            "cursor": "21.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_content_chunk",
+        "toolCallId": "00000000-0000-4000-8000-000000000004",
+        "content": {
+          "type": "content",
+          "content": {
+            "type": "text",
+            "text": "deployed"
+          }
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "21.1"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "00000000-0000-4000-8000-000000000006",
+        "name": "survey",
+        "title": "survey",
+        "kind": "other",
+        "status": "pending",
+        "content": [],
+        "rawInput": {},
+        "_meta": {
+          "tantra": {
+            "cursor": "25.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "26.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "00000000-0000-4000-8000-000000000006",
+        "status": "in_progress",
+        "_meta": {
+          "tantra": {
+            "cursor": "27.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_content_chunk",
+        "toolCallId": "00000000-0000-4000-8000-000000000006",
+        "content": {
+          "type": "content",
+          "content": {
+            "type": "text",
+            "text": "Collecting answers"
+          }
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "28.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "_meta": {
+          "tantra": {
+            "ask": {
+              "askId": "00000000-0000-4000-8000-000000000007",
+              "state": "pending"
+            },
+            "cursor": "29.0"
+          }
+        },
+        "state": "requires_action"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "_meta": {
+          "tantra": {
+            "ask": {
+              "askId": "00000000-0000-4000-8000-000000000007",
+              "state": "answered"
+            },
+            "cursor": "30.1"
+          }
+        },
+        "state": "running"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "_meta": {
+          "tantra": {
+            "ask": {
+              "askId": "00000000-0000-4000-8000-000000000008",
+              "state": "pending"
+            },
+            "cursor": "31.0"
+          }
+        },
+        "state": "requires_action"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "_meta": {
+          "tantra": {
+            "ask": {
+              "askId": "00000000-0000-4000-8000-000000000008",
+              "state": "answered"
+            },
+            "cursor": "32.1"
+          }
+        },
+        "state": "running"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "00000000-0000-4000-8000-000000000006",
+        "status": "completed",
+        "rawOutput": "Ada:blue",
+        "_meta": {
+          "tantra": {
+            "cursor": "33.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_content_chunk",
+        "toolCallId": "00000000-0000-4000-8000-000000000006",
+        "content": {
+          "type": "content",
+          "content": {
+            "type": "text",
+            "text": "Ada:blue"
+          }
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "33.1"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "38.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "subagent_update",
+        "sessionId": "00000000-0000-4000-8000-000000000009",
+        "title": "scout",
+        "_meta": {
+          "tantra": {
+            "cursor": "40.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "session_message",
+        "messageId": "00000000-0000-4000-8000-000000000010",
+        "senderSessionId": "00000000-0000-4000-8000-000000000001",
+        "recipientSessionId": "00000000-0000-4000-8000-000000000009",
+        "content": [
+          {
+            "type": "text",
+            "text": "Look around."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "40.2"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000011",
+        "content": {
+          "type": "text",
+          "text": "Spawned "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "43.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000011",
+        "content": {
+          "type": "text",
+          "text": "the "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "44.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000011",
+        "content": {
+          "type": "text",
+          "text": "scout."
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "45.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message",
+        "messageId": "00000000-0000-4000-8000-000000000011",
+        "content": [
+          {
+            "type": "text",
+            "text": "Spawned the scout."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "46.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "47.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "idle",
+        "stopReason": "end_turn",
+        "_meta": {
+          "tantra": {
+            "cursor": "48.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "running",
+        "_meta": {
+          "tantra": {
+            "cursor": "50.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "55.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "session_message",
+        "messageId": "00000000-0000-4000-8000-000000000012",
+        "senderSessionId": "00000000-0000-4000-8000-000000000001",
+        "recipientSessionId": "00000000-0000-4000-8000-000000000009",
+        "content": [
+          {
+            "type": "text",
+            "text": "Look again."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "57.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000013",
+        "content": {
+          "type": "text",
+          "text": "Sent "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "59.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000013",
+        "content": {
+          "type": "text",
+          "text": "it."
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "60.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message",
+        "messageId": "00000000-0000-4000-8000-000000000013",
+        "content": [
+          {
+            "type": "text",
+            "text": "Sent it."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "61.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "62.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "idle",
+        "stopReason": "end_turn",
+        "_meta": {
+          "tantra": {
+            "cursor": "63.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "_meta": {
+          "tantra": {
+            "finished": true,
+            "cursor": "65.0"
+          }
+        },
+        "sessionUpdate": "session_message",
+        "messageId": "00000000-0000-4000-8000-000000000014",
+        "senderSessionId": "00000000-0000-4000-8000-000000000009",
+        "recipientSessionId": "00000000-0000-4000-8000-000000000001",
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"answer\":42}"
+          }
+        ]
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "running",
+        "_meta": {
+          "tantra": {
+            "cursor": "65.1"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000015",
+        "content": {
+          "type": "text",
+          "text": "The "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "67.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000015",
+        "content": {
+          "type": "text",
+          "text": "scout "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "68.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000015",
+        "content": {
+          "type": "text",
+          "text": "finished."
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "69.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message",
+        "messageId": "00000000-0000-4000-8000-000000000015",
+        "content": [
+          {
+            "type": "text",
+            "text": "The scout finished."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "70.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "71.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "idle",
+        "stopReason": "end_turn",
+        "_meta": {
+          "tantra": {
+            "cursor": "72.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "_tantra_queue_update",
+        "entries": [
+          {
+            "commandId": "00000000-0000-4000-8000-000000000016",
+            "content": [
+              {
+                "type": "text",
+                "text": "Start a long task."
+              }
+            ],
+            "submittedBy": "user"
+          }
+        ]
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "user_message",
+        "messageId": "00000000-0000-4000-8000-000000000016",
+        "content": [
+          {
+            "type": "text",
+            "text": "Start a long task."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "74.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "running",
+        "_meta": {
+          "tantra": {
+            "cursor": "74.1"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "_tantra_queue_update",
+        "entries": []
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000017",
+        "content": {
+          "type": "text",
+          "text": "Working "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "76.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "idle",
+        "stopReason": "cancelled",
+        "_meta": {
+          "tantra": {
+            "cursor": "78.0"
+          }
+        }
+      }
+    }
+  ],
+  "mirror": [
+    {
+      "at": 43,
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "subagent_update",
+        "sessionId": "00000000-0000-4000-8000-000000000009",
+        "title": "scout",
+        "state": {
+          "state": "running"
+        }
+      }
+    },
+    {
+      "at": 44,
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "subagent_update",
+        "sessionId": "00000000-0000-4000-8000-000000000009",
+        "title": "scout",
+        "state": {
+          "state": "idle",
+          "stopReason": "end_turn"
+        }
+      }
+    },
+    {
+      "at": 51,
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "subagent_update",
+        "sessionId": "00000000-0000-4000-8000-000000000009",
+        "title": "scout",
+        "state": {
+          "state": "running"
+        }
+      }
+    },
+    {
+      "at": 59,
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "_meta": {
+          "tantra": {
+            "finished": true
+          }
+        },
+        "sessionUpdate": "subagent_update",
+        "sessionId": "00000000-0000-4000-8000-000000000009",
+        "title": "scout",
+        "state": {
+          "state": "idle",
+          "stopReason": "_tantra_finished"
+        }
+      }
+    }
+  ],
+  "start": [
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "user_message",
+        "messageId": "00000000-0000-4000-8000-000000000002",
+        "content": [
+          {
+            "type": "text",
+            "text": "Run the checks."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "3.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "running",
+        "_meta": {
+          "tantra": {
+            "cursor": "3.1"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_thought_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "Plan "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "5.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_thought_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "the "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "6.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_thought_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "checks "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "7.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_thought_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "first."
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "8.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "Checking "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "9.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "the "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "10.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": {
+          "type": "text",
+          "text": "system."
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "11.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_thought",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": [
+          {
+            "type": "text",
+            "text": "Plan the checks first."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "14.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message",
+        "messageId": "00000000-0000-4000-8000-000000000003",
+        "content": [
+          {
+            "type": "text",
+            "text": "Checking the system."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "15.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "00000000-0000-4000-8000-000000000004",
+        "name": "deploy",
+        "title": "deploy",
+        "kind": "other",
+        "status": "pending",
+        "content": [],
+        "rawInput": {},
+        "_meta": {
+          "tantra": {
+            "cursor": "16.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "17.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "_meta": {
+          "tantra": {
+            "ask": {
+              "askId": "00000000-0000-4000-8000-000000000005",
+              "state": "pending"
+            },
+            "cursor": "18.0"
+          }
+        },
+        "state": "requires_action"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "_meta": {
+          "tantra": {
+            "ask": {
+              "askId": "00000000-0000-4000-8000-000000000005",
+              "state": "answered"
+            },
+            "cursor": "19.1"
+          }
+        },
+        "state": "running"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "00000000-0000-4000-8000-000000000004",
+        "status": "in_progress",
+        "_meta": {
+          "tantra": {
+            "cursor": "20.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "00000000-0000-4000-8000-000000000004",
+        "status": "completed",
+        "rawOutput": "deployed",
+        "_meta": {
+          "tantra": {
+            "cursor": "21.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_content_chunk",
+        "toolCallId": "00000000-0000-4000-8000-000000000004",
+        "content": {
+          "type": "content",
+          "content": {
+            "type": "text",
+            "text": "deployed"
+          }
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "21.1"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "00000000-0000-4000-8000-000000000006",
+        "name": "survey",
+        "title": "survey",
+        "kind": "other",
+        "status": "pending",
+        "content": [],
+        "rawInput": {},
+        "_meta": {
+          "tantra": {
+            "cursor": "25.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "26.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "00000000-0000-4000-8000-000000000006",
+        "status": "in_progress",
+        "_meta": {
+          "tantra": {
+            "cursor": "27.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_content_chunk",
+        "toolCallId": "00000000-0000-4000-8000-000000000006",
+        "content": {
+          "type": "content",
+          "content": {
+            "type": "text",
+            "text": "Collecting answers"
+          }
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "28.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "_meta": {
+          "tantra": {
+            "ask": {
+              "askId": "00000000-0000-4000-8000-000000000007",
+              "state": "pending"
+            },
+            "cursor": "29.0"
+          }
+        },
+        "state": "requires_action"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "_meta": {
+          "tantra": {
+            "ask": {
+              "askId": "00000000-0000-4000-8000-000000000007",
+              "state": "answered"
+            },
+            "cursor": "30.1"
+          }
+        },
+        "state": "running"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "_meta": {
+          "tantra": {
+            "ask": {
+              "askId": "00000000-0000-4000-8000-000000000008",
+              "state": "pending"
+            },
+            "cursor": "31.0"
+          }
+        },
+        "state": "requires_action"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "_meta": {
+          "tantra": {
+            "ask": {
+              "askId": "00000000-0000-4000-8000-000000000008",
+              "state": "answered"
+            },
+            "cursor": "32.1"
+          }
+        },
+        "state": "running"
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "00000000-0000-4000-8000-000000000006",
+        "status": "completed",
+        "rawOutput": "Ada:blue",
+        "_meta": {
+          "tantra": {
+            "cursor": "33.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "tool_call_content_chunk",
+        "toolCallId": "00000000-0000-4000-8000-000000000006",
+        "content": {
+          "type": "content",
+          "content": {
+            "type": "text",
+            "text": "Ada:blue"
+          }
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "33.1"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "38.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "subagent_update",
+        "sessionId": "00000000-0000-4000-8000-000000000009",
+        "title": "scout",
+        "_meta": {
+          "tantra": {
+            "cursor": "40.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "session_message",
+        "messageId": "00000000-0000-4000-8000-000000000010",
+        "senderSessionId": "00000000-0000-4000-8000-000000000001",
+        "recipientSessionId": "00000000-0000-4000-8000-000000000009",
+        "content": [
+          {
+            "type": "text",
+            "text": "Look around."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "40.2"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000011",
+        "content": {
+          "type": "text",
+          "text": "Spawned "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "43.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000011",
+        "content": {
+          "type": "text",
+          "text": "the "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "44.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000011",
+        "content": {
+          "type": "text",
+          "text": "scout."
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "45.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message",
+        "messageId": "00000000-0000-4000-8000-000000000011",
+        "content": [
+          {
+            "type": "text",
+            "text": "Spawned the scout."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "46.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "47.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "idle",
+        "stopReason": "end_turn",
+        "_meta": {
+          "tantra": {
+            "cursor": "48.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "running",
+        "_meta": {
+          "tantra": {
+            "cursor": "50.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "55.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "session_message",
+        "messageId": "00000000-0000-4000-8000-000000000012",
+        "senderSessionId": "00000000-0000-4000-8000-000000000001",
+        "recipientSessionId": "00000000-0000-4000-8000-000000000009",
+        "content": [
+          {
+            "type": "text",
+            "text": "Look again."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "57.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000013",
+        "content": {
+          "type": "text",
+          "text": "Sent "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "59.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000013",
+        "content": {
+          "type": "text",
+          "text": "it."
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "60.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message",
+        "messageId": "00000000-0000-4000-8000-000000000013",
+        "content": [
+          {
+            "type": "text",
+            "text": "Sent it."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "61.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "62.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "idle",
+        "stopReason": "end_turn",
+        "_meta": {
+          "tantra": {
+            "cursor": "63.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "_meta": {
+          "tantra": {
+            "finished": true,
+            "cursor": "65.0"
+          }
+        },
+        "sessionUpdate": "session_message",
+        "messageId": "00000000-0000-4000-8000-000000000014",
+        "senderSessionId": "00000000-0000-4000-8000-000000000009",
+        "recipientSessionId": "00000000-0000-4000-8000-000000000001",
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"answer\":42}"
+          }
+        ]
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "running",
+        "_meta": {
+          "tantra": {
+            "cursor": "65.1"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000015",
+        "content": {
+          "type": "text",
+          "text": "The "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "67.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000015",
+        "content": {
+          "type": "text",
+          "text": "scout "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "68.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000015",
+        "content": {
+          "type": "text",
+          "text": "finished."
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "69.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message",
+        "messageId": "00000000-0000-4000-8000-000000000015",
+        "content": [
+          {
+            "type": "text",
+            "text": "The scout finished."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "70.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "71.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "idle",
+        "stopReason": "end_turn",
+        "_meta": {
+          "tantra": {
+            "cursor": "72.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "user_message",
+        "messageId": "00000000-0000-4000-8000-000000000016",
+        "content": [
+          {
+            "type": "text",
+            "text": "Start a long task."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "74.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "running",
+        "_meta": {
+          "tantra": {
+            "cursor": "74.1"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000017",
+        "content": {
+          "type": "text",
+          "text": "Working "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "76.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "idle",
+        "stopReason": "cancelled",
+        "_meta": {
+          "tantra": {
+            "cursor": "78.0"
+          }
+        }
+      }
+    }
+  ],
+  "after": {
+    "cursor": "40.0",
+    "updates": [
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "session_message",
+          "messageId": "00000000-0000-4000-8000-000000000010",
+          "senderSessionId": "00000000-0000-4000-8000-000000000001",
+          "recipientSessionId": "00000000-0000-4000-8000-000000000009",
+          "content": [
+            {
+              "type": "text",
+              "text": "Look around."
+            }
+          ],
+          "_meta": {
+            "tantra": {
+              "cursor": "40.2"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "00000000-0000-4000-8000-000000000011",
+          "content": {
+            "type": "text",
+            "text": "Spawned "
+          },
+          "_meta": {
+            "tantra": {
+              "cursor": "43.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "00000000-0000-4000-8000-000000000011",
+          "content": {
+            "type": "text",
+            "text": "the "
+          },
+          "_meta": {
+            "tantra": {
+              "cursor": "44.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "00000000-0000-4000-8000-000000000011",
+          "content": {
+            "type": "text",
+            "text": "scout."
+          },
+          "_meta": {
+            "tantra": {
+              "cursor": "45.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message",
+          "messageId": "00000000-0000-4000-8000-000000000011",
+          "content": [
+            {
+              "type": "text",
+              "text": "Spawned the scout."
+            }
+          ],
+          "_meta": {
+            "tantra": {
+              "cursor": "46.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "usage_update",
+          "used": 0,
+          "size": 1000000,
+          "_meta": {
+            "tantra": {
+              "cursor": "47.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "state_update",
+          "state": "idle",
+          "stopReason": "end_turn",
+          "_meta": {
+            "tantra": {
+              "cursor": "48.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "state_update",
+          "state": "running",
+          "_meta": {
+            "tantra": {
+              "cursor": "50.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "usage_update",
+          "used": 0,
+          "size": 1000000,
+          "_meta": {
+            "tantra": {
+              "cursor": "55.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "session_message",
+          "messageId": "00000000-0000-4000-8000-000000000012",
+          "senderSessionId": "00000000-0000-4000-8000-000000000001",
+          "recipientSessionId": "00000000-0000-4000-8000-000000000009",
+          "content": [
+            {
+              "type": "text",
+              "text": "Look again."
+            }
+          ],
+          "_meta": {
+            "tantra": {
+              "cursor": "57.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "00000000-0000-4000-8000-000000000013",
+          "content": {
+            "type": "text",
+            "text": "Sent "
+          },
+          "_meta": {
+            "tantra": {
+              "cursor": "59.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "00000000-0000-4000-8000-000000000013",
+          "content": {
+            "type": "text",
+            "text": "it."
+          },
+          "_meta": {
+            "tantra": {
+              "cursor": "60.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message",
+          "messageId": "00000000-0000-4000-8000-000000000013",
+          "content": [
+            {
+              "type": "text",
+              "text": "Sent it."
+            }
+          ],
+          "_meta": {
+            "tantra": {
+              "cursor": "61.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "usage_update",
+          "used": 0,
+          "size": 1000000,
+          "_meta": {
+            "tantra": {
+              "cursor": "62.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "state_update",
+          "state": "idle",
+          "stopReason": "end_turn",
+          "_meta": {
+            "tantra": {
+              "cursor": "63.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "_meta": {
+            "tantra": {
+              "finished": true,
+              "cursor": "65.0"
+            }
+          },
+          "sessionUpdate": "session_message",
+          "messageId": "00000000-0000-4000-8000-000000000014",
+          "senderSessionId": "00000000-0000-4000-8000-000000000009",
+          "recipientSessionId": "00000000-0000-4000-8000-000000000001",
+          "content": [
+            {
+              "type": "text",
+              "text": "{\"answer\":42}"
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "state_update",
+          "state": "running",
+          "_meta": {
+            "tantra": {
+              "cursor": "65.1"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "00000000-0000-4000-8000-000000000015",
+          "content": {
+            "type": "text",
+            "text": "The "
+          },
+          "_meta": {
+            "tantra": {
+              "cursor": "67.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "00000000-0000-4000-8000-000000000015",
+          "content": {
+            "type": "text",
+            "text": "scout "
+          },
+          "_meta": {
+            "tantra": {
+              "cursor": "68.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "00000000-0000-4000-8000-000000000015",
+          "content": {
+            "type": "text",
+            "text": "finished."
+          },
+          "_meta": {
+            "tantra": {
+              "cursor": "69.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message",
+          "messageId": "00000000-0000-4000-8000-000000000015",
+          "content": [
+            {
+              "type": "text",
+              "text": "The scout finished."
+            }
+          ],
+          "_meta": {
+            "tantra": {
+              "cursor": "70.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "usage_update",
+          "used": 0,
+          "size": 1000000,
+          "_meta": {
+            "tantra": {
+              "cursor": "71.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "state_update",
+          "state": "idle",
+          "stopReason": "end_turn",
+          "_meta": {
+            "tantra": {
+              "cursor": "72.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "user_message",
+          "messageId": "00000000-0000-4000-8000-000000000016",
+          "content": [
+            {
+              "type": "text",
+              "text": "Start a long task."
+            }
+          ],
+          "_meta": {
+            "tantra": {
+              "cursor": "74.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "state_update",
+          "state": "running",
+          "_meta": {
+            "tantra": {
+              "cursor": "74.1"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "00000000-0000-4000-8000-000000000017",
+          "content": {
+            "type": "text",
+            "text": "Working "
+          },
+          "_meta": {
+            "tantra": {
+              "cursor": "76.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "state_update",
+          "state": "idle",
+          "stopReason": "cancelled",
+          "_meta": {
+            "tantra": {
+              "cursor": "78.0"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "requests": [
+    {
+      "method": "session/request_permission",
+      "params": {
+        "_meta": {
+          "tantra": {
+            "askId": "00000000-0000-4000-8000-000000000005"
+          }
+        },
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "title": "Run deploy?",
+        "description": "{}",
+        "subject": {
+          "type": "tool_call",
+          "toolCall": {
+            "toolCallId": "00000000-0000-4000-8000-000000000004"
+          }
+        },
+        "options": [
+          {
+            "optionId": "allow",
+            "name": "Allow",
+            "kind": "allow_once"
+          },
+          {
+            "optionId": "deny",
+            "name": "Deny",
+            "kind": "reject_once"
+          }
+        ]
+      },
+      "result": {
+        "outcome": {
+          "outcome": "selected",
+          "optionId": "allow"
+        }
+      }
+    },
+    {
+      "method": "elicitation/create",
+      "params": {
+        "_meta": {
+          "tantra": {
+            "askId": "00000000-0000-4000-8000-000000000007"
+          }
+        },
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "toolCallId": "00000000-0000-4000-8000-000000000006",
+        "mode": "form",
+        "message": "Name?",
+        "requestedSchema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "title": "Name?"
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      },
+      "result": {
+        "action": "accept",
+        "content": {
+          "text": "Ada"
+        }
+      }
+    },
+    {
+      "method": "elicitation/create",
+      "params": {
+        "_meta": {
+          "tantra": {
+            "askId": "00000000-0000-4000-8000-000000000008"
+          }
+        },
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "toolCallId": "00000000-0000-4000-8000-000000000006",
+        "mode": "form",
+        "message": "Color?",
+        "requestedSchema": {
+          "type": "object",
+          "properties": {
+            "choice": {
+              "type": "string",
+              "title": "Color?",
+              "enum": [
+                "red",
+                "blue"
+              ]
+            }
+          },
+          "required": [
+            "choice"
+          ]
+        }
+      },
+      "result": {
+        "action": "accept",
+        "content": {
+          "choice": "blue"
+        }
+      }
+    }
+  ]
+}

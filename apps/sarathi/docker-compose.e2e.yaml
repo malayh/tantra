@@ -25,7 +25,7 @@ services:
       CORS_ORIGINS: http://localhost:${SARATHI_E2E_UI_PORT:-13001}
       OPENAI_BASE_URL: ${E2E_OPENAI_BASE_URL:-http://gate:8090/v1}
       OPENAI_API_KEY: e2e
-      SARATHI_MODELS: e2e-model
+      SARATHI_MODELS: e2e-model,e2e-other
       SARATHI_CONTEXT_WINDOW: "128000"
       EMBEDDING_MODEL: ""
       E2E_GATE_URL: http://gate:8090
@@ -43,7 +43,7 @@ services:
       CORS_ORIGINS: http://localhost:${SARATHI_E2E_UI_PORT:-13001}
       OPENAI_BASE_URL: ${E2E_OPENAI_BASE_URL:-http://gate:8090/v1}
       OPENAI_API_KEY: e2e
-      SARATHI_MODELS: e2e-model
+      SARATHI_MODELS: e2e-model,e2e-other
       SARATHI_CONTEXT_WINDOW: "128000"
       EMBEDDING_MODEL: ""
       E2E_GATE_URL: http://gate:8090

@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
-from uuid import UUID
 
 import jwt
 from fastapi import Depends, HTTPException, status
@@ -13,10 +12,10 @@ from sarathi.db import DbDep
 from sarathi.models import User
 
 TOKEN_TTL = timedelta(hours=24)
-SOCKET_TICKET_TTL = timedelta(seconds=30)
+ACP_TICKET_TTL = timedelta(seconds=30)
 LOGIN_PURPOSE = "login"
-SOCKET_TICKET_PURPOSE = "socket_ticket"
-SOCKET_TICKET_AUDIENCE = "sarathi-session-socket"
+ACP_TICKET_PURPOSE = "acp_ticket"
+ACP_TICKET_AUDIENCE = "sarathi-acp"
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -57,27 +56,20 @@ def decode_token(token: str) -> int:
 
 
 @dataclass(frozen=True)
-class SocketTicket:
-    root_id: UUID
+class AcpTicket:
     user_id: str
     capability: str
     login_expires_at: datetime
 
 
-def create_socket_ticket(
-    user_id: int,
-    root_id: UUID,
-    capability: str,
-    login_expires_at: datetime,
-) -> tuple[str, datetime]:
+def create_acp_ticket(user_id: int, capability: str, login_expires_at: datetime) -> tuple[str, datetime]:
     now = datetime.now(UTC)
     expires_at = datetime.fromtimestamp(
-        min(int((now + SOCKET_TICKET_TTL).timestamp()), int(login_expires_at.timestamp())), UTC
+        min(int((now + ACP_TICKET_TTL).timestamp()), int(login_expires_at.timestamp())), UTC
     )
     payload = {
-        "aud": SOCKET_TICKET_AUDIENCE,
-        "purpose": SOCKET_TICKET_PURPOSE,
-        "root_id": str(root_id),
+        "aud": ACP_TICKET_AUDIENCE,
+        "purpose": ACP_TICKET_PURPOSE,
         "user_id": str(user_id),
         "capability": capability,
         "iat": int(now.timestamp()),
@@ -87,20 +79,16 @@ def create_socket_ticket(
     return jwt.encode(payload, get_settings().SECRET_KEY, algorithm="HS256"), expires_at
 
 
-def decode_socket_ticket(token: str) -> SocketTicket:
+def decode_acp_ticket(token: str) -> AcpTicket:
     payload = jwt.decode(
         token,
         get_settings().SECRET_KEY,
         algorithms=["HS256"],
-        audience=SOCKET_TICKET_AUDIENCE,
-        options={"require": ["aud", "purpose", "root_id", "user_id", "capability", "iat", "exp", "login_exp"]},
+        audience=ACP_TICKET_AUDIENCE,
+        options={"require": ["aud", "purpose", "user_id", "capability", "iat", "exp", "login_exp"]},
     )
-    if payload.get("purpose") != SOCKET_TICKET_PURPOSE:
+    if payload.get("purpose") != ACP_TICKET_PURPOSE:
         raise jwt.InvalidTokenError("invalid token purpose")
-    raw_root = payload["root_id"]
-    root_id = UUID(str(raw_root))
-    if str(root_id) != raw_root:
-        raise jwt.InvalidTokenError("invalid root id")
     user_id = str(int(payload["user_id"]))
     capability = payload["capability"]
     if capability not in ("read", "write"):
@@ -108,7 +96,7 @@ def decode_socket_ticket(token: str) -> SocketTicket:
     login_expires_at = datetime.fromtimestamp(int(payload["login_exp"]), UTC)
     if login_expires_at <= datetime.now(UTC):
         raise jwt.ExpiredSignatureError("login expired")
-    return SocketTicket(root_id, user_id, capability, login_expires_at)
+    return AcpTicket(user_id, capability, login_expires_at)
 
 
 def _unauthorized() -> HTTPException:

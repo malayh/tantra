@@ -109,6 +109,7 @@ class Observed:
         *,
         owner_instance: str | None = None,
         owner_valid: bool = False,
+        tree_change_id: int | None = None,
     ) -> None:
         if kind is not None:
             self.notices.append(ChangeNotice(change_id=change_id, root_id=root_id, kind=kind))
@@ -124,6 +125,7 @@ class Observed:
                 recovery={},
                 actors={},
                 expires_at=datetime.now(UTC),
+                tree_change_id=tree_change_id,
             )
         )
 
@@ -463,6 +465,73 @@ async def test_observations_page_changes_and_bump_only_for_tree_kinds() -> None:
     await tree.aclose()
     assert runtime._trees == {} and root not in runtime._watchers
     assert coordinator.interests[root] is None
+    await runtime.aclose()
+
+
+async def test_tree_markers_bump_only_when_they_pass_the_highest_marker_seen() -> None:
+    coordinator = Observed()
+    runtime, root_id = await coordinated(coordinator)
+    root = root_id.hex
+    reads = counting(runtime)
+    tree = runtime.watch_tree(root_id)
+    await anext(tree)
+    pending = asyncio.ensure_future(anext(tree))
+
+    async def settled(change_id: int, count: int) -> None:
+        async with asyncio.timeout(2):
+            while coordinator.observations.qsize() or runtime._trees[root].change_id != change_id or reads[0] < count:
+                await asyncio.sleep(0.01)
+        await asyncio.sleep(TREE_INTERVAL * 2)
+        assert reads[0] == count
+
+    await coordinator.emit(root, 0, tree_change_id=0)
+    await settled(0, 2)
+    for change_id, kind, marker, count, highest in (
+        (1, "journal", 0, 2, 0),
+        (2, "header", 2, 3, 2),
+        (3, "journal", 1, 3, 2),
+        (4, "journal", 2, 3, 2),
+        (5, "activity", 5, 4, 5),
+    ):
+        await coordinator.emit(root, change_id, kind, tree_change_id=marker)
+        await settled(change_id, count)
+        assert runtime._trees[root].tree_change_id == highest
+    await coordinator.emit(root, 2, tree_change_id=2)
+    await asyncio.sleep(TREE_INTERVAL * 2)
+    assert (reads[0], coordinator.pages) == (4, 0)
+    assert (runtime._trees[root].change_id, runtime._trees[root].tree_change_id) == (5, 5)
+    assert not pending.done()
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    await tree.aclose()
+    await runtime.aclose()
+
+
+async def test_a_new_tree_starts_from_the_current_observation_marker() -> None:
+    coordinator = Observed()
+    runtime, root_id = await coordinated(coordinator)
+    root = root_id.hex
+    runtime._retain_connection_interest(root)
+    await coordinator.emit(root, 7, "header", tree_change_id=7)
+    async with asyncio.timeout(2):
+        while root not in runtime._observations:
+            await asyncio.sleep(0.01)
+    reads = counting(runtime)
+    tree = runtime.watch_tree(root_id)
+    await anext(tree)
+    assert (runtime._trees[root].change_id, runtime._trees[root].tree_change_id) == (7, 7)
+    pending = asyncio.ensure_future(anext(tree))
+    await coordinator.emit(root, 8, "journal", tree_change_id=7)
+    async with asyncio.timeout(2):
+        while runtime._trees[root].change_id != 8:
+            await asyncio.sleep(0.01)
+    await asyncio.sleep(TREE_INTERVAL * 2)
+    assert (reads[0], coordinator.pages) == (1, 0)
+    assert not pending.done()
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    await tree.aclose()
+    await runtime._release_connection_interest(root)
     await runtime.aclose()
 
 

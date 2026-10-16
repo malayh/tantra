@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections import Counter
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
 from tantra import Agent, PostgresCoordinator, PostgresStore, Runtime, SessionHeader
-from tantra.coordinator import _Observation
+from tantra import runtime as runtime_module
+from tantra.coordinator import TREE_KINDS, CommandReply, RootObservation, _Observation
 from tantra.events import (
     InputQueued,
     SessionCreated,
@@ -20,9 +23,11 @@ from tantra.events import (
     TurnCompleted,
     TurnFailed,
     TurnInterrupted,
+    TurnStarted,
 )
 from tantra.providers.base import ModelLimits, ProviderEvent, SampleRequest, StreamEnd
 from tantra.providers.fake import FAKE_LIMITS
+from tantra.stores.postgres import MIGRATIONS
 
 psycopg = pytest.importorskip("psycopg")
 Jsonb = pytest.importorskip("psycopg.types.json").Jsonb
@@ -496,3 +501,307 @@ async def test_shared_observation_queries_use_the_scaling_indexes(postgres_dsn: 
     assert "coordinator_requests_cleanup_idx" in indexes(plans["request_cleanup"])
     assert "coordinator_changes_cleanup_idx" in indexes(plans["change_cleanup"])
     await store.close()
+
+
+LEGACY_CATCH_UP = (
+    "WITH interested AS (SELECT unnest(%s::text[]) AS root_id)"
+    ", full_roots AS (SELECT unnest(%s::text[]) AS root_id)"
+    ", actor_interests AS (SELECT * FROM unnest(%s::text[], %s::text[])"
+    " AS interests(root_id, actor_id))"
+    " SELECT 'root', i.root_id, NULL::text, jsonb_build_object("
+    " 'change_id', coalesce(c.id, 0), 'writer', r.writer_connection,"
+    " 'owner', r.owner_instance, 'generation', coalesce(r.generation, 0),"
+    " 'valid', coalesce(r.owner_instance IS NOT NULL AND r.expires_at > clock_timestamp(), false),"
+    " 'expires', r.expires_at, 'recovery', coalesce(r.recovery, '{{}}'::jsonb),"
+    " 'deleted', d.actor_id IS NOT NULL)"
+    " FROM interested i LEFT JOIN {schema}.coordinator_roots r ON r.root_id = i.root_id"
+    " LEFT JOIN {schema}.deleted_sessions d ON d.actor_id = i.root_id"
+    " LEFT JOIN LATERAL (SELECT id FROM {schema}.coordinator_changes"
+    " WHERE root_id = i.root_id ORDER BY id DESC LIMIT 1) c ON true"
+    " UNION ALL SELECT 'actor', s.root_id, s.id, jsonb_build_array(s.last_seq,"
+    " coalesce(a.active AND r.owner_instance IS NOT NULL"
+    " AND r.expires_at > clock_timestamp(), false), coalesce(t.seq, 0))"
+    " FROM (SELECT f.root_id, actor.id, actor.last_seq"
+    " FROM full_roots f JOIN {schema}.sessions actor ON actor.root_key = f.root_id"
+    " UNION ALL SELECT i.root_id, actor.id, actor.last_seq"
+    " FROM actor_interests i JOIN LATERAL (SELECT actor.id, actor.last_seq, actor.root_key"
+    " FROM {schema}.sessions actor WHERE actor.id = i.actor_id OFFSET 0) actor"
+    " ON actor.root_key = i.root_id) s"
+    " LEFT JOIN {schema}.coordinator_activity a ON a.root_id = s.root_id AND a.actor_id = s.id"
+    " LEFT JOIN {schema}.coordinator_roots r ON r.root_id = s.root_id"
+    " LEFT JOIN LATERAL (SELECT seq FROM {schema}.journal_index"
+    " WHERE actor_id = s.id AND seq <= s.last_seq AND event_type IN"
+    " ('turn_completed', 'turn_failed', 'turn_cancelled', 'turn_interrupted')"
+    " ORDER BY seq DESC LIMIT 1) t ON true"
+    " UNION ALL SELECT 'reply', request_id::text, NULL::text, reply"
+    " FROM {schema}.coordinator_requests WHERE request_id = ANY(%s::uuid[])"
+)
+
+
+def legacy_observations(
+    coordinator: PostgresCoordinator, rows: list[tuple[Any, ...]], scopes: dict[str, Any]
+) -> tuple[dict[str, RootObservation], dict[UUID, CommandReply | None]]:
+    headers: dict[str, dict[str, Any]] = {}
+    actors: dict[str, dict[str, tuple[int, bool]]] = {root: {} for root in scopes}
+    terminals: dict[str, dict[str, int]] = {root: {} for root in scopes}
+    replies: dict[UUID, CommandReply | None] = {}
+    for kind, key, actor, data in rows:
+        if kind == "root":
+            headers[key] = data
+        elif kind == "actor":
+            actors[key][actor] = (int(data[0]), bool(data[1]))
+            terminals[key][actor] = int(data[2])
+        elif UUID(key) in coordinator._pending_requests:
+            replies[UUID(key)] = CommandReply.model_validate(data) if data else None
+    snapshots = {
+        root_id: RootObservation(
+            root_id=root_id,
+            sample=coordinator._observation_sample,
+            change_id=int(data["change_id"]),
+            writer_connection=data["writer"],
+            owner_instance=data["owner"],
+            owner_generation=int(data["generation"]),
+            owner_valid=bool(data["valid"]),
+            recovery=dict(data["recovery"]),
+            actors=actors[root_id],
+            expires_at=datetime.fromisoformat(data["expires"]) if data["expires"] else None,
+            deleted=bool(data["deleted"]),
+            terminal_sequences=terminals[root_id],
+            actor_coverage=scopes[root_id],
+        )
+        for root_id, data in headers.items()
+    }
+    return snapshots, replies
+
+
+@pytest.mark.parametrize("periodic", [False, True])
+async def test_typed_catch_up_matches_the_legacy_jsonb_rows(
+    postgres_dsn: str, pg_schema: str, periodic: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    separator = "&" if "?" in postgres_dsn else "?"
+    store = PostgresStore(f"{postgres_dsn}{separator}options=-c%20TimeZone%3DAsia%2FKolkata", schema=pg_schema)
+    await store.setup()
+    missing, expired, interested, deleted = (uuid4().hex for _ in range(4))
+    trees = {root: [f"{root}-a", f"{root}-b"] for root in (missing, expired, interested)}
+    for root, children in trees.items():
+        await store.create(SessionHeader(id=root, agent="bot", model="m"))
+        for child in children:
+            await store.create(SessionHeader(id=child, root_id=root, parent_id=root, agent="bot", model="m"))
+        turn = uuid4().hex
+        for actor, terminal in ((root, TurnCancelled(turn_id=turn, reason="x")), (children[0], None)):
+            events: list[Any] = [InputQueued(command_id=turn, input="go"), TurnStarted(turn_id=turn, input="go")]
+            await store.append(actor, events + ([terminal, TextDelta(text="after")] if terminal else []))
+        await store.append(children[1], [TurnCompleted(turn_id=turn, stop_reason="stop"), TextDelta(text="x")])
+    answered, pending, unrelated = uuid4(), uuid4(), uuid4()
+    reply = CommandReply(request_id=answered, result={"nested": {"items": [1, {"deep": None}], "text": "雪"}})
+    recovery = {"phase": "interrupting", "cursor": 4, "nested": {"items": [1, {"deep": None}], "text": "雪"}}
+    old = datetime(2020, 1, 2, 3, 4, 5, 678901, tzinfo=UTC)
+    future = datetime.now(UTC).replace(microsecond=123456) + timedelta(hours=1)
+    async with store._connection() as conn:
+        assert (await (await conn.execute("SHOW TimeZone")).fetchone())[0] == "Asia/Kolkata"
+        async with conn.cursor() as cursor:
+            await cursor.executemany(
+                store._sql(
+                    "INSERT INTO {schema}.coordinator_roots"
+                    " (root_id, owner_instance, generation, expires_at, writer_connection, recovery)"
+                    " VALUES (%s, %s, %s, %s, %s, %s)"
+                ),
+                [
+                    (expired, "old-owner", 3, old, "writer-a", Jsonb(recovery)),
+                    (interested, "live-owner", 5, future, None, Jsonb({})),
+                    (deleted, None, 2, None, None, Jsonb({})),
+                ],
+            )
+            await cursor.executemany(
+                store._sql("INSERT INTO {schema}.coordinator_activity (root_id, actor_id, active) VALUES (%s, %s, %s)"),
+                [
+                    (expired, expired, True),
+                    (interested, interested, True),
+                    (interested, f"{interested}-a", False),
+                ],
+            )
+            await cursor.executemany(
+                store._sql("INSERT INTO {schema}.coordinator_changes (root_id, kind) VALUES (%s, %s)"),
+                [(expired, "journal"), (interested, "header"), (interested, "writer"), (deleted, "deleted")],
+            )
+            await cursor.executemany(
+                store._sql(
+                    "INSERT INTO {schema}.coordinator_requests"
+                    " (request_id, root_id, destination_instance, destination_generation, envelope, deadline, reply)"
+                    " VALUES (%s, %s, 'live-owner', 5, '{{}}'::jsonb, %s, %s)"
+                ),
+                [
+                    (answered, interested, future, Jsonb(reply.model_dump(mode="json"))),
+                    (pending, interested, future, None),
+                    (unrelated, interested, future, Jsonb(reply.model_dump(mode="json"))),
+                ],
+            )
+        await conn.execute(
+            store._sql("INSERT INTO {schema}.deleted_sessions (actor_id, root_id) VALUES (%s, %s)"), (deleted, deleted)
+        )
+    coordinator = PostgresCoordinator(store, catch_up_interval=10)
+    coordinator._started = True
+    for root in (missing, expired, deleted):
+        coordinator._observations[root] = _Observation(users=1, full_users=1)
+    coordinator._observations[interested] = _Observation(users=1)
+    coordinator._actor_interests[interested] = frozenset({interested, f"{interested}-a", "absent"})
+    coordinator._pending_requests = {answered: (interested, 1), pending: (interested, 1)}
+    scopes = {root: coordinator._actor_interests.get(root) if root == interested else None for root in trees}
+    scopes[deleted] = None
+    legacy: list[list[tuple[Any, ...]]] = []
+    execute = psycopg.AsyncConnection.execute
+
+    async def capture(conn: Any, query: Any, params: Any = None, **kwargs: Any) -> Any:
+        cursor = await execute(conn, query, params, **kwargs)
+        if not isinstance(query, str) and query.as_string(conn).startswith("WITH interested"):
+            legacy.append(await (await execute(conn, store._sql(LEGACY_CATCH_UP), params)).fetchall())
+        return cursor
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(psycopg.AsyncConnection, "execute", capture)
+            await coordinator._catch_up(set(scopes), periodic=periodic)
+        assert len(legacy) == 1
+        expected, replies = legacy_observations(coordinator, legacy[0], scopes)
+        assert set(expected) == set(scopes)
+        markers = dict.fromkeys(scopes, 0)
+        async with store._connection() as conn:
+            cursor = await conn.execute(store._sql("SELECT root_id, kind, id FROM {schema}.coordinator_changes"))
+            for root, kind, change_id in await cursor.fetchall():
+                if kind in TREE_KINDS:
+                    markers[root] = max(markers[root], change_id)
+        assert markers[interested] > 0 and markers[deleted] > 0 and markers[expired] == markers[missing] == 0
+        assert {root: coordinator.observation(root) for root in scopes} == {
+            root: replace(snapshot, tree_change_id=markers[root]) for root, snapshot in expected.items()
+        }
+        assert coordinator._observed_replies == replies == {answered: reply, pending: None}
+        assert coordinator.observation(expired).expires_at == old
+        assert coordinator.observation(interested).expires_at == future
+        for root in (expired, interested):
+            offset = coordinator.observation(root).expires_at.utcoffset()
+            assert offset == expected[root].expires_at.utcoffset() == timedelta(hours=5, minutes=30)
+        assert coordinator.observation(expired).recovery == recovery
+        assert coordinator.observation(interested).actors == {
+            interested: (4, True),
+            f"{interested}-a": (2, False),
+        }
+        assert coordinator.observation(missing).terminal_sequences == {
+            missing: 3,
+            f"{missing}-a": 0,
+            f"{missing}-b": 1,
+        }
+        assert coordinator.observation(deleted).deleted and not coordinator.observation(expired).owner_valid
+        assert coordinator.observation(interested).owner_valid
+    finally:
+        await coordinator.close()
+        await store.close()
+
+
+def catch_up_capture(coordinator: PostgresCoordinator, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    captured: list[Any] = []
+    original = coordinator._sql
+
+    def capture(body: str) -> Any:
+        result = original(body)
+        if body.startswith("WITH interested"):
+            captured.append(result)
+        return result
+
+    monkeypatch.setattr(coordinator, "_sql", capture)
+    return captured
+
+
+def kind_lists(body: str) -> list[list[str]]:
+    return [re.findall(r"'([a-z_]+)'", listed) for listed in re.findall(r"\bkind IN \(([^)]*)\)", body)]
+
+
+async def test_tree_kinds_are_one_set_for_runtime_catch_up_and_migration_13(
+    postgres_dsn: str, pg_schema: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    await store.setup()
+    coordinator = PostgresCoordinator(store, catch_up_interval=10)
+    coordinator._started = True
+    coordinator._observations["root"] = _Observation()
+    captured = catch_up_capture(coordinator, monkeypatch)
+    try:
+        await coordinator._catch_up({"root"}, periodic=False)
+        async with store._connection() as conn:
+            body = captured[0].as_string(conn)
+            cursor = await conn.execute(
+                "SELECT indexdef FROM pg_indexes WHERE schemaname = %s AND indexname = 'coordinator_changes_tree_idx'",
+                (pg_schema,),
+            )
+            definition = (await cursor.fetchone())[0]
+        assert runtime_module.TREE_KINDS is TREE_KINDS
+        assert TREE_KINDS == frozenset({"header", "activity", "ownership", "deleted"})
+        assert len(MIGRATIONS[12]) == 1
+        assert kind_lists(body) == kind_lists(MIGRATIONS[12][0]) == [["header", "activity", "ownership", "deleted"]]
+        assert "ON {schema}.coordinator_changes (root_id, id)" in MIGRATIONS[12][0]
+        assert "(root_id, id)" in definition
+        assert set(re.findall(r"'([a-z_]+)'::text", definition)) == TREE_KINDS
+        assert coordinator.observation("root").tree_change_id == 0
+    finally:
+        await coordinator.close()
+        await store.close()
+
+
+async def test_the_tree_marker_reads_one_index_row_under_a_journal_backlog(
+    postgres_dsn: str, pg_schema: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    await store.setup()
+    root, other = "root-a", "root-b"
+    async with store._connection() as conn:
+        cursor = await conn.execute(
+            store._sql("INSERT INTO {schema}.coordinator_changes (root_id, kind) VALUES (%s, 'header') RETURNING id"),
+            (root,),
+        )
+        header_id = (await cursor.fetchone())[0]
+        cursor = await conn.execute(
+            store._sql(
+                "INSERT INTO {schema}.coordinator_changes (root_id, kind)"
+                " SELECT %s, 'journal' FROM generate_series(1, 10000) RETURNING id"
+            ),
+            (root,),
+        )
+        last_id = max(row[0] for row in await cursor.fetchall())
+        await conn.execute(
+            store._sql(
+                "INSERT INTO {schema}.coordinator_changes (root_id, kind)"
+                " SELECT %s, kind FROM unnest(%s::text[]) AS kinds(kind), generate_series(1, 2000)"
+            ),
+            (other, ["header", "activity", "ownership", "deleted", "journal"]),
+        )
+        await conn.execute(store._sql("ANALYZE {schema}.coordinator_changes"))
+    coordinator = PostgresCoordinator(store, catch_up_interval=10)
+    coordinator._started = True
+    coordinator._observations[root] = _Observation()
+    captured = catch_up_capture(coordinator, monkeypatch)
+    try:
+        await coordinator._catch_up({root}, periodic=False)
+        observed = coordinator.observation(root)
+        assert (observed.change_id, observed.tree_change_id) == (last_id, header_id)
+        params = ([root], [root], [], [], [])
+        async with store._connection() as conn:
+            body = captured[0].as_string(conn)
+            cursor = await conn.execute(
+                psycopg.sql.SQL("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ") + captured[0], params
+            )
+            analyzed = (await cursor.fetchone())[0][0]["Plan"]
+            numbered = iter(range(1, 6))
+            generic = re.sub(r"%s", lambda _: f"${next(numbered)}", body)
+            cursor = await conn.execute(f"EXPLAIN (GENERIC_PLAN, FORMAT JSON) {generic}")
+            planned = (await cursor.fetchone())[0][0]["Plan"]
+
+        def nodes(node: dict[str, Any]) -> list[dict[str, Any]]:
+            return [node, *(found for child in node.get("Plans", []) for found in nodes(child))]
+
+        used = [node for node in nodes(analyzed) if node.get("Index Name") == "coordinator_changes_tree_idx"]
+        assert len(used) == 1
+        assert used[0]["Actual Loops"] == 1 and used[0]["Actual Rows"] <= 1
+        assert used[0].get("Rows Removed by Filter", 0) == 0
+        assert any(node.get("Index Name") == "coordinator_changes_tree_idx" for node in nodes(planned))
+    finally:
+        await coordinator.close()
+        await store.close()

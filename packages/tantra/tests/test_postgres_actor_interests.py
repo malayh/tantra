@@ -75,22 +75,8 @@ async def test_interest_epoch_discards_an_inflight_filtered_query(monkeypatch: p
     class Cursor:
         async def fetchall(self) -> list[tuple[Any, ...]]:
             return [
-                (
-                    "root",
-                    root,
-                    None,
-                    {
-                        "change_id": 0,
-                        "writer": None,
-                        "owner": None,
-                        "generation": 0,
-                        "valid": False,
-                        "expires": None,
-                        "recovery": {},
-                        "deleted": False,
-                    },
-                ),
-                ("actor", root, first, [4, False, 0]),
+                ("root", root, None, 0, None, None, 0, False, None, {}, False, 0, None, None, None, None),
+                ("actor", root, first, None, None, None, None, None, None, None, None, None, 4, False, 0, None),
             ]
 
     class Connection:

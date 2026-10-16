@@ -22,11 +22,18 @@ Fixed:
 - Tool call IDs are unique within a session. A provider ID already used in the turn or the loaded history, including the `OpenAICompatible` fallback `call_{index}`, is rewritten to a deterministic `call_<24 hex>` before it is journaled. Repeats used to alias spawn, send and finish commands and drop tool results from the assembled context. IDs without a collision are unchanged.
 - `watch_tree` reflects lease expiry within about one coordinator `catch_up_interval`, and yields no snapshot once Runtime shutdown starts.
 
+Performance:
+
+- Coordinated PostgreSQL transactions run fewer statements: publishing a change is one statement, the root lock check and fence authorization are fused, and lease expiry is checked in the locking read.
+- On PostgreSQL, Runtime reads an actor tree in one recursive query (`watch_tree` snapshots, `tree_status`, recovery, close and request handling), and `watch_tree` and `tree_status` read actor activity in one query. Observations carry a tree change marker, so journal-only changes no longer page `coordinator_changes`. Coordinated journal reads check root membership without loading the header.
+
 Compatibility and upgrade:
 
 - A retry compared with an event written before `origin` existed ignores `sender_id` and `origin`, so recovery and command retries over older journals stay duplicates. Drain older coordinated workers before rolling out: an older owner rejects retries of inputs that carry the new fields.
 - `tantra.testing.store_conformance` now requires a store to detect duplicate inputs by comparing events with `==`, so that a legacy `InputQueued` equals its structured retry. Custom stores that compare serialized events fail it.
 - Every worker must run this release before migration 12 is applied: an older worker on the migrated schema writes no `journal_index` row for `AskRaised`, and `PostgresStore.lookup_ask` has no fallback, so `tantra.acp` never issues those asks. Stop all PostgreSQL writers, run `PostgresStore.setup()`, and restart only upgraded workers. Migration 12 adds `journal_index.ask_id` and the partial index `journal_ask_idx`, then backfills ask entries by decoding every stored event in pages of 1,000. It runs in the setup transaction and holds an exclusive lock on `journal_index` until it commits, so its time grows with total journal size and every append and indexed read waits for it. Allow a maintenance window. Journal bodies and sequences are unchanged.
+- Migration 13 only adds the partial index `coordinator_changes_tree_idx`. It is built in the setup transaction, so change inserts wait for it briefly. Older workers ignore it. As with earlier migrations, run `PostgresStore.setup()` with writers stopped; mixed-version writers are unsupported during migration.
+- `pg_notify` change payloads are now built by PostgreSQL: the same keys, with different whitespace.
 
 ## 1.4.0
 

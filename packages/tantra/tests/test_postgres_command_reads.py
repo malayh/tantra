@@ -3,7 +3,17 @@ from uuid import uuid4
 
 import pytest
 
-from tantra import Agent, FakeProvider, PostgresCoordinator, PostgresStore, Runtime
+from tantra import (
+    Agent,
+    CoordinatorUnavailable,
+    FakeProvider,
+    LeaseLost,
+    PostgresCoordinator,
+    PostgresStore,
+    Runtime,
+    SessionNotFound,
+)
+from tantra import coordinator as coordinator_module
 from tantra.ask import FreeTextResponse
 from tantra.coordinator import (
     AnswerPayload,
@@ -232,4 +242,109 @@ async def test_cancellation_reads_the_tree_through_the_fenced_transaction(postgr
     finally:
         monkeypatch.undo()
         await runtime.aclose()
+        await store.close()
+
+
+COORDINATED_READS = {
+    "lookup_finished": lambda view, sid, turn: view.lookup_finished(sid),
+    "read_operational": lambda view, sid, turn: view.read_operational(sid),
+    "read_turn": lambda view, sid, turn: view.read_turn(sid, turn),
+    "read_compacted": lambda view, sid, turn: view.read_compacted(sid),
+    "read_page": lambda view, sid, turn: view.read_page(sid),
+}
+
+
+@pytest.mark.parametrize("method", sorted(COORDINATED_READS))
+async def test_coordinated_reads_check_membership_without_loading_headers(postgres_dsn, pg_schema, monkeypatch, method):
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    coordinator = PostgresCoordinator(store, request_timeout=2)
+    await coordinator.start()
+    root, foreign, child, legacy, turn = (uuid4().hex for _ in range(5))
+    await store.create(SessionHeader(id=root, agent="bot"))
+    await store.create(SessionHeader(id=foreign, agent="bot"))
+    await store.create(SessionHeader(id=child, root_id=foreign, parent_id=foreign, agent="bot", depth=1))
+    await store.create(SessionHeader(id=legacy, parent_id=root, agent="bot", depth=1))
+    await store.append(
+        root,
+        [
+            InputQueued(command_id=turn, input="go"),
+            TurnStarted(turn_id=turn, input="go"),
+            TurnCompleted(turn_id=turn, stop_reason="stop"),
+            AgentFinished(result="done"),
+        ],
+    )
+
+    def read(target, sid):
+        return COORDINATED_READS[method](target, sid, turn)
+
+    expected = await read(store, root)
+    owner = await coordinator.acquire(root)
+    statements = []
+    execute = postgres.psycopg.AsyncConnection.execute
+
+    async def capture(conn, query, *args, **kwargs):
+        statements.append(query)
+        return await execute(conn, query, *args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("coordinated read loaded a header")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(coordinator_module, "_hydrate", forbidden)
+            async with coordinator.transaction(owner) as view:
+                assert await read(view, root) == expected
+                with pytest.raises(SessionNotFound) as missing:
+                    await read(view, "absent")
+                assert str(missing.value) == "absent"
+                for actor, actor_root in ((child, foreign), (legacy, legacy)):
+                    with pytest.raises(LeaseLost) as lost:
+                        await read(view, actor)
+                    assert str(lost.value) == actor_root
+            patch.setattr(postgres.psycopg.AsyncConnection, "execute", capture)
+            with pytest.raises(CoordinatorUnavailable):
+                await read(view, root)
+        assert statements == []
+    finally:
+        await coordinator.close()
+        await store.close()
+
+
+async def test_a_foreign_actor_is_rejected_before_operational_repair(postgres_dsn, pg_schema):
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    coordinator = PostgresCoordinator(store, request_timeout=2)
+    await coordinator.start()
+    root, foreign, child = (uuid4().hex for _ in range(3))
+    await store.create(SessionHeader(id=root, agent="bot"))
+    await store.create(SessionHeader(id=foreign, agent="bot"))
+    await store.create(SessionHeader(id=child, root_id=foreign, parent_id=foreign, agent="bot", depth=1))
+    pending = uuid4().hex
+    await store.append(child, [InputQueued(command_id=pending, input="queued")])
+
+    async def projection():
+        async with store._connection() as conn:
+            cursor = await conn.execute(
+                store._sql(
+                    "SELECT s.operational_version, (SELECT count(*) FROM {schema}.journal_index i"
+                    " WHERE i.actor_id = s.id) FROM {schema}.sessions s WHERE s.id = %s"
+                ),
+                (child,),
+            )
+            return await cursor.fetchone()
+
+    async with store._connection() as conn:
+        await conn.execute(store._sql("UPDATE {schema}.sessions SET operational_version = 0 WHERE id = %s"), (child,))
+        await conn.execute(store._sql("DELETE FROM {schema}.journal_index WHERE actor_id = %s"), (child,))
+    owner = await coordinator.acquire(root)
+    try:
+        assert await projection() == (0, 0)
+        async with coordinator.transaction(owner) as view:
+            with pytest.raises(LeaseLost) as lost:
+                await view.read_operational(child)
+            assert str(lost.value) == foreign
+        assert await projection() == (0, 0)
+        assert [item.command_id for item in (await store.read_operational(child)).pending] == [pending]
+        assert await projection() == (1, 1)
+    finally:
+        await coordinator.close()
         await store.close()

@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from tantra import LeaseLost, PostgresCoordinator, PostgresStore, SessionHeader
+from tantra import LeaseLost, Ownership, PostgresCoordinator, PostgresStore, SessionHeader
 from tantra.cleanup import CleanupChanged, CleanupSelector
 from tantra.events import InputQueued, ReasoningDelta, Stamped, TextDelta, ToolCallDelta, TurnStarted
 from tantra.stores import postgres
@@ -206,6 +206,89 @@ async def test_initial_expiry_is_checked_after_root_row_lock(postgres_dsn, pg_sc
             await task
     finally:
         await blocker.close()
+        await coordinator.close()
+        await store.close()
+
+
+FENCE_SETTINGS = (
+    "SELECT current_setting('tantra.root_id', true),"
+    " current_setting('tantra.instance_id', true), current_setting('tantra.generation', true)"
+)
+
+
+@pytest.mark.parametrize("loss", ["generation", "owner", "missing", "expired"])
+async def test_rejected_transaction_entry_never_sets_fence_settings(postgres_dsn, pg_schema, loss, monkeypatch):
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    coordinator = PostgresCoordinator(store, request_timeout=2)
+    await coordinator.start()
+    sid = uuid4().hex
+    await store.create(SessionHeader(id=sid, agent="bot"))
+    if loss == "missing":
+        owner = Ownership(
+            root_id=sid,
+            instance_id=coordinator.instance_id,
+            generation=1,
+            expires_at=datetime.now(UTC) + timedelta(minutes=1),
+        )
+    else:
+        owner = await coordinator.acquire(sid)
+        change = {
+            "generation": "generation = generation + 1",
+            "owner": f"owner_instance = '{uuid4()}'",
+            "expired": "expires_at = clock_timestamp() - interval '1 second'",
+        }[loss]
+        async with store._connection() as conn:
+            await conn.execute(store._sql(f"UPDATE {{schema}}.coordinator_roots SET {change} WHERE root_id=%s"), (sid,))
+    observed = []
+    execute = psycopg.AsyncConnection.execute
+
+    async def capture(conn, query, *args, **kwargs):
+        cursor = await execute(conn, query, *args, **kwargs)
+        body = query if isinstance(query, str) else query.as_string(conn)
+        if "MATERIALIZED" in body and "FOR UPDATE" in body:
+            observed.append(await (await execute(conn, FENCE_SETTINGS)).fetchone())
+        return cursor
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(psycopg.AsyncConnection, "execute", capture)
+            with pytest.raises(LeaseLost):
+                async with coordinator.transaction(owner):
+                    raise AssertionError("lost ownership was authorized")
+        assert len(observed) == 1
+        assert all(value in (None, "") for value in observed[0])
+        async with store._connection() as conn:
+            assert all(value in (None, "") for value in await (await conn.execute(FENCE_SETTINGS)).fetchone())
+            cursor = await conn.execute("SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))", (sid,))
+            assert (await cursor.fetchone())[0] is True
+    finally:
+        await coordinator.close()
+        await store.close()
+
+
+async def test_coordinated_begin_and_change_statement_budgets(postgres_dsn, pg_schema, monkeypatch):
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    coordinator = PostgresCoordinator(store, request_timeout=2)
+    await coordinator.start()
+    sid = uuid4().hex
+    await store.create(SessionHeader(id=sid, agent="bot"))
+    owner = await coordinator.acquire(sid)
+    statements = []
+    execute = psycopg.AsyncConnection.execute
+
+    async def capture(conn, query, *args, **kwargs):
+        statements.append(conn)
+        return await execute(conn, query, *args, **kwargs)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(psycopg.AsyncConnection, "execute", capture)
+            async with coordinator.transaction(owner) as view:
+                begin = sum(conn is view.conn for conn in statements)
+                await view.change("journal", sid, 1)
+                change = sum(conn is view.conn for conn in statements) - begin
+        assert (begin, change) == (3, 1)
+    finally:
         await coordinator.close()
         await store.close()
 

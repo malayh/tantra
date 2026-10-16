@@ -330,7 +330,9 @@ async def test_ask_migration_backfills_both_codecs_in_bounded_pages_and_rolls_ba
     assert await store.lookup_ask(root.id, current.ask_id) == (root.id, Stamped(seq=1, event=current))
     assert await store.lookup_ask(root.id, legacy.ask_id) == (root.id, Stamped(seq=1002, event=legacy))
     with psycopg.connect(postgres_dsn) as conn:
-        assert conn.execute(store._sql("SELECT max(version) FROM {schema}.schema_version")).fetchone() == (12,)
+        assert conn.execute(store._sql("SELECT max(version) FROM {schema}.schema_version")).fetchone() == (
+            len(MIGRATIONS),
+        )
         assert (
             conn.execute(
                 store._sql("SELECT seq,stamped FROM {schema}.events WHERE session_id=%s ORDER BY seq"), (root.id,)
@@ -394,5 +396,7 @@ async def test_corrupt_ask_backfill_rolls_back_then_retries_after_repair(postgre
             store._sql("SELECT seq,stamped FROM {schema}.events WHERE session_id=%s ORDER BY seq"), (root.id,)
         ).fetchall()
         assert after == [before[0], (2, fixed.obj)]
-        assert conn.execute(store._sql("SELECT max(version) FROM {schema}.schema_version")).fetchone() == (12,)
+        assert conn.execute(store._sql("SELECT max(version) FROM {schema}.schema_version")).fetchone() == (
+            len(MIGRATIONS),
+        )
     await store.close()

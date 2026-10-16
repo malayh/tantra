@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -6,15 +7,18 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from tantra import (
+    Agent,
     ClaimWriterPayload,
     CommandEnvelope,
     CommandReply,
     CommandTimeout,
     CoordinatorUnavailable,
+    FakeProvider,
     LeaseLost,
     ModelChangeBusy,
     PostgresCoordinator,
     PostgresStore,
+    Runtime,
     SessionHeader,
     WriterReplaced,
 )
@@ -731,4 +735,389 @@ async def test_status_changes_publish_header_hints_and_delta_appends_do_not(post
             hints.append([notice.kind for notice in changes if notice.kind in ("header", "activity")])
         assert hints == [["activity"], ["header"], [], [], ["header"]]
     finally:
+        await _close(pair)
+
+
+async def _listener(dsn: str, coordinator: PostgresCoordinator):
+    conn = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    await conn.execute(psycopg.sql.SQL("LISTEN {}").format(psycopg.sql.Identifier(coordinator._channel)))
+    return conn
+
+
+async def _payloads(conn, count: int) -> list[dict]:
+    payloads = [json.loads(notice.payload) async for notice in conn.notifies(timeout=2, stop_after=count)]
+    assert len(payloads) == count
+    return payloads
+
+
+async def _change_rows(store: PostgresStore, root: str) -> list[tuple]:
+    async with store._connection() as conn:
+        cursor = await conn.execute(
+            store._sql("SELECT id, root_id, kind, actor_id, seq FROM {schema}.coordinator_changes WHERE root_id = %s"),
+            (root,),
+        )
+        return await cursor.fetchall()
+
+
+@pytest.mark.parametrize(("actor_id", "seq"), [(None, None), ("actor-雪", None), (None, 7), ("actor-雪", 7)])
+async def test_published_changes_notify_exactly_the_inserted_row(
+    postgres_dsn: str, pg_schema: str, actor_id: str | None, seq: int | None
+) -> None:
+    pair = await _coordinator(postgres_dsn, pg_schema)
+    root = uuid.uuid4().hex
+    await pair[0].create(SessionHeader(id=root, agent="build"))
+    ownership = await pair[1].acquire(root)
+    assert ownership is not None
+    listener = await _listener(postgres_dsn, pair[1])
+    try:
+        before = await _change_rows(pair[0], root)
+        async with pair[1].transaction(ownership) as store:
+            fenced = await store.change("journal", actor_id, seq)
+        async with pair[0]._connection() as conn, conn.transaction():
+            unfenced = await pair[1]._publish(conn, root, "ownership", actor_id, seq)
+
+        assert await _payloads(listener, 2) == [
+            {"id": fenced, "root_id": root, "kind": "journal", "actor_id": actor_id, "seq": seq},
+            {"id": unfenced, "root_id": root, "kind": "ownership", "actor_id": actor_id, "seq": seq},
+        ]
+        assert await _change_rows(pair[0], root) == [
+            *before,
+            (fenced, root, "journal", actor_id, seq),
+            (unfenced, root, "ownership", actor_id, seq),
+        ]
+    finally:
+        await listener.close()
+        await _close(pair)
+
+
+async def test_change_notifications_follow_commit_order_and_skip_rollbacks(postgres_dsn: str, pg_schema: str) -> None:
+    pair = await _coordinator(postgres_dsn, pg_schema)
+    root = uuid.uuid4().hex
+    await pair[0].create(SessionHeader(id=root, agent="build"))
+    ownership = await pair[1].acquire(root)
+    assert ownership is not None
+    listener = await _listener(postgres_dsn, pair[1])
+    try:
+        before = await _change_rows(pair[0], root)
+        with pytest.raises(RuntimeError, match="rollback"):
+            async with pair[1].transaction(ownership) as store:
+                await store.change("journal", root, 1)
+                raise RuntimeError("rollback")
+        async with pair[1].transaction(ownership) as store:
+            first = await store.change("journal", root, 2)
+            second = await store.change("header", root)
+
+        assert await _payloads(listener, 2) == [
+            {"id": first, "root_id": root, "kind": "journal", "actor_id": root, "seq": 2},
+            {"id": second, "root_id": root, "kind": "header", "actor_id": root, "seq": None},
+        ]
+        assert first < second
+        assert await _change_rows(pair[0], root) == [
+            *before,
+            (first, root, "journal", root, 2),
+            (second, root, "header", root, None),
+        ]
+    finally:
+        await listener.close()
+        await _close(pair)
+
+
+@pytest.mark.parametrize(
+    "loss",
+    [
+        "expires_at = clock_timestamp() - interval '1 second'",
+        "generation = generation + 1",
+        "owner_instance = NULL",
+        "expires_at = NULL",
+    ],
+)
+async def test_fenced_change_inserts_nothing_after_the_lease_is_lost(
+    postgres_dsn: str, pg_schema: str, loss: str
+) -> None:
+    pair = await _coordinator(postgres_dsn, pg_schema)
+    root = uuid.uuid4().hex
+    await pair[0].create(SessionHeader(id=root, agent="build"))
+    ownership = await pair[1].acquire(root)
+    assert ownership is not None
+    count = "SELECT count(*) FROM {schema}.coordinator_changes"
+    try:
+        async with pair[1].transaction(ownership) as store:
+            await store.conn.execute(
+                pair[1]._sql(f"UPDATE {{schema}}.coordinator_roots SET {loss} WHERE root_id = %s"), (root,)
+            )
+            before = await (await store.conn.execute(pair[1]._sql(count))).fetchone()
+            with pytest.raises(LeaseLost):
+                await store.change("journal", root, 1)
+            assert await (await store.conn.execute(pair[1]._sql(count))).fetchone() == before
+    finally:
+        await _close(pair)
+
+
+@pytest.mark.parametrize("operation", ["change", "claim_writer", "set_active", "set_recovery", "reply"])
+async def test_closed_view_rejects_fenced_writes_before_any_statement(
+    postgres_dsn: str, pg_schema: str, operation: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pair = await _coordinator(postgres_dsn, pg_schema)
+    root = uuid.uuid4().hex
+    await pair[0].create(SessionHeader(id=root, agent="build"))
+    ownership = await pair[1].acquire(root)
+    assert ownership is not None
+    statements = []
+    execute = psycopg.AsyncConnection.execute
+
+    async def capture(conn, query, *args, **kwargs):
+        if conn is retained.conn:
+            statements.append(query)
+        return await execute(conn, query, *args, **kwargs)
+
+    try:
+        async with pair[1].transaction(ownership) as retained:
+            pass
+        calls = {
+            "change": lambda: retained.change("journal", root, 1),
+            "claim_writer": lambda: retained.claim_writer(uuid.uuid4()),
+            "set_active": lambda: retained.set_active(root, True),
+            "set_recovery": lambda: retained.set_recovery({"phase": "closed"}),
+            "reply": lambda: retained.reply(CommandReply(request_id=uuid.uuid4())),
+        }
+        with monkeypatch.context() as patch:
+            patch.setattr(psycopg.AsyncConnection, "execute", capture)
+            with pytest.raises(CoordinatorUnavailable, match="view is closed"):
+                await calls[operation]()
+        assert statements == []
+    finally:
+        await _close(pair)
+
+
+async def test_claim_writer_change_id_is_the_published_row(postgres_dsn: str, pg_schema: str) -> None:
+    pair = await _coordinator(postgres_dsn, pg_schema)
+    root = uuid.uuid4().hex
+    await pair[0].create(SessionHeader(id=root, agent="build"))
+    ownership = await pair[1].acquire(root)
+    assert ownership is not None
+    listener = await _listener(postgres_dsn, pair[1])
+    try:
+        async with pair[1].transaction(ownership) as store:
+            await store.claim_writer(uuid.uuid4())
+            change_id = store.writer_change_id
+
+        assert await _payloads(listener, 1) == [
+            {"id": change_id, "root_id": root, "kind": "writer", "actor_id": None, "seq": None}
+        ]
+        assert (await _change_rows(pair[0], root))[-1] == (change_id, root, "writer", None, None)
+    finally:
+        await listener.close()
+        await _close(pair)
+
+
+@pytest.mark.parametrize("operation", ["claim_writer", "set_active", "set_recovery", "reply"])
+async def test_expired_lease_commits_nothing_from_fenced_coordinator_writes(
+    postgres_dsn: str, pg_schema: str, operation: str
+) -> None:
+    pair = await _coordinator(postgres_dsn, pg_schema)
+    root = uuid.uuid4().hex
+    await pair[0].create(SessionHeader(id=root, agent="build"))
+    ownership = await pair[1].acquire(root)
+    assert ownership is not None
+    request_id = uuid.uuid4()
+    await pair[1]._put_request(
+        CommandEnvelope(
+            request_id=request_id,
+            root_id=root,
+            operation="claim_writer",
+            payload=ClaimWriterPayload(connection_id=uuid.uuid4()),
+            deadline=datetime.now(UTC) + timedelta(seconds=30),
+        ),
+        ownership,
+    )
+
+    async def state() -> list[tuple]:
+        async with pair[0]._connection() as conn:
+            cursor = await conn.execute(
+                pair[1]._sql(
+                    "SELECT writer_connection, recovery, owner_instance, generation, expires_at,"
+                    " (SELECT count(*) FROM {schema}.coordinator_activity WHERE root_id = %s),"
+                    " (SELECT reply FROM {schema}.coordinator_requests WHERE request_id = %s),"
+                    " (SELECT count(*) FROM {schema}.coordinator_changes WHERE root_id = %s)"
+                    " FROM {schema}.coordinator_roots WHERE root_id = %s"
+                ),
+                (root, request_id, root, root),
+            )
+            return await cursor.fetchall()
+
+    calls = {
+        "claim_writer": lambda store: store.claim_writer(uuid.uuid4()),
+        "set_active": lambda store: store.set_active(root, True),
+        "set_recovery": lambda store: store.set_recovery({"phase": "lost"}),
+        "reply": lambda store: store.reply(CommandReply(request_id=request_id, result={"lost": True})),
+    }
+    try:
+        before = await state()
+        with pytest.raises(LeaseLost):
+            async with pair[1].transaction(ownership) as store:
+                if operation == "reply":
+                    assert await store.lock_request(request_id) is not None
+                await store.conn.execute(
+                    pair[1]._sql(
+                        "UPDATE {schema}.coordinator_roots"
+                        " SET expires_at = clock_timestamp() - interval '1 second' WHERE root_id = %s"
+                    ),
+                    (root,),
+                )
+                await calls[operation](store)
+        assert await state() == before
+        assert before[0][0] is None and before[0][1] == {} and before[0][5] == 0 and before[0][6] is None
+    finally:
+        await _close(pair)
+
+
+class Bot(Agent):
+    pass
+
+
+async def test_runtime_request_that_absorbs_lease_loss_mid_transaction_commits_nothing(
+    postgres_dsn: str, pg_schema: str
+) -> None:
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    coordinator = PostgresCoordinator(store, request_timeout=1.0, catch_up_interval=0.02)
+    runtime = Runtime(FakeProvider([]), store, [Bot], default_model="m", coordinator=coordinator)
+    await runtime.start()
+    coordinator._handler = None
+    root = uuid.uuid4().hex
+    await store.create(SessionHeader(id=root, agent="build"))
+    ownership = await coordinator.acquire(root)
+    assert ownership is not None
+    runtime._ownerships[root] = ownership
+    envelope = CommandEnvelope(
+        request_id=uuid.uuid4(),
+        root_id=root,
+        operation="claim_writer",
+        payload=ClaimWriterPayload(connection_id=uuid.uuid4()),
+        deadline=datetime.now(UTC) + timedelta(seconds=30),
+    )
+    replies = []
+
+    def expiring(operation):
+        async def run(locked, view):
+            await view.conn.execute(
+                coordinator._sql(
+                    "UPDATE {schema}.coordinator_roots"
+                    " SET expires_at = clock_timestamp() - interval '1 second' WHERE root_id = %s"
+                ),
+                (root,),
+            )
+            reply = await operation(locked, view)
+            replies.append(reply)
+            return reply
+
+        return run
+
+    async def state() -> list[tuple]:
+        async with store._connection() as conn:
+            cursor = await conn.execute(
+                coordinator._sql(
+                    "SELECT writer_connection, owner_instance, generation, expires_at,"
+                    " (SELECT reply FROM {schema}.coordinator_requests WHERE request_id = %s),"
+                    " (SELECT count(*) FROM {schema}.coordinator_changes WHERE root_id = %s)"
+                    " FROM {schema}.coordinator_roots WHERE root_id = %s"
+                ),
+                (envelope.request_id, root, root),
+            )
+            return await cursor.fetchall()
+
+    try:
+        await coordinator._put_request(envelope, ownership)
+        before = await state()
+        with pytest.raises(LeaseLost):
+            await runtime._handle_request(
+                envelope, lambda operation: coordinator._apply_request(envelope, ownership, expiring(operation))
+            )
+        assert [(reply.status, reply.error_code) for reply in replies] == [("error", "lease_lost")]
+        assert await state() == before
+        assert before[0][0] is None and before[0][4] is None
+        assert await coordinator._request_reply(envelope.request_id) is None
+    finally:
+        await runtime.aclose()
+        await store.close()
+
+
+@pytest.mark.parametrize("blocker", ["lock", "update"])
+@pytest.mark.parametrize("operation", ["renew", "release", "relinquish", "put_request", "acquire"])
+async def test_lease_checks_read_expiry_after_the_root_row_lock(
+    postgres_dsn: str, pg_schema: str, operation: str, blocker: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pair = await _coordinator(postgres_dsn, pg_schema, lease_ttl=0.3)
+    root = uuid.uuid4().hex
+    await pair[0].create(SessionHeader(id=root, agent="build"))
+    holder = await psycopg.AsyncConnection.connect(postgres_dsn)
+    ownership = await pair[1].acquire(root)
+    assert ownership is not None
+    envelope = CommandEnvelope(
+        request_id=uuid.uuid4(),
+        root_id=root,
+        operation="claim_writer",
+        payload=ClaimWriterPayload(connection_id=uuid.uuid4()),
+        deadline=datetime.now(UTC) + timedelta(seconds=30),
+    )
+    calls = {
+        "renew": lambda: pair[1].renew(ownership),
+        "release": lambda: pair[1].release(ownership),
+        "relinquish": lambda: pair[1].relinquish_failed_prestart(ownership, root),
+        "put_request": lambda: pair[1]._put_request(envelope, ownership),
+        "acquire": lambda: pair[1].acquire(root),
+    }
+    statement = (
+        "UPDATE {schema}.coordinator_roots SET updated_at = clock_timestamp() WHERE root_id = %s"
+        if blocker == "update"
+        else "SELECT 1 FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE"
+    )
+    statements = []
+    execute = psycopg.AsyncConnection.execute
+
+    async def capture(conn, query, *args, **kwargs):
+        statements.append((conn, query if isinstance(query, str) else query.as_string(conn)))
+        return await execute(conn, query, *args, **kwargs)
+
+    task = None
+    try:
+        async with holder.transaction():
+            await holder.execute(pair[1]._sql(statement), (root,))
+            monkeypatch.setattr(psycopg.AsyncConnection, "execute", capture)
+            task = asyncio.create_task(calls[operation]())
+            await asyncio.sleep(0.45)
+            assert not task.done()
+        if operation in ("renew", "put_request"):
+            with pytest.raises(LeaseLost):
+                await task
+        elif operation == "acquire":
+            replacement = await task
+            assert replacement is not None
+            assert replacement.generation == ownership.generation + 1
+            assert replacement.expires_at > ownership.expires_at
+        else:
+            assert await task is False
+        monkeypatch.undo()
+        if operation in ("renew", "release", "relinquish"):
+            control = [body for conn, body in statements if conn is pair[1]._control_conn]
+            assert "FOR UPDATE" in control[-1]
+        async with pair[0]._connection() as conn:
+            cursor = await conn.execute(
+                pair[1]._sql(
+                    "SELECT owner_instance, generation,"
+                    " (SELECT count(*) FROM {schema}.coordinator_requests WHERE root_id = %s)"
+                    " FROM {schema}.coordinator_roots WHERE root_id = %s"
+                ),
+                (root, root),
+            )
+            row = await cursor.fetchone()
+        assert row == (
+            str(ownership.instance_id),
+            ownership.generation + (operation == "acquire"),
+            0,
+        )
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await holder.close()
         await _close(pair)

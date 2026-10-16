@@ -24,6 +24,7 @@ from tantra.cleanup import (
 )
 from tantra.context import compacted_history
 from tantra.coordinator import (
+    TREE_KINDS,
     AnswerPayload,
     CancelPayload,
     ClaimWriterPayload,
@@ -84,7 +85,7 @@ from tantra.permissions import check_permission, decide
 from tantra.providers.base import Provider
 from tantra.skills import SKILL_TOOL, SkillInfo, Skills
 from tantra.stores.base import UNSET, HistorySnapshot, OperationalState, Store, reduce_journal
-from tantra.stores.postgres import PostgresStore
+from tantra.stores.postgres import PostgresStore, _hydrate
 from tantra.tools import Context, Tool
 from tantra.tracing import NULL_TRACER, Tracer
 
@@ -96,7 +97,6 @@ if TYPE_CHECKING:
     from tantra.memory import Memory
 
 TYPED_KEYS = frozenset({"type", "anyOf", "allOf", "oneOf", "$ref", "enum", "const"})
-TREE_KINDS = frozenset({"header", "activity", "ownership", "deleted"})
 TREE_INTERVAL = 0.25
 STATUS_EVENTS = (
     InputQueued,
@@ -202,6 +202,7 @@ class _Tree:
     snapshot: tuple[int, TreeChange] | None = None
     change_id: int | None = None
     read_at: float | None = None
+    tree_change_id: int | None = None
 
 
 @dataclass
@@ -210,6 +211,17 @@ class _LiveAsk:
     agent_id: str
     event: AskRaised
     future: asyncio.Future[AskResponse]
+
+
+def _tree_marker(observation: Any) -> int | None:
+    marker = getattr(observation, "tree_change_id", None)
+    return marker if isinstance(marker, int) else None
+
+
+def _require_root(root_id: str, header: SessionHeader) -> SessionHeader:
+    if header.parent_id is not None or header.root_id not in (None, header.id):
+        raise TantraError(f"session {root_id} is not a root")
+    return header
 
 
 def _covers(observation: Any, actor_id: str) -> bool:
@@ -657,12 +669,22 @@ class Runtime:
                 or previous.owner_valid != observation.owner_valid
             ):
                 tree.change_id = max(tree.change_id or 0, observation.change_id)
+                marker = _tree_marker(observation)
+                if marker is not None:
+                    tree.tree_change_id = max(tree.tree_change_id or 0, marker)
                 self._tree_changed(root_id)
             else:
-                await self._observe_tree(root_id, tree, observation.change_id)
+                await self._observe_tree(root_id, tree, observation)
 
-    async def _observe_tree(self, root_id: str, tree: _Tree, change_id: int) -> None:
+    async def _observe_tree(self, root_id: str, tree: _Tree, observation: Any) -> None:
+        change_id = observation.change_id
         if tree.change_id is not None and change_id <= tree.change_id:
+            return
+        marker = _tree_marker(observation)
+        if marker is not None:
+            if tree.tree_change_id is None or marker > tree.tree_change_id:
+                self._tree_changed(root_id)
+            tree.change_id, tree.tree_change_id = change_id, max(tree.tree_change_id or 0, marker)
             return
         after, tree.change_id = tree.change_id, change_id
         changes = getattr(self.coordinator, "_changes", None)
@@ -695,6 +717,7 @@ class Runtime:
             observation = self._observations.get(root_id)
             if observation is not None and observation.error is None:
                 tree.change_id = observation.change_id
+                tree.tree_change_id = _tree_marker(observation)
             self._sync_actor_interests(root_id)
             self._watch_root(root_id)
         tree.users += 1
@@ -1044,10 +1067,7 @@ class Runtime:
             raise SessionNotFound(agent_id)
 
     async def _root_header(self, root_id: str) -> SessionHeader:
-        header = await self._header(root_id)
-        if header.parent_id is not None or header.root_id not in (None, header.id):
-            raise TantraError(f"session {root_id} is not a root")
-        return header
+        return _require_root(root_id, await self._header(root_id))
 
     async def _children(self, parent_id: str) -> list[SessionHeader]:
         children: list[SessionHeader] = []
@@ -1062,6 +1082,16 @@ class Runtime:
             before = page[-1].id
 
     async def _tree_headers(self, root_id: str) -> list[SessionHeader]:
+        if type(self.store) is PostgresStore:
+            levels: dict[int, list[tuple[Any, int]]] = {}
+            for header, last_seq, depth in await self.store._tree_rows(root_id):
+                levels.setdefault(depth, []).append((header, last_seq))
+            if 0 not in levels:
+                raise SessionNotFound(root_id)
+            headers = [_require_root(root_id, _hydrate(levels[0][0]))]
+            for depth in range(1, len(levels)):
+                headers.extend(sorted(map(_hydrate, levels[depth]), key=lambda child: (child.created_at, child.id)))
+            return headers
         root = await self._root_header(root_id)
         headers = [root]
         level = [root]
@@ -1422,7 +1452,11 @@ class Runtime:
         if self.coordinator is None:
             return [self._status_from_header(header) for header in headers]
         self._ensure_started()
-        active = {header.id: await self.coordinator.active(root_id, header.id) for header in headers}
+        if type(self.coordinator) is PostgresCoordinator:
+            actors = await self.coordinator._active_actors(root_id)
+            active = {header.id: header.id in actors for header in headers}
+        else:
+            active = {header.id: await self.coordinator.active(root_id, header.id) for header in headers}
         return [self._status_from_header(header, active[header.id]) for header in headers]
 
     async def watch_tree(self, root_id: UUID) -> AsyncIterator[TreeChange]:

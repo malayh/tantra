@@ -96,6 +96,7 @@ class Metrics:
     result_queries: int = 0
     turn_boundary_queries: int = 0
     header_queries: int = 0
+    tree_queries: int = 0
 
     def clear(self) -> None:
         self.sql_calls = self.fetched_rows = 0
@@ -104,7 +105,7 @@ class Metrics:
         self.loop_lag_ms.clear()
         self.journal_queries = self.journal_rows = 0
         self.event_body_queries = self.event_body_rows = 0
-        self.result_queries = self.turn_boundary_queries = self.header_queries = 0
+        self.result_queries = self.turn_boundary_queries = self.header_queries = self.tree_queries = 0
 
 
 METRICS = Metrics()
@@ -180,6 +181,7 @@ class MeasuredCursor(psycopg.AsyncCursor):
         METRICS.result_queries += int(rendered.lstrip().upper().startswith("SELECT REPLY FROM"))
         METRICS.turn_boundary_queries += int(rendered.lstrip().upper().startswith("SELECT MIN(SEQ) FILTER"))
         METRICS.header_queries += int(rendered.lstrip().upper().startswith("SELECT HEADER, LAST_SEQ FROM"))
+        METRICS.tree_queries += int(rendered.lstrip().upper().startswith("WITH RECURSIVE TREE AS"))
         try:
             return await super().execute(*args, **kwargs)
         finally:

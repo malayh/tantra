@@ -147,6 +147,7 @@ class App:
             "event_body_rows": METRICS.event_body_rows,
             "result_queries": METRICS.result_queries,
             "header_queries": METRICS.header_queries,
+            "tree_queries": METRICS.tree_queries,
             "auth": dict(self.auth),
             "transport": {
                 "frames": self.transport.frames,

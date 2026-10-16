@@ -17,6 +17,8 @@ PostgreSQL also provides optional `lookup_command(root_id, command_id)` and `loo
 
 Optional `lookup_ask(root_id, ask_id)` returns `(actor_id, Stamped)` for the original `AskRaised` anywhere in the durable tree, including legacy parent relationships. Duplicate matches raise `ValueError`. PostgreSQL migration 12 adds the ask projection and partial index, backfilling both journal envelopes through the existing codec in batches of at most 1,000. Stop writers for setup. Corrupt rows or migration failures roll back; version publication happens only after completion. Journal bodies/sequences stay unchanged. Runtime provides a full-read fallback when this capability is absent; required Store and Coordinator protocols are unchanged.
 
+PostgreSQL migration 13 adds only the partial index `coordinator_changes_tree_idx` for `header`, `activity`, `ownership` and `deleted` changes, which coordinator observations read as a tree change marker. It is built in the setup transaction, so change inserts wait for it briefly; older workers ignore it.
+
 PostgreSQL provides three further optional reads:
 
 - `read_operational(actor_id)` returns ordered pending inputs, the latest unmatched start, journal finish evidence, unresolved cancellation targets, and a versioned sequence watermark. Live-work flags and cancellation pointers commit with lifecycle events. Streaming appends advance the watermark in the existing header update. Valid stale state catches up from indexed lifecycle evidence; invalid state rebuilds from the unchanged journal inside a fenced transaction.

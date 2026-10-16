@@ -1,6 +1,6 @@
 # 018 — ACP v2–inspired interface and the `tantra` profile
 
-**Status:** P1–P9 ✅ DONE. P10 —.
+**Status:** P1–P10 ✅ DONE.
 
 ## Goal
 
@@ -1093,14 +1093,90 @@ Deploy backend and UI together. Old pages need a refresh.
 - An unrelated banner also hides a child drawer's loader while it resumes. Cosmetic.
 - The `tools.py` docstrings for `ctx.ask`/`ctx.spawn` still describe re-execution on resume, which the actor runtime no longer does.
 
-### Phase 10 — Performance · deps: P9 · —
-- **Goal:** cut CPU and SQL per operation without changing behavior.
-- **Approach:** profile first. Candidates:
-  - active flags from the root observation;
-  - no hub read on usage-only header notices;
-  - fewer header queries (+47% since P7);
-  - hot paths that profiling finds.
-- Planned after P9 lands.
+### Phase 10 — Performance · deps: P9 · ✅ DONE
+
+> ⚠ **This phase changes Runtime internals:** `coordinator.py`, `stores/postgres.py` (migration 13, index only) and `runtime.py`. Confirmed by plan approval, 2026-10-16. `events.py`, `loop.py`, `acp/*`, the client and Sarathi stay untouched.
+
+**Deliverables**
+- **Profile first.** A cProfile plus a per-call-site SQL trace of the P9 ACP bench (scratchpad only).
+  - CPU follows statement count; the ACP layer is under 5%.
+  - 43% of active statements were transaction protocol.
+  - About 20% were tree-watch reads: the header, per-parent `list` and per-actor `active` reads, plus `_changes` paging on every observation.
+- **Fewer statements per coordinated transaction** (`coordinator.py`):
+  - `_publish` runs INSERT and `pg_notify` as one statement; `CoordinatedStore.change` also fuses the fence into it.
+  - Transaction begin fuses the lock check and the authorization `set_config` into one statement, with `valid` evaluated once after the row lock.
+  - `_not_expired` is folded into materialized locking CTEs.
+  - The leading fence is dropped in `claim_writer`, `set_active`, `set_recovery` and `reply`; each ends in a fenced `change()`.
+  - `_catch_up` returns typed columns.
+- **The tree watch reads less:**
+  - `RootObservation.tree_change_id` is the latest `header`/`activity`/`ownership`/`deleted` change, backed by migration 13 (`coordinator_changes_tree_idx`). `_observe_tree` bumps when it rises instead of paging `_changes`.
+  - PostgreSQL `_tree_headers` is one recursive CTE, and `_tree_statuses` reads activity in one query.
+  - Coordinated journal reads check root membership through `root_key` instead of loading a header.
+  - Custom stores and coordinators keep the old paths, gated by `type(...) is`.
+- **Bench:** a `tree_queries` counter. Existing counters are unchanged.
+- **Docs:** CHANGELOG Performance entries and upgrade notes; `reference/stores.md` migration 13.
+
+**Verify**
+- Every item has a test that fails under a wrong implementation, checked by mutation. Statement budgets: `change()` = 1, transaction begin = 3, a tree snapshot = 2 at any size.
+- Full suites pass with zero skips; `test_child_completion_strict_request_replay` passes.
+- Benches against a `b4688a5` worktree on the same machine.
+
+**Checklist**
+- [x] User reminded + confirmed before starting (plan approved 2026-10-16)
+- [x] Coordinator statement fusion (A)
+- [x] Tree reads, marker, membership checks (B)
+- [x] Verified and benchmarked
+
+**Verified**
+- `ruff` clean. `pytest` 1241 passed and `pytest stress` 157 passed, both zero skips on owned PostgreSQL. Sarathi backend 116 passed. `tantra-acp-client` 68 passed, lint and typecheck clean. `mkdocs build --strict` clean.
+- One independent review per part:
+  - **A:** no defects; three tests were strengthened.
+  - **B:** one defect, fixed: the recursive CTE never ended on a corrupt `parent_id` cycle. The recursive step now excludes the anchor. Also a bench prefix fix and CHANGELOG wording.
+- **ACP bench**, medians of 4 clean pairs, per worker. Two further pairs ran under heavy host contention (load > 16 on 16 cores) and are excluded: their baselines show 12.4 s and 14.8 s active CPU.
+
+  | | P9 | P10 |
+  |---|---|---|
+  | Active SQL calls | 26,482 | 17,916 (−32%) |
+  | Active header / tree queries | 4,372 / 0 | 1,263 / 1,249 |
+  | Active journal queries | 1,506 | 1,506 |
+  | Active CPU | 4.75 s | 4.30 s (−10%) |
+  | Idle CPU, SQL calls | 2.47 s, 349 | 2.16 s (−13%), 349 |
+  | Delivery p50 / p95 | 5272 / 7079 ms | 5362 / 7281 ms |
+- **Target misses:**
+  - Header plus tree queries fell 42%, not the planned 60%. Snapshot count is unchanged (about 1,250 per worker); each now costs one recursive statement instead of a header read plus `list` pages.
+  - Delivery p95 is +2.9% on the medians. One reversed-order pair shows the opposite sign, and baseline-to-baseline spread is about 10%. The cause is not isolated.
+- **Runtime `scale` bench:**
+  - Active SQL per worker went from about 21.7k to 16.2k (−25%), and active CPU fell 8–9%.
+  - Idle reads are unchanged (500 initial journal reads per worker in both).
+  - No errors, and resources returned to 0.
+- **CPU bench,** filtered, 3 trials:
+  - Replay digests are identical in every case.
+  - **`text-1024-readers-0` / `-8`:**
+    - SQL −10%.
+    - Python CPU +2% / +1%.
+    - PostgreSQL CPU +7% / −8%.
+    - Streaming is dominated by delta batching, which these changes don't touch.
+  - **`wide-root`** (100 children, 1 trial):
+    - SQL −26%.
+    - Python CPU −14%.
+    - PostgreSQL CPU −5%.
+    - Wall time −11%.
+  - The CPU comparator refuses the pair because `bench_sha256` differs (the new counter), so this comparison was made from the raw reports.
+
+**As built**
+- **M3:** `valid` is computed once, in a materialized `checked` CTE. Python also raises `LeaseLost` if the check passes but the `CASE` result is NULL.
+- **M4:** a plain `SELECT … FOR UPDATE` would evaluate `clock_timestamp()` before the lock wait; a test with a lock-only blocker proves the materialized form.
+- **R1:**
+  - The tree CTE groups by recursion depth and sorts each level by `(created_at, id)`, matching the BFS. Errors stay raw psycopg.
+  - Activity errors stay `CoordinatorUnavailable`, so `watch_tree` still retries only those.
+  - A non-root on a `parent_id` cycle raises "not a root", as before.
+- **R2:** `TREE_KINDS` is one constant in `coordinator.py`. Kinds are SQL literals, so a generic plan uses the partial index.
+- **R3:** a corrupt header no longer raises on the five coordinated reads. Recovery still hydrates every header.
+- **`pg_notify` payloads** are built by PostgreSQL: the same keys, different whitespace.
+
+**Follow-up**
+- Tree snapshots per turn are unchanged (about 10 per watched root, plus 2 recovery reads per acquire). Fewer bumps would need fewer `header` notices, such as for usage-only patches, which changes `TreeChange.updated_at` timing (rejected below).
+- Isolate the small delivery-latency difference on a quiet host.
 
 ### Conventions (all phases)
 - **Workflow:**
@@ -1125,6 +1201,10 @@ Deploy backend and UI together. Old pages need a refresh.
     - `Operation` `"new"`;
     - the profile notice code `session_deleted`;
     - the client option `timing.reconnectStableMs`.
+  - P10 adds, without changing anything existing:
+    - the optional `RootObservation.tree_change_id`;
+    - PostgreSQL migration 13 (an index only);
+    - `pg_notify` payloads built by PostgreSQL, with the same keys.
   - Changing any of these means updating this spec first.
 - **Reference schema bumps:** a separate change. Re-vendor the schema, update the wire models and the divergence allowlist, then rerun P1, P2 and P4 verification.
 - **No third-party ACP packages** in Python or TS.
@@ -1150,6 +1230,15 @@ Deploy backend and UI together. Old pages need a refresh.
 - **ACP SDKs (Python `1.0.0rc3`, TS `@agentclientprotocol/sdk`):** pre-release, they disagree on the alpha (alpha.5 vs alpha.8), and they need workarounds for the alpha.8 shapes. Their servers `accept` before auth. We own the protocol instead.
 - **A `tantra.dev` namespace:** implies owning a domain.
 - **Plans, slash commands, `session/fork`:** tantra has no equivalents.
+- **P10 performance options that change behavior:**
+  - Active flags from the observation: coverage is filtered, and the flags are stale by catch-up time.
+  - Skipping usage-only tree bumps: `updated_at` is part of `TreeChange`.
+  - Keeping the lease from writer claim to prompt: it changes ownership visibility.
+  - Dropping the control `SELECT 1` ping: a dead connection would make renew invalidate leases.
+  - Skipping unchanged observation wakeups: waiters count samples, and `request()` rechecks replies.
+  - Fusing configure or the advisory lock into the lock statement: a statement isn't bounded by a timeout it sets itself, and a CTE could invert the lock order.
+  - Folding activity into the tree CTE: the error contracts differ.
+  - Dropping leading fences everywhere: `release_writer`, `validate_writer`, `lock_request`, `recovery` and the deletion paths would change outcome.
 
 ## Open Decisions
 
@@ -1184,3 +1273,6 @@ Deploy backend and UI together. Old pages need a refresh.
 - **Migration 12:** every worker must run the new release before it is applied. An older worker writes no `journal_index` row for `AskRaised`, and `lookup_ask` has no fallback.
 - **`view` hiding is presentation, not authorization:** it withholds a child's outputs and refuses its resume, but the policy still decides access.
 - **Old journals with repeated call ids** stay as written; their windows assemble incorrectly until compaction moves past them.
+- **Migration 13** builds its index in the setup transaction, so change inserts wait briefly. Older workers ignore the index.
+- **The P10 numbers come from a shared host:** CPU and latency vary by about 10% between identical runs. Statement counts are the reliable signal.
+- **Corrupt headers:** coordinated journal reads no longer validate the header, so a corrupt header surfaces at the next full header read instead.

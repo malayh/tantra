@@ -455,6 +455,10 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         "ALTER TABLE {schema}.journal_index ADD COLUMN ask_id bytea",
         "CREATE INDEX journal_ask_idx ON {schema}.journal_index (actor_id, ask_id, seq) WHERE ask_id IS NOT NULL",
     ),
+    (
+        "CREATE INDEX coordinator_changes_tree_idx ON {schema}.coordinator_changes (root_id, id)"
+        " WHERE kind IN ('header', 'activity', 'ownership', 'deleted')",
+    ),
 )
 
 
@@ -764,6 +768,19 @@ class PostgresStore:
             )
             row = await cursor.fetchone()
         return _hydrate(row) if row is not None else None
+
+    async def _tree_rows(self, root_id: str) -> list[tuple[Any, int, int]]:
+        async with self._connection() as conn:
+            cursor = await conn.execute(
+                self._sql(
+                    "WITH RECURSIVE tree AS (SELECT id, header, last_seq, 0 AS depth FROM {schema}.sessions"
+                    " WHERE id = %s UNION ALL SELECT s.id, s.header, s.last_seq, t.depth + 1"
+                    " FROM {schema}.sessions s JOIN tree t ON s.parent_id = t.id WHERE s.id <> %s)"
+                    " SELECT header, last_seq, depth FROM tree"
+                ),
+                (root_id, root_id),
+            )
+            return await cursor.fetchall()
 
     async def put_header(self, h: SessionHeader) -> None:
         stored = h.model_copy(deep=True)
@@ -1232,15 +1249,21 @@ class PostgresStore:
                 await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                 return await self._read_operational(conn, actor_id)
 
-    async def _read_operational(self, conn: Any, sid: str, *, repaired: bool = False) -> OperationalState:
+    async def _read_operational(
+        self, conn: Any, sid: str, *, repaired: bool = False, root_id: str | None = None
+    ) -> OperationalState:
         cursor = await conn.execute(
-            self._sql("SELECT last_seq, operational_version, operational_seq FROM {schema}.sessions WHERE id = %s"),
+            self._sql(
+                "SELECT last_seq, operational_version, operational_seq, root_key FROM {schema}.sessions WHERE id = %s"
+            ),
             (sid,),
         )
         row = await cursor.fetchone()
         if row is None:
             raise SessionNotFound(sid)
-        last_seq, version, covered = row
+        last_seq, version, covered, root_key = row
+        if root_id is not None and root_key != root_id:
+            raise LeaseLost(root_key)
         if version != 1 or not 0 <= covered <= last_seq:
             await self._repair_operational(conn, sid, last_seq)
         elif covered < last_seq:
@@ -1292,7 +1315,7 @@ class PostgresStore:
             if repaired:
                 raise CorruptLog(f"invalid operational evidence for {sid}")
             await self._repair_operational(conn, sid, last_seq)
-            return await self._read_operational(conn, sid, repaired=True)
+            return await self._read_operational(conn, sid, repaired=True, root_id=root_id)
         cursor = await conn.execute(
             self._sql(
                 "SELECT c.actor_id, c.turn_id FROM {schema}.cancellation_targets c"

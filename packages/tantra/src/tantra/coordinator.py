@@ -43,6 +43,7 @@ DEFAULT_REQUEST_TIMEOUT = 10.0
 DEFAULT_CATCH_UP_INTERVAL = 2.0
 JOURNAL_HINT_DELAY = 0.025
 RETENTION = timedelta(hours=24)
+TREE_KINDS = frozenset({"header", "activity", "ownership", "deleted"})
 
 
 class FrozenModel(BaseModel):
@@ -168,6 +169,7 @@ class RootObservation:
     deleted: bool = False
     terminal_sequences: dict[str, int] | None = None
     actor_coverage: frozenset[str] | None = None
+    tree_change_id: int | None = None
 
 
 @dataclass
@@ -365,13 +367,14 @@ class PostgresCoordinator:
                     )
                     cursor = await conn.execute(
                         self._sql(
-                            "SELECT owner_instance, generation, expires_at"
-                            " FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE"
+                            "WITH locked AS MATERIALIZED (SELECT owner_instance, generation, expires_at"
+                            " FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE)"
+                            " SELECT owner_instance, generation, expires_at,"
+                            " coalesce(expires_at > clock_timestamp(), false) FROM locked"
                         ),
                         (root_id,),
                     )
-                    owner, generation, expires_at = await cursor.fetchone()
-                    valid = expires_at is not None and await self._not_expired(conn, expires_at)
+                    owner, generation, expires_at, valid = await cursor.fetchone()
                     if valid and owner != str(self.instance_id):
                         return None
                     if valid:
@@ -410,17 +413,15 @@ class PostgresCoordinator:
                     await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (ownership.root_id,))
                     cursor = await conn.execute(
                         self._sql(
-                            "SELECT owner_instance, generation, expires_at"
-                            " FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE"
+                            "WITH locked AS MATERIALIZED (SELECT owner_instance, generation, expires_at"
+                            " FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE)"
+                            " SELECT owner_instance, generation, expires_at,"
+                            " coalesce(expires_at > clock_timestamp(), false) FROM locked"
                         ),
                         (ownership.root_id,),
                     )
                     row = await cursor.fetchone()
-                    if (
-                        row is None
-                        or row[:2] != (str(ownership.instance_id), ownership.generation)
-                        or not await self._not_expired(conn, row[2])
-                    ):
+                    if row is None or row[:2] != (str(ownership.instance_id), ownership.generation) or not row[3]:
                         raise LeaseLost(ownership.root_id)
                     cursor = await conn.execute(
                         self._sql(
@@ -453,17 +454,15 @@ class PostgresCoordinator:
                     await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (ownership.root_id,))
                     cursor = await conn.execute(
                         self._sql(
-                            "SELECT owner_instance, generation, expires_at"
-                            " FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE"
+                            "WITH locked AS MATERIALIZED (SELECT owner_instance, generation, expires_at"
+                            " FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE)"
+                            " SELECT owner_instance, generation, expires_at,"
+                            " coalesce(expires_at > clock_timestamp(), false) FROM locked"
                         ),
                         (ownership.root_id,),
                     )
                     row = await cursor.fetchone()
-                    if (
-                        row is None
-                        or row[:2] != (str(ownership.instance_id), ownership.generation)
-                        or not await self._not_expired(conn, row[2])
-                    ):
+                    if row is None or row[:2] != (str(ownership.instance_id), ownership.generation) or not row[3]:
                         return False
                     cursor = await conn.execute(
                         self._sql(
@@ -504,17 +503,15 @@ class PostgresCoordinator:
                     await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (ownership.root_id,))
                     cursor = await conn.execute(
                         self._sql(
-                            "SELECT owner_instance, generation, expires_at"
-                            " FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE"
+                            "WITH locked AS MATERIALIZED (SELECT owner_instance, generation, expires_at"
+                            " FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE)"
+                            " SELECT owner_instance, generation, expires_at,"
+                            " coalesce(expires_at > clock_timestamp(), false) FROM locked"
                         ),
                         (ownership.root_id,),
                     )
                     row = await cursor.fetchone()
-                    if (
-                        row is None
-                        or row[:2] != (str(ownership.instance_id), ownership.generation)
-                        or not await self._not_expired(conn, row[2])
-                    ):
+                    if row is None or row[:2] != (str(ownership.instance_id), ownership.generation) or not row[3]:
                         return False
                     cursor = await conn.execute(
                         self._sql(
@@ -751,6 +748,22 @@ class PostgresCoordinator:
         except psycopg.Error as exc:
             raise CoordinatorUnavailable("cannot read actor activity") from exc
 
+    async def _active_actors(self, root_id: str) -> set[str]:
+        try:
+            async with self._data_connection() as conn:
+                cursor = await conn.execute(
+                    self._sql(
+                        "SELECT a.actor_id FROM {schema}.coordinator_activity a"
+                        " JOIN {schema}.coordinator_roots r ON r.root_id = a.root_id"
+                        " WHERE a.root_id = %s AND a.active AND r.owner_instance IS NOT NULL"
+                        " AND r.expires_at > clock_timestamp()"
+                    ),
+                    (root_id,),
+                )
+                return {row[0] for row in await cursor.fetchall()}
+        except psycopg.Error as exc:
+            raise CoordinatorUnavailable("cannot read actor activity") from exc
+
     async def recovery(self, root_id: str) -> dict[str, Any]:
         try:
             async with self._data_connection() as conn:
@@ -823,17 +836,15 @@ class PostgresCoordinator:
                         raise SessionNotFound(envelope.root_id)
                     root = await conn.execute(
                         self._sql(
-                            "SELECT owner_instance, generation, expires_at"
-                            " FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE"
+                            "WITH locked AS MATERIALIZED (SELECT owner_instance, generation, expires_at"
+                            " FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE)"
+                            " SELECT owner_instance, generation, expires_at,"
+                            " coalesce(expires_at > clock_timestamp(), false) FROM locked"
                         ),
                         (envelope.root_id,),
                     )
                     row = await root.fetchone()
-                    if (
-                        row is None
-                        or row[:2] != (str(ownership.instance_id), ownership.generation)
-                        or not await self._not_expired(conn, row[2])
-                    ):
+                    if row is None or row[:2] != (str(ownership.instance_id), ownership.generation) or not row[3]:
                         raise LeaseLost(envelope.root_id)
                     cursor = await conn.execute(
                         self._sql(
@@ -1005,19 +1016,24 @@ class PostgresCoordinator:
                         ", full_roots AS (SELECT unnest(%s::text[]) AS root_id)"
                         ", actor_interests AS (SELECT * FROM unnest(%s::text[], %s::text[])"
                         " AS interests(root_id, actor_id))"
-                        " SELECT 'root', i.root_id, NULL::text, jsonb_build_object("
-                        " 'change_id', coalesce(c.id, 0), 'writer', r.writer_connection,"
-                        " 'owner', r.owner_instance, 'generation', coalesce(r.generation, 0),"
-                        " 'valid', coalesce(r.owner_instance IS NOT NULL AND r.expires_at > clock_timestamp(), false),"
-                        " 'expires', r.expires_at, 'recovery', coalesce(r.recovery, '{{}}'::jsonb),"
-                        " 'deleted', d.actor_id IS NOT NULL)"
+                        " SELECT 'root', i.root_id, NULL::text,"
+                        " coalesce(c.id, 0), r.writer_connection, r.owner_instance,"
+                        " coalesce(r.generation, 0),"
+                        " coalesce(r.owner_instance IS NOT NULL AND r.expires_at > clock_timestamp(), false),"
+                        " r.expires_at, coalesce(r.recovery, '{{}}'::jsonb), d.actor_id IS NOT NULL,"
+                        " coalesce(tc.id, 0), NULL::bigint, NULL::boolean, NULL::bigint, NULL::jsonb"
                         " FROM interested i LEFT JOIN {schema}.coordinator_roots r ON r.root_id = i.root_id"
                         " LEFT JOIN {schema}.deleted_sessions d ON d.actor_id = i.root_id"
                         " LEFT JOIN LATERAL (SELECT id FROM {schema}.coordinator_changes"
                         " WHERE root_id = i.root_id ORDER BY id DESC LIMIT 1) c ON true"
-                        " UNION ALL SELECT 'actor', s.root_id, s.id, jsonb_build_array(s.last_seq,"
+                        " LEFT JOIN LATERAL (SELECT id FROM {schema}.coordinator_changes"
+                        " WHERE root_id = i.root_id AND kind IN ('header', 'activity', 'ownership', 'deleted')"
+                        " ORDER BY id DESC LIMIT 1) tc ON true"
+                        " UNION ALL SELECT 'actor', s.root_id, s.id,"
+                        " NULL::bigint, NULL::text, NULL::text, NULL::bigint, NULL::boolean,"
+                        " NULL::timestamptz, NULL::jsonb, NULL::boolean, NULL::bigint, s.last_seq,"
                         " coalesce(a.active AND r.owner_instance IS NOT NULL"
-                        " AND r.expires_at > clock_timestamp(), false), coalesce(t.seq, 0))"
+                        " AND r.expires_at > clock_timestamp(), false), coalesce(t.seq, 0), NULL::jsonb"
                         " FROM (SELECT f.root_id, actor.id, actor.last_seq"
                         " FROM full_roots f JOIN {schema}.sessions actor ON actor.root_key = f.root_id"
                         " UNION ALL SELECT i.root_id, actor.id, actor.last_seq"
@@ -1030,7 +1046,10 @@ class PostgresCoordinator:
                         " WHERE actor_id = s.id AND seq <= s.last_seq AND event_type IN"
                         " ('turn_completed', 'turn_failed', 'turn_cancelled', 'turn_interrupted')"
                         " ORDER BY seq DESC LIMIT 1) t ON true"
-                        " UNION ALL SELECT 'reply', request_id::text, NULL::text, reply"
+                        " UNION ALL SELECT 'reply', request_id::text, NULL::text,"
+                        " NULL::bigint, NULL::text, NULL::text, NULL::bigint, NULL::boolean,"
+                        " NULL::timestamptz, NULL::jsonb, NULL::boolean, NULL::bigint,"
+                        " NULL::bigint, NULL::boolean, NULL::bigint, reply"
                         " FROM {schema}.coordinator_requests WHERE request_id = ANY(%s::uuid[])"
                     ),
                     (
@@ -1045,18 +1064,28 @@ class PostgresCoordinator:
             if periodic:
                 self._observation_sample += 1
                 self.observation_ticks += 1
-            headers: dict[str, dict[str, Any]] = {}
+            headers: dict[str, list[Any]] = {}
             actors: dict[str, dict[str, tuple[int, bool]]] = {root: {} for root in roots}
             terminals: dict[str, dict[str, int]] = {root: {} for root in roots}
-            for kind, key, actor, data in rows:
+            for kind, key, actor, *root, last_seq, active, terminal, reply in rows:
                 if kind == "root":
-                    headers[key] = data
+                    headers[key] = root
                 elif kind == "actor":
-                    actors[key][actor] = (int(data[0]), bool(data[1]))
-                    terminals[key][actor] = int(data[2])
+                    actors[key][actor] = (int(last_seq), bool(active))
+                    terminals[key][actor] = int(terminal)
                 elif UUID(key) in self._pending_requests:
-                    self._observed_replies[UUID(key)] = CommandReply.model_validate(data) if data else None
-            for root_id, data in headers.items():
+                    self._observed_replies[UUID(key)] = CommandReply.model_validate(reply) if reply else None
+            for root_id, (
+                change_id,
+                writer,
+                owner,
+                generation,
+                valid,
+                expires,
+                recovery,
+                deleted,
+                tree_change_id,
+            ) in headers.items():
                 state, epoch, coverage = scopes[root_id]
                 if self._observations.get(root_id) is not state or state.interest_epoch != epoch:
                     self._schedule(root_id)
@@ -1064,17 +1093,18 @@ class PostgresCoordinator:
                 snapshot = RootObservation(
                     root_id=root_id,
                     sample=self._observation_sample,
-                    change_id=int(data["change_id"]),
-                    writer_connection=data["writer"],
-                    owner_instance=data["owner"],
-                    owner_generation=int(data["generation"]),
-                    owner_valid=bool(data["valid"]),
-                    recovery=dict(data["recovery"]),
+                    change_id=int(change_id),
+                    writer_connection=writer,
+                    owner_instance=owner,
+                    owner_generation=int(generation),
+                    owner_valid=bool(valid),
+                    recovery=dict(recovery),
                     actors=actors[root_id],
-                    expires_at=datetime.fromisoformat(data["expires"]) if data["expires"] else None,
-                    deleted=bool(data["deleted"]),
+                    expires_at=expires,
+                    deleted=bool(deleted),
                     terminal_sequences=terminals[root_id],
                     actor_coverage=coverage,
+                    tree_change_id=int(tree_change_id),
                 )
                 async with state.condition:
                     state.snapshot = snapshot
@@ -1213,18 +1243,15 @@ class PostgresCoordinator:
     ) -> int:
         cursor = await conn.execute(
             self._sql(
-                "INSERT INTO {schema}.coordinator_changes (root_id, kind, actor_id, seq)"
-                " VALUES (%s, %s, %s, %s) RETURNING id"
+                "WITH inserted AS (INSERT INTO {schema}.coordinator_changes (root_id, kind, actor_id, seq)"
+                " VALUES (%s::text, %s::text, %s::text, %s::bigint) RETURNING id, root_id, kind, actor_id, seq)"
+                " SELECT id, pg_notify(%s::text, json_build_object("
+                "'id', id, 'root_id', root_id, 'kind', kind, 'actor_id', actor_id, 'seq', seq)::text)"
+                " FROM inserted"
             ),
-            (root_id, kind, actor_id, seq),
+            (root_id, kind, actor_id, seq, self._channel),
         )
-        change_id = (await cursor.fetchone())[0]
-        payload = json.dumps(
-            {"id": change_id, "root_id": root_id, "kind": kind, "actor_id": actor_id, "seq": seq},
-            separators=(",", ":"),
-        )
-        await conn.execute("SELECT pg_notify(%s, %s)", (self._channel, payload))
-        return change_id
+        return (await cursor.fetchone())[0]
 
     @asynccontextmanager
     async def _data_connection(self) -> AsyncIterator[Any]:
@@ -1255,10 +1282,6 @@ class PostgresCoordinator:
             (timeout, timeout, timeout),
         )
 
-    async def _not_expired(self, conn: Any, expires_at: datetime) -> bool:
-        cursor = await conn.execute("SELECT %s > clock_timestamp()", (expires_at,))
-        return bool((await cursor.fetchone())[0])
-
     def _sql(self, statement: str) -> Any:
         return sql.SQL(statement).format(schema=self._ident)
 
@@ -1286,18 +1309,31 @@ class _TransactionContext:
                 self.coordinator._sql(
                     "WITH locked AS MATERIALIZED (SELECT owner_instance, generation, expires_at"
                     " FROM {schema}.coordinator_roots WHERE root_id = %s FOR UPDATE)"
-                    " SELECT owner_instance, generation, expires_at > clock_timestamp() FROM locked"
+                    ", checked AS MATERIALIZED (SELECT owner_instance, generation,"
+                    " expires_at > clock_timestamp() AS valid FROM locked)"
+                    " SELECT owner_instance, generation, valid,"
+                    " CASE WHEN owner_instance = %s::text AND generation = %s::bigint AND valid"
+                    " THEN set_config('tantra.root_id', %s::text, true)"
+                    " || set_config('tantra.instance_id', %s::text, true)"
+                    " || set_config('tantra.generation', %s::text, true) END FROM checked"
                 ),
-                (self.ownership.root_id,),
+                (
+                    self.ownership.root_id,
+                    str(self.ownership.instance_id),
+                    self.ownership.generation,
+                    self.ownership.root_id,
+                    str(self.ownership.instance_id),
+                    str(self.ownership.generation),
+                ),
             )
             row = await cursor.fetchone()
-            if row is None or row[:2] != (str(self.ownership.instance_id), self.ownership.generation) or not row[2]:
+            if (
+                row is None
+                or row[:2] != (str(self.ownership.instance_id), self.ownership.generation)
+                or not row[2]
+                or row[3] is None
+            ):
                 raise LeaseLost(self.ownership.root_id)
-            await conn.execute(
-                "SELECT set_config('tantra.root_id', %s, true), set_config('tantra.instance_id', %s, true),"
-                " set_config('tantra.generation', %s, true)",
-                (self.ownership.root_id, str(self.ownership.instance_id), str(self.ownership.generation)),
-            )
             self._store = CoordinatedStore(self.coordinator, self.ownership, conn)
             return self._store
         except BaseException as exc:
@@ -1570,33 +1606,26 @@ class CoordinatedStore:
 
     async def lookup_finished(self, actor_id: str) -> Stamped | None:
         self._ensure_active()
-        if await self.header(actor_id) is None:
-            raise SessionNotFound(actor_id)
+        await self._check_actor(actor_id)
         return await self.coordinator.store._lookup_finished(self.conn, actor_id)
 
     async def read_operational(self, actor_id: str) -> OperationalState:
         self._ensure_active()
-        if await self.header(actor_id) is None:
-            raise SessionNotFound(actor_id)
-        return await self.coordinator.store._read_operational(self.conn, actor_id)
+        return await self.coordinator.store._read_operational(self.conn, actor_id, root_id=self.ownership.root_id)
 
     async def read_turn(self, actor_id: str, turn_id: str) -> list[Stamped] | None:
         self._ensure_active()
-        if await self.header(actor_id) is None:
-            raise SessionNotFound(actor_id)
+        await self._check_actor(actor_id)
         return await self.coordinator.store._read_turn(self.conn, actor_id, turn_id)
 
     async def read_compacted(self, actor_id: str) -> HistorySnapshot:
         self._ensure_active()
-        if await self.header(actor_id) is None:
-            raise SessionNotFound(actor_id)
+        await self._check_actor(actor_id)
         return await self.coordinator.store._read_compacted(self.conn, actor_id)
 
     async def read_page(self, sid: str, *, after: int = 0, limit: int = 1000) -> list[Stamped]:
         self._ensure_active()
-        header = await self.header(sid)
-        if header is None:
-            raise SessionNotFound(sid)
+        await self._check_actor(sid)
         cursor = await self.conn.execute(
             self.coordinator._sql(
                 "SELECT stamped FROM {schema}.events WHERE session_id = %s AND seq > %s ORDER BY seq LIMIT %s"
@@ -1606,7 +1635,7 @@ class CoordinatedStore:
         return [_parse(sid, row[0]) for row in await cursor.fetchall()]
 
     async def claim_writer(self, connection_id: UUID) -> WriterToken:
-        await self._assert_fence()
+        self._ensure_active()
         await self.conn.execute(
             self.coordinator._sql(
                 "UPDATE {schema}.coordinator_roots SET writer_connection = %s, updated_at = clock_timestamp()"
@@ -1646,7 +1675,7 @@ class CoordinatedStore:
             raise WriterReplaced(f"writer for {token.root_id} was replaced")
 
     async def set_active(self, actor_id: str, active: bool) -> None:
-        await self._assert_fence()
+        self._ensure_active()
         await self.conn.execute(
             self.coordinator._sql(
                 "INSERT INTO {schema}.coordinator_activity (root_id, actor_id, active) VALUES (%s, %s, %s)"
@@ -1669,7 +1698,7 @@ class CoordinatedStore:
         return dict(row[0])
 
     async def set_recovery(self, state: dict[str, Any]) -> None:
-        await self._assert_fence()
+        self._ensure_active()
         await self.conn.execute(
             self.coordinator._sql(
                 "UPDATE {schema}.coordinator_roots SET recovery = %s, updated_at = clock_timestamp() WHERE root_id = %s"
@@ -1698,7 +1727,7 @@ class CoordinatedStore:
         return CommandEnvelope.model_validate(row[0]) if row is not None else None
 
     async def reply(self, reply: CommandReply) -> None:
-        await self._assert_fence()
+        self._ensure_active()
         cursor = await self.conn.execute(
             self.coordinator._sql(
                 "UPDATE {schema}.coordinator_requests SET reply = %s, completed_at = clock_timestamp()"
@@ -1723,8 +1752,34 @@ class CoordinatedStore:
         actor_id: str | None = None,
         seq: int | None = None,
     ) -> int:
-        await self._assert_fence()
-        return await self.coordinator._publish(self.conn, self.ownership.root_id, kind, actor_id, seq)
+        self._ensure_active()
+        cursor = await self.conn.execute(
+            self.coordinator._sql(
+                "WITH fence AS (SELECT owner_instance = %s::text AND generation = %s::bigint"
+                " AND expires_at > clock_timestamp() AS valid"
+                " FROM {schema}.coordinator_roots WHERE root_id = %s::text)"
+                ", inserted AS (INSERT INTO {schema}.coordinator_changes (root_id, kind, actor_id, seq)"
+                " SELECT %s::text, %s::text, %s::text, %s::bigint FROM fence WHERE valid"
+                " RETURNING id, root_id, kind, actor_id, seq)"
+                " SELECT id, pg_notify(%s::text, json_build_object("
+                "'id', id, 'root_id', root_id, 'kind', kind, 'actor_id', actor_id, 'seq', seq)::text)"
+                " FROM inserted"
+            ),
+            (
+                str(self.ownership.instance_id),
+                self.ownership.generation,
+                self.ownership.root_id,
+                self.ownership.root_id,
+                kind,
+                actor_id,
+                seq,
+                self.coordinator._channel,
+            ),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise LeaseLost(self.ownership.root_id)
+        return row[0]
 
     async def _has_work(self) -> bool:
         self._ensure_active()
@@ -1747,6 +1802,17 @@ class CoordinatedStore:
         root_id = header.root_id or header.id
         if root_id != self.ownership.root_id:
             raise LeaseLost(root_id)
+
+    async def _check_actor(self, sid: str) -> None:
+        cursor = await self.conn.execute(
+            self.coordinator._sql("SELECT root_key FROM {schema}.sessions WHERE id = %s"),
+            (sid,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise SessionNotFound(sid)
+        if row[0] != self.ownership.root_id:
+            raise LeaseLost(row[0])
 
     def _ensure_active(self) -> None:
         if not self._active:

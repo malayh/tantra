@@ -1,7 +1,7 @@
 [project]
 name = "tantra-harness"
-version = "1.4.0"
-description = "Agent actor runtime — durable turns as a library"
+version = "2.0.0"
+description = "Durable actor runtime for Python agents, served over ACP"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "Apache-2.0"
@@ -10,8 +10,10 @@ authors = [{ name = "Malay Hazarika", email = "malay.hazarika@gmail.com" }]
 dependencies = ["pydantic>=2.9", "httpx>=0.27", "openai>=2.0"]
 
 [project.urls]
-Homepage = "https://github.com/malayh/tantra"
+Homepage = "https://malayh.github.io/tantra/"
 Documentation = "https://malayh.github.io/tantra/docs/"
+Repository = "https://github.com/malayh/tantra"
+Changelog = "https://github.com/malayh/tantra/blob/main/packages/tantra/CHANGELOG.md"
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2", "psycopg-pool>=3.2"]

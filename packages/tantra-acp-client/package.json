@@ -1,7 +1,21 @@
 {
   "name": "tantra-acp-client",
-  "version": "0.1.0",
-  "private": true,
+  "version": "2.0.0",
+  "description": "TypeScript client for tantra's ACP v2-inspired WebSocket endpoint, with the tantra profile",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/malayh/tantra.git",
+    "directory": "packages/tantra-acp-client"
+  },
+  "homepage": "https://malayh.github.io/tantra/",
+  "keywords": [
+    "tantra",
+    "acp",
+    "agent-client-protocol",
+    "websocket",
+    "agents"
+  ],
   "type": "module",
   "sideEffects": false,
   "files": [
@@ -19,7 +33,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint . && prettier --check .",
     "test": "npm run build && node --test test/*.test.mjs",
-    "test:consumer": "npm run build && tsc -p test/tsconfig.json && node --input-type=module --eval \"import('tantra-acp-client')\""
+    "test:consumer": "npm run build && tsc -p test/tsconfig.json && node --input-type=module --eval \"import('tantra-acp-client')\"",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",

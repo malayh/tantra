@@ -1,6 +1,6 @@
 # 019 — tantra 2.0 site: landing page + docs
 
-**Status:** P1 ✅ DONE · P2 — · P3 — · P4 — · P5 —
+**Status:** P1 ✅ DONE · P2 — · P3 — · P4 — · P5 ✅ DONE (ran before P2–P4)
 
 ## Goal
 - One site, one look:
@@ -69,8 +69,9 @@
 - **Headline:**
   - **H1:** "Agents that survive **the crash**." The last phrase cycles through *the crash · the redeploy · the dropped socket · the closed tab*.
   - **Eyebrow:** "tantra 2.0 — now speaking ACP".
-  - **Sub:** "A durable actor runtime for Python agents. Every agent gets an inbox, a journal and one turn at a time. Kill a worker mid-turn and another takes over; reopen a tab and it replays from its cursor. Stream it to any client over ACP."
-  - **`<title>`:** "tantra — durable agents, any client".
+  - **Sub:** "A durable actor runtime for Python agents. Every agent gets an inbox, a journal and one turn at a time. If a worker dies mid-turn, the journal survives and nothing runs twice; with PostgreSQL, another worker can take over its queue. Drop the connection and the client resumes from its cursor. Serve it to any ACP client."
+    - Revised in P5 after review. The earlier "Kill a worker mid-turn and another takes over; reopen a tab and it replays from its cursor" overclaimed: takeover needs `PostgresCoordinator` and the next writable action after lease expiry, and a fresh tab replays from the start (only a reconnecting client resumes from its cursor).
+  - **`<title>`:** "tantra — durable agents, any ACP client".
 - **Versions:** `tantra-harness` 2.0.0 and `tantra-acp-client` 2.0.0.
 
 ## Considered & rejected
@@ -180,7 +181,7 @@ website/
   - [x] Landing placeholder
   - [x] Link validator + old-URL check in `npm run build`
   - [x] CI switched; MkDocs, `docs/`, `landing/` removed
-  - [ ] `uv lock` (user, before commit)
+  - [x] ~~`uv lock` (user, before commit)~~ missed; done in P5
   - [x] Verify run
 
 - **As built (surprises only):**
@@ -358,10 +359,11 @@ website/
   - [ ] Coverage test
   - [ ] Verify run
 
-### Phase 5 — 2.0 release prep · deps: P2, P3, P4 · —
+### Phase 5 — 2.0 release prep · deps: ~~P2, P3, P4~~ P1 · ✅ DONE
+- **Deviation:** run ahead of P2–P4 at the user's request so 2.0 ships now. P2–P4 deploy to Pages on later merges, independently of PyPI. README and docs links point at existing pages.
 - **Deliverables:**
   - `packages/tantra/pyproject.toml` → `2.0.0`.
-  - **CHANGELOG:** `## Unreleased` becomes `## 2.0.0 — <date>`.
+  - **CHANGELOG:** `## Unreleased` becomes `## 2.0.0` (~~`— <date>`~~ undated, matching the 1.x headings), and the upgrade notes link the 2.0 guide.
   - **`packages/tantra-acp-client/package.json`:**
     - `2.0.0`, with `private` removed;
     - adds `description`, `license: Apache-2.0`, `repository`, `homepage` and `keywords`;
@@ -372,20 +374,39 @@ website/
     - `InputQueued` sender/origin;
     - `watch_tree`/`patch_header`;
     - ACP replacing app-owned sockets.
-  - `acp/tantra-profile.md:165`: the example version becomes `2.0.0`.
+  - `acp/tantra-profile.md:134,167`: the example versions become `2.0.0`.
+  - **Added during P5:**
+    - **Exceptions to the Conventions boundary,** release metadata only:
+      - `client.ts` `VERSION` → `2.0.0`, the client's `info.version`, pinned by `fixtures/acp_profile/initialize_{request,response}.json`;
+      - `apps/sarathi/backend/pyproject.toml` → `tantra-harness>=2.0`, since it imports `tantra.acp`;
+      - `apps/sarathi/ui/yarn.lock`: the file-dependency entry → `2.0.0`, because the Dockerfile uses `--frozen-lockfile`.
+    - **`pyproject.toml`:** the description, plus `[project.urls]` Homepage = the landing page, Repository and Changelog.
+    - **`uv.lock`** regenerated: mkdocs removed (missed in P1), 2.0.0 recorded.
+    - **Landing copy** on the P1 layout: eyebrow, static H1, sub, title, meta, and an "Any client, over ACP" card. No animation; that's P2.
+    - **Docs home** gets a 2.0 paragraph. `tantra-acp-client/README.md` gets a dead-path fix.
+    - **P1 regression fixed:** `test_acp_profile.py:43` read the moved `docs/acp/tantra-profile.md`.
 - **Verify:**
-  - Lint plus the full `pytest` and `pytest stress` on owned PostgreSQL, zero skips.
+  - ~~Full `pytest` and `pytest stress`~~ Targeted checks instead: runtime code is unchanged since the last fully verified commit (`084db9d`). A grep found `test_acp_profile.py` to be the only code reading moved files.
+  - Lint; `test_acp_profile.py` + `test_acp_client_integration.py` on owned PostgreSQL, zero skips.
+  - The README ACP server + client snippets run end to end in scratch, with `FakeProvider`.
+  - The wheel installs in a clean venv and smoke-runs on `MemoryStore` and `SQLiteStore`. `uv lock --check` passes; Sarathi UI `yarn install --frozen-lockfile` passes.
   - TS client `npm test`, lint and typecheck.
   - `npm pack --dry-run` lists only `dist`, the README and the LICENSE.
   - `npm run build` passes.
   - `uv build --package tantra-harness` produces a 2.0.0 wheel.
 - **Checklist:**
-  - [ ] Versions
-  - [ ] CHANGELOG
-  - [ ] npm metadata
-  - [ ] README
-  - [ ] 2.0 upgrade guide
-  - [ ] Verify run
+  - [x] Versions
+  - [x] CHANGELOG
+  - [x] npm metadata
+  - [x] README
+  - [x] 2.0 upgrade guide
+  - [x] Verify run
+- **Follow-up:**
+  - **P4:**
+    - `reference/runtime.md:76` says `ModelChangeBusy` covers any patch. It is raised only for model changes.
+    - Consider `engines: {node: ">=22"}` for the client, which needs native `WebSocket`.
+  - **Release order (user):** run `npm publish` before or with the `tantra-v2.0.0` tag, since the README's `npm install` line goes live on PyPI.
+  - **P2 starts from** the P5 landing copy; the headline is already static on the page.
 
 ### Conventions (all phases)
 - **Workflow:**

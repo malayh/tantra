@@ -40,7 +40,7 @@ from tantra.stores.base import reduce_journal
 from tantra.stores.memory import MemoryStore
 
 FIXTURES = Path(__file__).parent / "fixtures" / "acp_profile"
-PROPOSAL = Path(__file__).parents[3] / "docs" / "acp" / "tantra-profile.md"
+PROPOSAL = Path(__file__).parents[3] / "website" / "src" / "content" / "docs" / "docs" / "acp" / "tantra-profile.md"
 LITERAL = {
     "jsonrpc",
     "method",

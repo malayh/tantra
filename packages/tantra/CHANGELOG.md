@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.0.0
 
 Added:
 
@@ -29,6 +29,7 @@ Performance:
 
 Compatibility and upgrade:
 
+- See the [2.0 migration guide](https://malayh.github.io/tantra/docs/guides/migration-2.0/) for the upgrade steps.
 - A retry compared with an event written before `origin` existed ignores `sender_id` and `origin`, so recovery and command retries over older journals stay duplicates. Drain older coordinated workers before rolling out: an older owner rejects retries of inputs that carry the new fields.
 - `tantra.testing.store_conformance` now requires a store to detect duplicate inputs by comparing events with `==`, so that a legacy `InputQueued` equals its structured retry. Custom stores that compare serialized events fail it.
 - Every worker must run this release before migration 12 is applied: an older worker on the migrated schema writes no `journal_index` row for `AskRaised`, and `PostgresStore.lookup_ask` has no fallback, so `tantra.acp` never issues those asks. Stop all PostgreSQL writers, run `PostgresStore.setup()`, and restart only upgraded workers. Migration 12 adds `journal_index.ask_id` and the partial index `journal_ask_idx`, then backfills ask entries by decoding every stored event in pages of 1,000. It runs in the setup transaction and holds an exclusive lock on `journal_index` until it commits, so its time grows with total journal size and every append and indexed read waits for it. Allow a maintenance window. Journal bodies and sequences are unchanged.

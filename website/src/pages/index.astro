@@ -37,19 +37,18 @@ asyncio.run(main())`;
 ---
 
 <Marketing
-  title="tantra — the agent turn loop as a library"
-  description="tantra is a Python agent actor runtime with durable journals, FIFO inboxes, parallel tools, typed asks, and independent subagents."
+  title="tantra — durable agents, any ACP client"
+  description="tantra is a durable actor runtime for Python agents, with an inbox, a journal and one turn at a time per agent, served to any ACP client over an ACP v2–inspired protocol."
 >
   <div class="site-wrap hero">
-    <p class="eyebrow">Python agent runtime</p>
+    <p class="eyebrow">tantra 2.0 — now speaking ACP</p>
     <h1>
-      The agent turn loop,
-      <br />
-      as a <em>library</em>.
+      Agents that survive <em>the crash</em>.
     </h1>
     <p class="lede">
-      tantra owns the actor loop — durable input, sampling, parallel tools, live approvals, subagents, compaction and
-      journals — so your agent stays a declaration instead of a framework.
+      A durable actor runtime for Python agents. Every agent gets an inbox, a journal and one turn at a time. If a
+      worker dies mid-turn, the journal survives and nothing runs twice; with PostgreSQL, another worker can take over
+      its queue. Drop the connection and the client resumes from its cursor. Serve it to any ACP client.
     </p>
 
     <div class="cta">
@@ -80,6 +79,14 @@ asyncio.run(main())`;
   <section class="pitch site-wrap">
     <h2 class="sect">Why</h2>
     <div class="grid">
+      <div class="card wide">
+        <h3>Any client, over ACP</h3>
+        <p>
+          <code>tantra.acp</code> serves a Runtime over stdio or WebSocket with an ACP v2–inspired protocol and the{" "}
+          <code>tantra</code> profile. Each root has one fenced writer and many readers, and a reconnecting client
+          replays each session from its cursor. <code>tantra-acp-client</code> is the TypeScript client.
+        </p>
+      </div>
       <div class="card">
         <h3>The loop is the library</h3>
         <p>

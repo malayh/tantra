@@ -131,7 +131,7 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. "Agent" is
     "protocolVersion": 2,
     "info": {
       "name": "tantra-acp-client",
-      "version": "0.1.0"
+      "version": "2.0.0"
     },
     "capabilities": {
       "_meta": {
@@ -164,7 +164,7 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. "Agent" is
     },
     "info": {
       "name": "assistant",
-      "version": "1.5.0"
+      "version": "2.0.0"
     },
     "authMethods": []
   }

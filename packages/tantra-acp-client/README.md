@@ -24,7 +24,7 @@ const { messageId } = await prompt;
 - `onRequest` is called in order but not awaited; answer with `respond()` whenever the user decides.
 - After a dropped connection, every open session resumes read-only from its cursor. A session that was writer is paused (`paused: true` in `onState`): its unanswered prompt and any prompt made while paused are held until `claimWriter`, `resume(id, { mode: "write" })` or a `claimed` update, then sent with their original `commandId`.
 
-See `docs/reference/acp.md` ("TypeScript client") for the full contract.
+See the [ACP server reference](https://malayh.github.io/tantra/docs/reference/acp/) ("TypeScript client") for the full contract.
 
 ## Transcript
 

@@ -6701,7 +6701,7 @@ tailwindcss@4.3.3, tailwindcss@^4:
   integrity sha512-gOhV3P7ufE62QDGg1zVaTgCR+EtPv92k2nIhVcVKcLmxT1sUBsQGhnZj175j+MqRt4zLF7ic+sCYjfhxMxj7YQ==
 
 "tantra-acp-client@file:../../../packages/tantra-acp-client":
-  version "0.1.0"
+  version "2.0.0"
 
 tapable@^2.3.3:
   version "2.3.3"

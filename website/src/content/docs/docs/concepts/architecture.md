@@ -1,4 +1,6 @@
-# Runtime, Connection, and Agent
+---
+title: Runtime, Connection, and Agent
+---
 
 | Component | Lifetime | Responsibility |
 |---|---|---|

@@ -1,0 +1,110 @@
+---
+import "@fontsource-variable/geist";
+import "@fontsource-variable/geist-mono";
+import "../styles/tokens.css";
+import SiteFooter from "../components/site/SiteFooter.astro";
+import SiteHeader from "../components/site/SiteHeader.astro";
+import ThemeInit from "../components/site/ThemeInit.astro";
+import { withBase } from "../lib/url";
+
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" href={withBase("favicon.svg")} type="image/svg+xml" />
+    <ThemeInit />
+  </head>
+  <body>
+    <header class="site-bar">
+      <div class="site-wrap">
+        <SiteHeader />
+      </div>
+    </header>
+    <main>
+      <slot />
+    </main>
+    <footer class="site-foot">
+      <div class="site-wrap">
+        <SiteFooter />
+      </div>
+    </footer>
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    color-scheme: dark;
+  }
+
+  :root[data-theme="light"] {
+    color-scheme: light;
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--tt-bg);
+    color: var(--tt-text);
+    font-family: var(--tt-font-sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .site-wrap {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+
+  .site-bar {
+    position: relative;
+    z-index: 1;
+    border-bottom: 1px solid var(--tt-border);
+  }
+
+  .site-bar .site-wrap {
+    height: 64px;
+  }
+
+  .site-foot {
+    position: relative;
+    z-index: 1;
+    margin-top: 104px;
+    border-top: 1px solid var(--tt-border);
+  }
+
+  .site-foot .site-wrap {
+    padding-top: 28px;
+    padding-bottom: 44px;
+  }
+
+  @media (max-width: 760px) {
+    .site-wrap {
+      padding: 0 18px;
+    }
+  }
+</style>

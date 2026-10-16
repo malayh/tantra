@@ -1,4 +1,6 @@
-# Permissions and hooks
+---
+title: Permissions and hooks
+---
 
 Each tool call resolves to `allow`, `ask`, or `deny`. The longest matching rule on the current actor's `Agent` wins; equal-length matches use the stricter verdict. A matching agent rule may widen or narrow the tool declaration. With no match, the tool's declared permission applies, then `Runtime(default_permission=...)`.
 

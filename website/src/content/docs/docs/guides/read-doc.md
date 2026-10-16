@@ -1,4 +1,6 @@
-# Reading documents
+---
+title: Reading documents
+---
 
 ```python
 from tantra.extratools.doc import extract_docx, extract_pdf, read_doc
@@ -16,7 +18,7 @@ class Researcher(Agent):
     permissions = {"read_doc": "allow"}
 ```
 
-- **Local files only.** No downloads, no URLs — that is [`web_fetch`](web-fetch.md)'s job.
+- **Local files only.** No downloads, no URLs — that is [`web_fetch`](/tantra/docs/guides/web-fetch/)'s job.
 - **Dispatch is by extension**: `.pdf` → pypdf, `.docx` → python-docx. Anything else is an error naming the supported types.
 - **Text only.** Tables lose their layout; images, charts, headers and footers are dropped. A scan or photographed page has no text layer and raises a message that says exactly that, so the model reports it instead of guessing.
 - Output is capped at 64 000 characters with a `[truncated at N chars]` marker. Re-reading the same path returns the same truncated text.
@@ -31,9 +33,9 @@ text = extract_pdf(pdf_bytes)
 text = extract_docx(docx_bytes)
 ```
 
-Both take bytes and return text, raising `RuntimeError` with a self-describing message on corrupt input or an empty extraction. They are public because [`web_fetch`](web-fetch.md) calls them on fetched bytes, and they are useful directly when the document arrives from somewhere other than the filesystem — an upload, an object store, an email attachment.
+Both take bytes and return text, raising `RuntimeError` with a self-describing message on corrupt input or an empty extraction. They are public because [`web_fetch`](/tantra/docs/guides/web-fetch/) calls them on fetched bytes, and they are useful directly when the document arrives from somewhere other than the filesystem — an upload, an object store, an email attachment.
 
 ## Next
 
-- [Web fetch](web-fetch.md) — documents that live on the web.
-- [Extra tools reference](../reference/extratools.md).
+- [Web fetch](/tantra/docs/guides/web-fetch/) — documents that live on the web.
+- [Extra tools reference](/tantra/docs/reference/extratools/).

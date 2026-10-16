@@ -1,4 +1,6 @@
-# Context and TurnContext
+---
+title: Context and TurnContext
+---
 
 `Context` is injected into tool functions annotated with the bare `Context` class. It exposes the actor ID, turn ID, call ID, depth, per-turn dependencies, store, memory, and durable `emit` and live root-only `ask` operations.
 

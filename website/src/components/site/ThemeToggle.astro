@@ -1,0 +1,90 @@
+<theme-toggle>
+  <button type="button" class="theme-toggle" aria-label="Toggle theme">
+    <svg class="moon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+      <path d="M20.5 14.6A8.5 8.5 0 0 1 9.4 3.5a8.5 8.5 0 1 0 11.1 11.1Z"></path>
+    </svg>
+    <svg class="sun" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+      <circle cx="12" cy="12" r="4"></circle>
+      <path d="M12 2.5v2M12 19.5v2M4.5 12h-2M21.5 12h-2M5.6 5.6 4.2 4.2M19.8 19.8l-1.4-1.4M5.6 18.4l-1.4 1.4M19.8 4.2l-1.4 1.4"></path>
+    </svg>
+  </button>
+</theme-toggle>
+
+<script>
+  const key = "starlight-theme";
+  const root = document.documentElement;
+  const query = matchMedia("(prefers-color-scheme: light)");
+
+  function sync() {
+    const label = root.dataset.theme === "light" ? "Switch to dark theme" : "Switch to light theme";
+    document.querySelectorAll("theme-toggle button").forEach((button) => button.setAttribute("aria-label", label));
+  }
+
+  class ThemeToggle extends HTMLElement {
+    connectedCallback() {
+      this.querySelector("button")?.addEventListener("click", () => {
+        const theme = root.dataset.theme === "light" ? "dark" : "light";
+        root.dataset.theme = theme;
+        localStorage.setItem(key, theme);
+        sync();
+      });
+      sync();
+    }
+  }
+
+  customElements.define("theme-toggle", ThemeToggle);
+
+  query.addEventListener("change", () => {
+    if (localStorage.getItem(key)) return;
+    root.dataset.theme = query.matches ? "light" : "dark";
+    sync();
+  });
+</script>
+
+<style>
+  theme-toggle {
+    display: inline-flex;
+  }
+
+  .theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    padding: 0;
+    border: 1px solid var(--tt-border);
+    border-radius: 0.5rem;
+    background: transparent;
+    color: var(--tt-text-muted);
+    cursor: pointer;
+    transition:
+      color 0.15s ease,
+      border-color 0.15s ease;
+  }
+
+  .theme-toggle:hover {
+    color: var(--tt-text-strong);
+    border-color: var(--tt-border-strong);
+  }
+
+  svg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.75;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .sun {
+    display: none;
+  }
+
+  :global(:root[data-theme="light"]) .sun {
+    display: block;
+  }
+
+  :global(:root[data-theme="light"]) .moon {
+    display: none;
+  }
+</style>

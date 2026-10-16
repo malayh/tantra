@@ -1,8 +1,10 @@
-# A durable, multi-client profile for ACP v2
+---
+title: A durable, multi-client profile for ACP v2
+---
 
 - **Author(s):** the tantra project
 - **Status:** Draft. Base: ACP v2, `schema-v2.0.0-alpha.8` (latest as of 2026-10-15).
-- **Reference implementation:** [`tantra.acp`](https://github.com/malayh/tantra/tree/main/packages/tantra/src/tantra/acp) (Python agent), [`tantra-acp-client`](https://github.com/malayh/tantra/tree/main/packages/tantra-acp-client) (TypeScript client), and the Sarathi app. API reference: [ACP server](../reference/acp.md).
+- **Reference implementation:** [`tantra.acp`](https://github.com/malayh/tantra/tree/main/packages/tantra/src/tantra/acp) (Python agent), [`tantra-acp-client`](https://github.com/malayh/tantra/tree/main/packages/tantra-acp-client) (TypeScript client), and the Sarathi app. API reference: [ACP server](/tantra/docs/reference/acp/).
 
 ## Elevator pitch
 

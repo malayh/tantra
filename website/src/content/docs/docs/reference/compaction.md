@@ -1,4 +1,6 @@
-# Compaction
+---
+title: Compaction
+---
 
 `Compactor` defines the async compaction seam. `PruneThenSummarize` is the built-in implementation; configure it with `CompactionConfig` and pass it as `Runtime(compactor=...)`.
 

@@ -1,4 +1,6 @@
-# Events
+---
+title: Events
+---
 
 Every durable event belongs to one actor journal. `LoggedEvent(agent_id, seq, event)` is yielded only after storage assigns its integer sequence.
 

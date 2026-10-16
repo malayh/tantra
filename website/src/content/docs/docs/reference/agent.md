@@ -1,4 +1,6 @@
-# Agent
+---
+title: Agent
+---
 
 `Agent` is a declarative class used by Runtime, never an instance holding live I/O.
 

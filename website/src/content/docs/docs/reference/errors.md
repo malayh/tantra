@@ -1,4 +1,6 @@
-# Errors
+---
+title: Errors
+---
 
 | Error | Meaning |
 |---|---|

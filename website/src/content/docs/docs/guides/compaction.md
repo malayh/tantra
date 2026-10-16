@@ -1,4 +1,6 @@
-# Compaction
+---
+title: Compaction
+---
 
 Compaction keeps provider requests within the model context window. It is opt-in: a Runtime without a compactor never prunes or summarizes history. Each actor is budgeted and compacted independently.
 

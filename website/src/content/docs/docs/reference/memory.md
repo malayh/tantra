@@ -1,4 +1,6 @@
-# Memory
+---
+title: Memory
+---
 
 `Memory` is the protocol used by `memory_write` and `memory_recall`. Pass an implementation through `Runtime(memory=...)`.
 

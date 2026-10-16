@@ -21,4 +21,4 @@ fmt:
     uv run ruff format .
 
 docs:
-    uv run mkdocs serve
+    npm --prefix website run dev

@@ -1,4 +1,7 @@
-# Migrate to 1.3
+---
+title: Migrate to 1.3
+slug: docs/guides/migration-1.3
+---
 
 Tantra 1.3 preserves retained journal bodies, event sequences, replay cursors, and the required Store/Coordinator interfaces. PostgreSQL gains indexed commands, operational checkpoints, pooled access, shared observer catch-up, and session cleanup. SQLite setup adds permanent ID-only deletion markers; the filesystem format stays unchanged.
 
@@ -22,7 +25,7 @@ Tantra 1.3 preserves retained journal bodies, event sequences, replay cursors, a
 
 Setup applies pending migrations through version 9. Migration 8 adds permanent deletion markers and write guards; migration 9 backfills native actor update timestamps from existing headers and keeps them synchronized with header writes. The command-index and operational-checkpoint backfills decode historical events in batches of at most 1,000; allow a maintenance window for large journals. Migration publication is transactional: failure rolls back without rewriting journal bodies or sequences, and setup can be retried while writers remain stopped.
 
-Each store uses one to four pooled data connections. A coordinated worker also keeps a dedicated lease/control connection and a LISTEN connection, for at most six Runtime database connections per worker, excluding application tools and other application-owned connections. Preserve the [coordinator setup and shutdown order](migration-1.2.md).
+Each store uses one to four pooled data connections. A coordinated worker also keeps a dedicated lease/control connection and a LISTEN connection, for at most six Runtime database connections per worker, excluding application tools and other application-owned connections. Preserve the [coordinator setup and shutdown order](/tantra/docs/guides/migration-1.2/).
 
 ## Optional compacted history
 
@@ -38,7 +41,7 @@ Public event replay and `connect(after=...)` still return the complete journal. 
 
 ## Session cleanup
 
-`Runtime.delete(root_id)` deletes a complete root tree. `Runtime.cleanup(CleanupSelector(...))` selects one bounded page by root IDs, scalar root metadata, and/or a timezone-aware inactivity cutoff; supplied filters combine with AND. Cleanup defaults to a read-only dry run, and both APIs protect active trees unless `allow_active=True`. Applications authorize these operations independently of writer tokens; they are never agent tools. See the [Runtime reference](../reference/runtime.md#selector-cleanup) for reports, pagination, revision checks, and retry behavior.
+`Runtime.delete(root_id)` deletes a complete root tree. `Runtime.cleanup(CleanupSelector(...))` selects one bounded page by root IDs, scalar root metadata, and/or a timezone-aware inactivity cutoff; supplied filters combine with AND. Cleanup defaults to a read-only dry run, and both APIs protect active trees unless `allow_active=True`. Applications authorize these operations independently of writer tokens; they are never agent tools. See the [Runtime reference](/tantra/docs/reference/runtime/#selector-cleanup) for reports, pagination, revision checks, and retry behavior.
 
 PostgreSQL, SQLite, and memory stores support deletion and cleanup. Await SQLite setup after upgrading to install its marker table. Unsupported stores and coordinators fail before mutation. Deleted root and child UUIDs cannot be reused; retained sessions keep their journals and cursors. Session cleanup leaves shared memories, provider logs, telemetry, recordings, and backups intact.
 

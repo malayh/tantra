@@ -1,4 +1,6 @@
-# Hooks
+---
+title: Hooks
+---
 
 Subclass `Hook`, override the needed async callbacks, and pass instances to `Runtime(hooks=[...])`.
 

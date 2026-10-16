@@ -1,0 +1,38 @@
+---
+import { withBase } from "../../lib/url";
+---
+
+<div class="site-footer">
+  <span>Apache-2.0</span>
+  <nav aria-label="Footer">
+    <a href={withBase("docs/")}>Docs</a>
+    <a href="https://github.com/malayh/tantra">GitHub</a>
+  </nav>
+</div>
+
+<style>
+  .site-footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    font-family: var(--tt-font-mono);
+    font-size: 0.78rem;
+    color: var(--tt-text-faint);
+  }
+
+  nav {
+    display: flex;
+    gap: 1.25rem;
+  }
+
+  a {
+    color: var(--tt-text-faint);
+    text-decoration: none;
+  }
+
+  a:hover {
+    color: var(--tt-text-muted);
+  }
+</style>

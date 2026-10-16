@@ -1,0 +1,28 @@
+---
+import logo from "../../assets/logo.svg";
+import { withBase } from "../../lib/url";
+---
+
+<a class="brand" href={withBase("")}>
+  <img src={logo.src} width="26" height="26" alt="" />
+  <span>tantra</span>
+</a>
+
+<style>
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    color: var(--tt-text-strong);
+    font-family: var(--tt-font-mono);
+    font-size: 1rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .brand img {
+    display: block;
+  }
+</style>

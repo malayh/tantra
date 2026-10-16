@@ -4,9 +4,10 @@ __pycache__/
 venv/
 *.egg-info/
 build/
+!website/src/content/docs/docs/build/
 dist/
 .pytest_cache/
-site/
+/site/
 .ruff_cache/
 .mypy_cache/
 .coverage
@@ -14,3 +15,6 @@ htmlcov/
 .env
 stress/bench/artifacts/
 .DS_Store
+website/dist/
+website/.astro/
+website/node_modules/

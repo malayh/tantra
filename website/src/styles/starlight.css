@@ -1,0 +1,33 @@
+::selection {
+  background-color: color-mix(in srgb, var(--tt-orange) 32%, transparent);
+}
+
+.sl-markdown-content a:not(:where(.not-content *)) {
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+}
+
+.sl-markdown-content a:not(:where(.not-content *)):hover {
+  color: var(--tt-accent-strong);
+}
+
+.sl-markdown-content :is(h1, h2, h3, h4) {
+  letter-spacing: -0.015em;
+}
+
+h1#_top {
+  letter-spacing: -0.025em;
+}
+
+.sidebar-content a[aria-current="page"] {
+  font-weight: 600;
+}
+
+.sidebar-content .group-label .large {
+  font-family: var(--tt-font-mono);
+  font-size: var(--sl-text-xs);
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--tt-text-faint);
+}

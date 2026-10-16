@@ -1,4 +1,7 @@
-# Migrate to 1.2
+---
+title: Migrate to 1.2
+slug: docs/guides/migration-1.2
+---
 
 Tantra 1.2 keeps the 1.1 journals and non-PostgreSQL store formats. `PostgresStore.setup()` applies the coordinator schema additively; run it during normal application startup before starting Runtime.
 

@@ -1,4 +1,6 @@
-# Memory
+---
+title: Memory
+---
 
 Memory is exposed through tools and is never injected automatically. Add `memory_write` and `memory_recall` to an agent, and supply the implementation to the Runtime.
 

@@ -1,4 +1,6 @@
-# The actor turn loop
+---
+title: The actor turn loop
+---
 
 One queued input produces one complete turn:
 

@@ -1,4 +1,6 @@
-# Telemetry
+---
+title: Telemetry
+---
 
 `Tracer` is the dependency-free protocol. `NullTracer` is the default. `tantra.telemetry.Telemetry` is the OpenTelemetry implementation installed by `tantra-harness[telemetry]`.
 

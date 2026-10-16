@@ -1,0 +1,405 @@
+---
+import { Code } from "astro-expressive-code/components";
+import Marketing from "../layouts/Marketing.astro";
+import { withBase } from "../lib/url";
+
+const sample = `import asyncio
+from uuid import uuid4
+
+from tantra import Agent, OpenAICompatible, Runtime, SQLiteStore
+from tantra.extratools.web import web_search
+
+
+class Researcher(Agent):
+    model = "gpt-5"
+    prompt = "Answer with current, sourced information."
+    tools = [web_search(api_key=BRAVE_API_KEY)]
+
+
+async def main() -> None:
+    store = SQLiteStore("sessions.db")
+    await store.setup()
+    runtime = Runtime(
+        OpenAICompatible("https://api.openai.com/v1", OPENAI_API_KEY),
+        store,
+        [Researcher],
+    )
+    root_id = await runtime.create(Researcher)
+    async with runtime.connect(root_id, writable=True) as connection:
+        result = await connection.prompt(
+            "What changed in Python 3.13?", command_id=uuid4()
+        )
+    print(result.text)
+    await runtime.aclose()
+
+
+asyncio.run(main())`;
+---
+
+<Marketing
+  title="tantra — the agent turn loop as a library"
+  description="tantra is a Python agent actor runtime with durable journals, FIFO inboxes, parallel tools, typed asks, and independent subagents."
+>
+  <div class="site-wrap hero">
+    <p class="eyebrow">Python agent runtime</p>
+    <h1>
+      The agent turn loop,
+      <br />
+      as a <em>library</em>.
+    </h1>
+    <p class="lede">
+      tantra owns the actor loop — durable input, sampling, parallel tools, live approvals, subagents, compaction and
+      journals — so your agent stays a declaration instead of a framework.
+    </p>
+
+    <div class="cta">
+      <div class="install">
+        <span class="sigil">$</span>
+        <code id="install-cmd">pip install tantra-harness</code>
+        <button class="copy" type="button" data-copy="install-cmd">
+          Copy
+        </button>
+      </div>
+      <a class="btn primary" href={withBase("docs/")}>
+        Read the docs
+      </a>
+      <a class="btn ghost" href="https://github.com/malayh/tantra">
+        GitHub
+      </a>
+    </div>
+
+    <div class="code">
+      <Code code={sample} lang="py" title="researcher.py" />
+    </div>
+    <p class="note">
+      <code>Connection.prompt(...)</code> accepts one durable UUID command and returns its terminal result. Use{" "}
+      <code>send(...)</code> plus event iteration when you need streaming.
+    </p>
+  </div>
+
+  <section class="pitch site-wrap">
+    <h2 class="sect">Why</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>The loop is the library</h3>
+        <p>
+          The Runtime activates actors. Tools, hooks, skills and memory plug into it. You write an <code>Agent</code> —
+          values and function references — not an orchestration layer.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Durable actor journals</h3>
+        <p>
+          Every agent has a FIFO inbox and independent scalar cursor. Live asks suspend one actor; crashes interrupt
+          in-flight work without repeating model calls or tools.
+        </p>
+      </div>
+      <div class="card">
+        <h3>One engine, many drivers</h3>
+        <p>
+          A CLI, an HTTP server and a background worker share one <code>Runtime</code>. Readers never own execution, and
+          a newer writable connection replaces the previous writer.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Declarative, FastAPI-style</h3>
+        <p>
+          Tools are built by factories — <code>web_search(api_key=...)</code> — in your own module. Keys are per-agent
+          and a misconfiguration fails at construction, not mid-turn. The library never reads the environment.
+        </p>
+      </div>
+      <div class="card wide">
+        <h3>Tools ship as extras</h3>
+        <p>
+          The base install is <code>pydantic</code>, <code>httpx</code>, <code>openai</code> — plus stdlib{" "}
+          <code>bash</code> and <code>ShellGuard</code>. <code>[web]</code> adds <code>web_search</code> and{" "}
+          <code>web_fetch</code>; <code>[doc]</code> adds <code>read_doc</code>; <code>[postgres]</code> adds the driver{" "}
+          <code>PostgresStore</code> needs. Nothing you did not ask for is imported.
+        </p>
+      </div>
+    </div>
+  </section>
+</Marketing>
+
+<script>
+  document.querySelectorAll<HTMLButtonElement>("button.copy").forEach((button) => {
+    button.addEventListener("click", () => {
+      const source = document.getElementById(button.dataset.copy ?? "");
+      navigator.clipboard.writeText(source?.textContent ?? "").then(
+        () => {
+          button.textContent = "Copied";
+          button.dataset.done = "1";
+          setTimeout(() => {
+            button.textContent = "Copy";
+            delete button.dataset.done;
+          }, 1600);
+        },
+        () => {
+          button.textContent = "Copy failed";
+          setTimeout(() => {
+            button.textContent = "Copy";
+          }, 1600);
+        },
+      );
+    });
+  });
+</script>
+
+<style>
+  :global(body)::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(
+      900px 420px at 15% -10%,
+      color-mix(in srgb, var(--tt-orange) 12%, transparent),
+      transparent 70%
+    );
+    z-index: 0;
+  }
+
+  .hero {
+    padding-top: 88px;
+    padding-bottom: 24px;
+  }
+
+  .eyebrow {
+    font-family: var(--tt-font-mono);
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--tt-accent);
+    margin: 0 0 22px;
+  }
+
+  h1 {
+    margin: 0;
+    color: var(--tt-text-strong);
+    font-size: clamp(1.85rem, 6vw, 3.4rem);
+    line-height: 1.08;
+    letter-spacing: -0.03em;
+    font-weight: 600;
+  }
+
+  h1 em {
+    font-style: normal;
+    background: var(--tt-gradient);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .lede {
+    margin: 22px 0 0;
+    max-width: 60ch;
+    font-size: clamp(1rem, 2.4vw, 1.15rem);
+    color: var(--tt-text-muted);
+  }
+
+  .cta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-top: 34px;
+  }
+
+  .install {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--tt-surface-1);
+    border: 1px solid var(--tt-border);
+    border-radius: 8px;
+    padding: 10px 10px 10px 14px;
+    font-family: var(--tt-font-mono);
+    font-size: 14px;
+  }
+
+  .install .sigil {
+    color: var(--tt-text-faint);
+    user-select: none;
+  }
+
+  .install code {
+    flex: 1;
+    min-width: 0;
+    font-family: inherit;
+    white-space: nowrap;
+    overflow-x: auto;
+    color: var(--tt-text-strong);
+  }
+
+  button.copy {
+    appearance: none;
+    border: 1px solid var(--tt-border);
+    background: var(--tt-surface-2);
+    color: var(--tt-text-muted);
+    font-family: var(--tt-font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 5px 9px;
+    border-radius: 5px;
+    cursor: pointer;
+    transition:
+      color 0.15s ease,
+      border-color 0.15s ease;
+  }
+
+  button.copy:hover {
+    color: var(--tt-text-strong);
+    border-color: var(--tt-border-strong);
+  }
+
+  button.copy[data-done="1"] {
+    color: var(--tt-accent);
+    border-color: var(--tt-accent);
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 11px 18px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    text-decoration: none;
+    border: 1px solid transparent;
+    transition:
+      filter 0.15s ease,
+      border-color 0.15s ease,
+      color 0.15s ease;
+  }
+
+  .btn.primary {
+    background: var(--tt-gradient);
+    color: var(--tt-on-accent);
+  }
+
+  .btn.primary:hover {
+    filter: brightness(1.08);
+  }
+
+  .btn.ghost {
+    border-color: var(--tt-border);
+    color: var(--tt-text-muted);
+  }
+
+  .btn.ghost:hover {
+    border-color: var(--tt-border-strong);
+    color: var(--tt-text-strong);
+  }
+
+  .code {
+    margin: 56px 0 0;
+  }
+
+  .note {
+    margin: 16px 2px 0;
+    font-size: 13.5px;
+    color: var(--tt-text-faint);
+  }
+
+  .note code {
+    font-family: var(--tt-font-mono);
+    color: var(--tt-text-muted);
+  }
+
+  .pitch {
+    padding-top: 96px;
+  }
+
+  h2.sect {
+    margin: 0 0 30px;
+    font-family: var(--tt-font-mono);
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--tt-text-faint);
+    font-weight: 500;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--tt-border);
+    border: 1px solid var(--tt-border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .card {
+    background: var(--tt-bg);
+    padding: 28px 26px 30px;
+  }
+
+  .card h3 {
+    margin: 0 0 10px;
+    color: var(--tt-text-strong);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .card h3::before {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: 10px;
+    border-radius: 2px;
+    background: var(--tt-gradient);
+    vertical-align: middle;
+  }
+
+  .card p {
+    margin: 0;
+    font-size: 14.5px;
+    color: var(--tt-text-muted);
+  }
+
+  .card code {
+    font-family: var(--tt-font-mono);
+    font-size: 12.8px;
+    color: var(--tt-text-strong);
+    background: var(--tt-surface-1);
+    border: 1px solid var(--tt-border);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+
+  .card.wide {
+    grid-column: 1 / -1;
+  }
+
+  @media (max-width: 760px) {
+    .hero {
+      padding-top: 56px;
+    }
+
+    .code {
+      margin-top: 40px;
+    }
+
+    .pitch {
+      padding-top: 68px;
+    }
+
+    .grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .install,
+    .btn {
+      width: 100%;
+    }
+
+    .btn {
+      justify-content: center;
+    }
+  }
+</style>

@@ -1,4 +1,6 @@
-# Providers
+---
+title: Providers
+---
 
 A provider implements `limits(model)` and an async `stream(SampleRequest)` method. `Agent.model` wins over the root session model, which wins over `Runtime.default_model`. Children inherit the root session model unless their declaration overrides it.
 

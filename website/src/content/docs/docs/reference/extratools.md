@@ -1,4 +1,6 @@
-# Extra tools
+---
+title: Extra tools
+---
 
 | Module | Tools | Extra |
 |---|---|---|

@@ -1,4 +1,6 @@
-# Skills
+---
+title: Skills
+---
 
 A `Skills` source indexes named instruction packages. `FileSystemSkills(root)` reads directories containing `SKILL.md` and records invalid entries in `skipped`.
 

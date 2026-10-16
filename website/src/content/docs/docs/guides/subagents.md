@@ -1,4 +1,6 @@
-# Actor subagents
+---
+title: Actor subagents
+---
 
 Subagents are independent session actors with their own UUIDs, contexts, FIFO inboxes, journals, and integer cursors. Tantra injects four model-visible tools where applicable.
 

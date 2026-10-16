@@ -1,4 +1,6 @@
-# Stores
+---
+title: Stores
+---
 
 The Runtime store contract persists actor headers, UUID-addressed inputs, and per-actor event pages.
 
@@ -33,7 +35,7 @@ The package retains older store methods only for the transitional in-repository 
 
 Migration 8 adds permanent ID-only deletion markers and PostgreSQL write guards. Stop writers before setup; the migration publishes atomically and does not rewrite retained journals. SQLite setup adds its marker table idempotently. Session deletion is performed through `Runtime.delete`, which handles tasks, fencing, and readers. The optional store primitives do not extend the required Store protocol; direct unfenced deletion of a coordinated root is rejected. Filesystem deletion is unsupported.
 
-In 1.4, migration 10 adds the partial terminal-event index and migration 11 replaces the root expression index with stored `sessions.root_key`. The generated column rewrites session rows; allow a maintenance window with all writers stopped. Journal bodies and sequences stay unchanged. Eligible delta-only appends update header sequence, timestamp and operational watermark in SQL without hydrating the header in Python. See the [1.4 upgrade guide](../guides/migration-1.4.md).
+In 1.4, migration 10 adds the partial terminal-event index and migration 11 replaces the root expression index with stored `sessions.root_key`. The generated column rewrites session rows; allow a maintenance window with all writers stopped. Journal bodies and sequences stay unchanged. Eligible delta-only appends update header sequence, timestamp and operational watermark in SQL without hydrating the header in Python. See the [1.4 upgrade guide](/tantra/docs/guides/migration-1.4/).
 
 ## Cleanup selection
 

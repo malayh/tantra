@@ -1,4 +1,6 @@
-# Known limits
+---
+title: Known limits
+---
 
 - With `coordinator=None`, one root tree must stay in one Runtime process. `PostgresCoordinator` lets multiple processes serve the root while one leased owner executes it.
 - Typed asks are live futures and expire after process loss.

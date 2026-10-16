@@ -1,4 +1,7 @@
-# Migrate to 1.4
+---
+title: Migrate to 1.4
+slug: docs/guides/migration-1.4
+---
 
 Tantra 1.4 reduces PostgreSQL streaming and observation overhead. Public Runtime APIs, required Store/Coordinator interfaces, event bodies, sequences, fencing and replay cursors remain unchanged. Full history remains the default.
 
@@ -20,7 +23,7 @@ Tantra 1.4 reduces PostgreSQL streaming and observation overhead. Public Runtime
 
 Setup applies pending migrations through version 11. Migration 10 adds a partial index for terminal events. Migration 11 adds stored `sessions.root_key` using the existing root expression and replaces its expression index. Adding the stored column rewrites session rows and requires a maintenance window; it does not rewrite journals. Migration publication is transactional: failure rolls back and setup can be retried while writers remain stopped.
 
-Upgrading from before 1.3 also runs its projection, deletion-marker and actor-timestamp migrations. See the [1.3 guide](migration-1.3.md) for those backfills, session cleanup and optional compacted-history loading. SQLite, memory and filesystem storage formats have no new 1.4 migration.
+Upgrading from before 1.3 also runs its projection, deletion-marker and actor-timestamp migrations. See the [1.3 guide](/tantra/docs/guides/migration-1.3/) for those backfills, session cleanup and optional compacted-history loading. SQLite, memory and filesystem storage formats have no new 1.4 migration.
 
 ## Streaming and readers
 

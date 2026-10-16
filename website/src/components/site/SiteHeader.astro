@@ -1,0 +1,72 @@
+---
+import { withBase } from "../../lib/url";
+import Brand from "./Brand.astro";
+import ThemeToggle from "./ThemeToggle.astro";
+
+const hasSearch = Astro.slots.has("search");
+---
+
+<div class:list={["site-header", { "has-search": hasSearch }]}>
+  <Brand />
+  <div class="search">
+    <slot name="search" />
+  </div>
+  <nav class="links" aria-label="Site">
+    <a href={withBase("docs/")}>Docs</a>
+    <a href="https://github.com/malayh/tantra">GitHub</a>
+  </nav>
+  <div class="toggle">
+    <ThemeToggle />
+  </div>
+</div>
+
+<style>
+  .site-header {
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    height: 100%;
+    min-width: 0;
+  }
+
+  .search {
+    display: flex;
+    flex: 1;
+    justify-content: center;
+    min-width: 0;
+  }
+
+  .links {
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    font-size: 0.875rem;
+  }
+
+  .links a {
+    color: var(--tt-text-muted);
+    text-decoration: none;
+    transition: color 0.15s ease;
+  }
+
+  .links a:hover {
+    color: var(--tt-text-strong);
+  }
+
+  .has-search .search {
+    justify-content: flex-end;
+  }
+
+  @media (max-width: 49.99rem) {
+    .has-search .links,
+    .has-search .toggle {
+      display: none;
+    }
+  }
+
+  @media (min-width: 50rem) {
+    .has-search .search {
+      justify-content: center;
+    }
+  }
+</style>

@@ -1,4 +1,6 @@
-# Shell tools
+---
+title: Shell tools
+---
 
 `bash()` is a synchronous tool and therefore executes in a worker thread under Runtime. It defaults to permission `ask`.
 

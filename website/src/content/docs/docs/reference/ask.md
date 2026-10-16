@@ -1,4 +1,6 @@
-# Typed asks
+---
+title: Typed asks
+---
 
 Root tools call `await ctx.ask(request)` with `Approval`, `Choice`, or `FreeText`. Runtime appends `AskRaised` and suspends that live root turn. Child asks are rejected as ordered tool errors and emit no `AskRaised`; children communicate with their direct parent through `send()`.
 

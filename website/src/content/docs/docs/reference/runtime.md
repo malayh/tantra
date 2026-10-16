@@ -1,4 +1,6 @@
-# Runtime and Connection
+---
+title: Runtime and Connection
+---
 
 ## Runtime
 
@@ -98,7 +100,7 @@ Cancelling the local wait for `prompt` does not cancel the accepted turn. Coordi
 
 `PostgresCoordinator` shares one periodic observation query across all roots watched by a worker. Journal-only hints coalesce for 25 ms; control hints remain immediate. The shared check recovers missed notifications, expired ownership, actor activity and transport replies. Runtime observes only streaming/waiting actors plus root control state; public coordinator observation remains root-wide. Terminal evidence gates result reads, and idle observers do not read journals. Custom coordinators retain compatible observation fallbacks and need no new protocol methods.
 
-PostgreSQL Runtime streams share bounded recent committed pages with independent replay cursors and event copies. Historical replay and slow readers use authoritative SQL pagination. Cache entries are released after the final stream closes, deletion or shutdown; public replay stays complete. See the [1.4 guide](../guides/migration-1.4.md) for cache bounds and durable delta batching.
+PostgreSQL Runtime streams share bounded recent committed pages with independent replay cursors and event copies. Historical replay and slow readers use authoritative SQL pagination. Cache entries are released after the final stream closes, deletion or shutdown; public replay stays complete. See the [1.4 guide](/tantra/docs/guides/migration-1.4/) for cache bounds and durable delta batching.
 
 Runtime reference-counts writable and read-only connections, event generators, and result waits independently. One watcher is retained per interested root and is removed after its last user exits, including cancellation and generator close. A result wait keeps its root subscribed after the originating connection closes. Unsubscribing does not stop accepted work or lease renewal, and reconnecting resumes from the caller's durable cursor.
 

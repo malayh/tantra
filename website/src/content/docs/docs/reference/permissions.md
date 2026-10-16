@@ -1,4 +1,6 @@
-# Permissions
+---
+title: Permissions
+---
 
 Permission values are `allow`, `ask`, and `deny`. `strictest()` orders them deny, ask, allow.
 

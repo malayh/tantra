@@ -1,4 +1,6 @@
-# Storage backends
+---
+title: Storage backends
+---
 
 A `Store` persists session headers, UUID-addressed inputs, and per-session sequenced journals. Tantra ships `MemoryStore`, `FileSystemStore`, `SQLiteStore`, and `PostgresStore`.
 
@@ -14,4 +16,4 @@ Each actor journal is independent and gap-free. `append` returns the assigned se
 
 A shared store is persistence, not execution coordination by itself. With the default `coordinator=None`, do not drive the same live root tree from multiple Runtime processes.
 
-Tantra 1.2 can pair `PostgresStore` with `PostgresCoordinator` for leased execution ownership, fenced writes, cross-process commands and notifications, and takeover recovery. The coordinator must receive the identical store object passed to Runtime, and the Runtime must be started during application lifespan. See [Migrate to 1.2](migration-1.2.md) for the setup pattern and failure limits.
+Tantra 1.2 can pair `PostgresStore` with `PostgresCoordinator` for leased execution ownership, fenced writes, cross-process commands and notifications, and takeover recovery. The coordinator must receive the identical store object passed to Runtime, and the Runtime must be started during application lifespan. See [Migrate to 1.2](/tantra/docs/guides/migration-1.2/) for the setup pattern and failure limits.

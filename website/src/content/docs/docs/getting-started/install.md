@@ -1,4 +1,6 @@
-# Install
+---
+title: Install
+---
 
 The distribution name is `tantra-harness`; the Python import is `tantra`.
 

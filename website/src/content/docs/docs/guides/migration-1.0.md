@@ -1,4 +1,7 @@
-# Migrate to 1.0
+---
+title: Migrate to 1.0
+slug: docs/guides/migration-1.0
+---
 
 Tantra 1.0 uses a process-wide actor `Runtime` and fresh storage. It does not read pre-1.0 logs or recover in-flight work across processes.
 

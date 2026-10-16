@@ -1,4 +1,6 @@
-# Telemetry
+---
+title: Telemetry
+---
 
 Install `tantra-harness[telemetry]`, then pass a `Telemetry` tracer to Runtime.
 

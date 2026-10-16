@@ -1,4 +1,6 @@
-# Sharp edges
+---
+title: Sharp edges
+---
 
 ## Accepted work is independent of readers
 

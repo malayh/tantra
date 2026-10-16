@@ -1,4 +1,6 @@
-# Web fetch
+---
+title: Web fetch
+---
 
 ```python
 from tantra.extratools.web import web_fetch
@@ -33,7 +35,7 @@ class Researcher(Agent):
 | `.docx` content type | extracted via `tantra.extratools.doc` |
 | anything else | an error naming the content type |
 
-The `%PDF-` magic bytes beat a lying `Content-Type` header. Without the `[doc]` extra installed, a PDF or Word document produces an error telling the model the type and telling the user to `pip install "tantra-harness[doc]"` — see [reading documents](read-doc.md).
+The `%PDF-` magic bytes beat a lying `Content-Type` header. Without the `[doc]` extra installed, a PDF or Word document produces an error telling the model the type and telling the user to `pip install "tantra-harness[doc]"` — see [reading documents](/tantra/docs/guides/read-doc/).
 
 ## Output
 
@@ -50,8 +52,9 @@ Truncated at `max_chars` with an explicit `[truncated at N chars]` marker. An ex
 
 On by default. It rejects non-`http(s)` schemes, resolves the host, and refuses loopback, link-local and private addresses — on the initial URL and again on every redirect hop. `ssrf_guard=False` disables the address checks for local or trusted targets; **the scheme check still runs**.
 
-!!! warning "Best-effort, not a security boundary"
-    Two gaps are known and accepted. The guard resolves the host, then `curl` resolves it again — a DNS-rebinding attacker can win that race (fixing it needs `CURLOPT_RESOLVE` pinning). CGNAT (`100.64.0.0/10`) and NAT64 (`64:ff9b::/96`) are not blocked, because Python's `is_private` says they are not. If the URL comes from an untrusted party, put a real egress policy in front of the process.
+:::caution[Best-effort, not a security boundary]
+Two gaps are known and accepted. The guard resolves the host, then `curl` resolves it again — a DNS-rebinding attacker can win that race (fixing it needs `CURLOPT_RESOLVE` pinning). CGNAT (`100.64.0.0/10`) and NAT64 (`64:ff9b::/96`) are not blocked, because Python's `is_private` says they are not. If the URL comes from an untrusted party, put a real egress policy in front of the process.
+:::
 
 ## Proxy
 
@@ -61,12 +64,13 @@ There is no fallback to a direct connection — a dead gateway must not silently
 
 The SSRF guard is unchanged: it still resolves the target locally and rejects private addresses. The proxy's own address is not inspected, so a local egress proxy on `127.0.0.1` works. The consequence is that a `socks5h://` setup whose targets only resolve on the remote side fails the guard with "could not resolve the host".
 
-!!! warning "libcurl reads proxy env vars on its own"
-    With no `proxy=`, libcurl honours lowercase `http_proxy`, `HTTPS_PROXY`/`https_proxy` and `ALL_PROXY` — uppercase `HTTP_PROXY` is ignored, for CGI safety. `NO_PROXY`/`no_proxy` applies either way and bypasses even an explicit `proxy=`. None of this is disableable from Python.
+:::caution[libcurl reads proxy env vars on its own]
+With no `proxy=`, libcurl honours lowercase `http_proxy`, `HTTPS_PROXY`/`https_proxy` and `ALL_PROXY` — uppercase `HTTP_PROXY` is ignored, for CGI safety. `NO_PROXY`/`no_proxy` applies either way and bypasses even an explicit `proxy=`. None of this is disableable from Python.
+:::
 
 An `https://` proxy URL against an https target emits a `CurlCffiWarning` and uses the bundled certifi CA for the proxy's own TLS; a proxy with a corporate CA is not supported.
 
 ## Next
 
-- [Web search](web-search.md) — finding the URL to fetch.
-- [Reading documents](read-doc.md) — the `[doc]` extractors this dispatches to.
+- [Web search](/tantra/docs/guides/web-search/) — finding the URL to fetch.
+- [Reading documents](/tantra/docs/guides/read-doc/) — the `[doc]` extractors this dispatches to.

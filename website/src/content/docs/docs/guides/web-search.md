@@ -1,4 +1,6 @@
-# Web search
+---
+title: Web search
+---
 
 ```python
 from tantra.extratools.web import web_search
@@ -39,9 +41,9 @@ Everything else raises immediately with a self-describing message the model can 
 
 ## What the model is told
 
-The docstring is long on purpose and carries the guidance that matters most: ranking is the provider's opinion, not truth; snippets are for ranking, never for quoting; fetch the one or two most promising URLs with [`web_fetch`](web-fetch.md), never all of them.
+The docstring is long on purpose and carries the guidance that matters most: ranking is the provider's opinion, not truth; snippets are for ranking, never for quoting; fetch the one or two most promising URLs with [`web_fetch`](/tantra/docs/guides/web-fetch/), never all of them.
 
 ## Next
 
-- [Web fetch](web-fetch.md) — reading the page you picked.
-- [Extra tools reference](../reference/extratools.md).
+- [Web fetch](/tantra/docs/guides/web-fetch/) — reading the page you picked.
+- [Extra tools reference](/tantra/docs/reference/extratools/).

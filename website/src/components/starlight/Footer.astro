@@ -1,0 +1,17 @@
+---
+import Default from "@astrojs/starlight/components/Footer.astro";
+import SiteFooter from "../site/SiteFooter.astro";
+---
+
+<Default />
+<div class="site-footer-wrap">
+  <SiteFooter />
+</div>
+
+<style>
+  .site-footer-wrap {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--sl-color-hairline);
+  }
+</style>

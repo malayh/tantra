@@ -1,4 +1,6 @@
-# Providers
+---
+title: Providers
+---
 
 A `Provider` supplies `limits(model)` and streams `ProviderEvent` values for `SampleRequest`. Text, reasoning, tool-call deltas, complete tool calls, and `StreamEnd` form the streaming protocol.
 

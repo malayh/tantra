@@ -1,4 +1,6 @@
-# Quickstart
+---
+title: Quickstart
+---
 
 This offline example exercises durable command acceptance, a tool call, and a terminal result.
 

@@ -1,4 +1,6 @@
-# Tool and tool decorator
+---
+title: Tool and tool decorator
+---
 
 `@tool` builds a `Tool` from a typed callable. The signature becomes an object JSON schema; the docstring becomes the model description. A bare `Context` parameter is injected.
 

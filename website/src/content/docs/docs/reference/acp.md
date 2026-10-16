@@ -1,8 +1,10 @@
-# ACP server
+---
+title: ACP server
+---
 
 `tantra.acp` serves a Runtime over an interface inspired by [ACP](https://agentclientprotocol.com) v2 (`protocolVersion: 2`, reference schema `2.0.0-alpha.8`). It follows v2 shapes and semantics by default and diverges only where durable, multi-client, server-run sessions need it. tantra owns the JSON-RPC 2.0 layer, the transports, and the wire models; no ACP SDK is used and no dependency beyond pydantic is needed. The Runtime core is used only through its public API.
 
-The wire protocol, including the `tantra` profile, is specified in the [ACP profile proposal](../acp/tantra-profile.md).
+The wire protocol, including the `tantra` profile, is specified in the [ACP profile proposal](/tantra/docs/acp/tantra-profile/).
 
 ```python
 import asyncio
@@ -97,7 +99,7 @@ Error messages are fixed strings and never carry exception details. If a session
 | `TurnStarted`, agent input | An incoming `session_message` for an input whose `origin` is `message` (`[agent X] …`), `finished` (`[agent X finished] …`, with `_meta.tantra.finished`) or `spawn` (a child's spawn input); nothing for `turn_ended`. Then `state_update running`. The sender `X` must be the session's parent or one of its children; anything else, and every `origin: "user"` input, is an ordinary `user_message`. Inputs from a child hidden by `view` produce nothing and never enter the queue; they keep their output index, so cursors do not shift. Inputs without `origin`, from older journals, are classified by their prefixes under the same sender rule. |
 | `TextDelta`, `ReasoningDelta` | `agent_message_chunk`, `agent_thought_chunk` with the sample UUID as `messageId` |
 | `TextPart`, `ReasoningPart` | `agent_message` / `agent_thought` upserts that replace the chunks |
-| `ToolCallRequested`, `ToolCallStarted`, `ToolProgress`, `ToolCallCompleted` | `tool_call_update` (`pending`, `in_progress`, `completed` or `failed` with `rawInput` / `rawOutput`) and `tool_call_content_chunk`. `toolCallId = uuid5(session, "<sample>:<call_id>")`. Call IDs are unique within a session: the turn engine rewrites a colliding provider ID to a deterministic `call_<24 hex>` before journaling (see [Providers](providers.md)). |
+| `ToolCallRequested`, `ToolCallStarted`, `ToolProgress`, `ToolCallCompleted` | `tool_call_update` (`pending`, `in_progress`, `completed` or `failed` with `rawInput` / `rawOutput`) and `tool_call_content_chunk`. `toolCallId = uuid5(session, "<sample>:<call_id>")`. Call IDs are unique within a session: the turn engine rewrites a colliding provider ID to a deterministic `call_<24 hex>` before journaling (see [Providers](/tantra/docs/reference/providers/)). |
 | `spawn`, `send`, `finish` | Not tool calls. Outgoing `session_message`s with `messageId = uuid5(sender, "<sample>:<call_id>")`: `spawn` at `ChildCreated`, `send` and `finish` on success. A failure is shown as a failed `tool_call_update`. Every update of a `spawn`, `send` or `status` call that targets a child hidden by `view` is an internal no-op that keeps its output index. |
 | `ChildCreated` | `subagent_update {sessionId, title}` before any child traffic |
 | `AskRaised`, `AskAnswered` | `state_update requires_action` with `_meta.tantra.ask {askId, state}`; an answer reports `running` once no other ask is pending |

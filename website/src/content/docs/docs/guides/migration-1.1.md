@@ -1,4 +1,7 @@
-# Migrate to 1.1
+---
+title: Migrate to 1.1
+slug: docs/guides/migration-1.1
+---
 
 Tantra 1.1 keeps the 1.0 journals and store schemas. Existing JSON, filesystem, SQLite, and PostgreSQL data loads without a migration or historical backfill.
 

@@ -1,4 +1,6 @@
-# Durability and crashes
+---
+title: Durability and crashes
+---
 
 Durability means commands and events are appended before they are published. It does not mean in-flight model or tool work is reconstructed after process loss.
 
@@ -8,7 +10,7 @@ Every mutation through a writable `Connection` is idempotent by UUID `command_id
 
 Journal sequence numbers start at 1. Cursor 0 means replay from the beginning. Readers save the last consumed `seq` and reconnect with `after=seq`.
 
-The built-in PostgreSQL path batches provider text, reasoning and tool-argument deltas for at most 25 ms, 32 events or 64 KiB before starting a commit. Events keep their individual bodies and sequences and are delivered only after commit. Process death, cancellation, deletion, shutdown or ownership loss can discard received but uncommitted buffered output; the journal retains the committed prefix. Custom event hooks and other storage paths retain immediate commits. See the [1.4 upgrade guide](../guides/migration-1.4.md) for timing and compatibility details.
+The built-in PostgreSQL path batches provider text, reasoning and tool-argument deltas for at most 25 ms, 32 events or 64 KiB before starting a commit. Events keep their individual bodies and sequences and are delivered only after commit. Process death, cancellation, deletion, shutdown or ownership loss can discard received but uncommitted buffered output; the journal retains the committed prefix. Custom event hooks and other storage paths retain immediate commits. See the [1.4 upgrade guide](/tantra/docs/guides/migration-1.4/) for timing and compatibility details.
 
 ## Accepted work survives readers
 
@@ -34,4 +36,4 @@ A shared store alone does not coordinate live execution across processes. With `
 
 Tantra 1.2 can pair `PostgresStore` with `PostgresCoordinator`. Exactly one Runtime owns a root under a renewable lease, execution writes are fenced by its generation, and writers may reconnect through another process. Commands forward to the owner, while subscriptions replay journals and catch up across processes. After owner loss, the next writable reconnect or mutation waits for lease expiry, interrupts abandoned started turns, expires asks, repairs child lifecycle state, and drains accepted unstarted inputs.
 
-Recovery never repeats model or tool work from an interrupted turn and cannot roll back an external side effect. PostgreSQL is the availability and ordering authority. See [Migrate to 1.2](../guides/migration-1.2.md) for setup and limits.
+Recovery never repeats model or tool work from an interrupted turn and cannot roll back an external side effect. PostgreSQL is the availability and ordering authority. See [Migrate to 1.2](/tantra/docs/guides/migration-1.2/) for setup and limits.

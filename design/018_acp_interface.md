@@ -1,6 +1,6 @@
 # 018 — ACP v2–inspired interface and the `tantra` profile
 
-**Status:** P1–P8 ✅ DONE.
+**Status:** P1–P9 ✅ DONE. P10 —.
 
 ## Goal
 
@@ -384,8 +384,8 @@ Negotiated with `_meta.tantra = {"version": 1}` in both directions: the client s
 - **stdio:** serves through private dups of fds 0 and 1. While serving, fd 0 is `/dev/null`, and fd 1 plus `sys.stdout` go to stderr. Descriptors and `O_NONBLOCK` flags are restored on close and when an open fails.
 
 **Follow-ups:**
-- A plain v2 client that resumes a root with a pending ask gets no request until its first mutation claims the writer. P2's explicit `mode: write` covers profile clients.
-- **Runtime issue (for P8 or its own spec):** `_internal_id` (`runtime.py:1611`) keys on `turn_id:call_id`. A provider that repeats `call_0` across samples within one turn makes spawn, send and finish alias each other.
+- A plain v2 client that resumes a root with a pending ask gets no request until its first mutation claims the writer. P2's explicit `mode: write` covers profile clients. **Kept by design in P9:** a fix needs a Runtime "claim if no live writer" across workers.
+- ~~**Runtime issue (for P8 or its own spec):** `_internal_id` (`runtime.py:1611`) keys on `turn_id:call_id`. A provider that repeats `call_0` across samples within one turn makes spawn, send and finish alias each other.~~ Fixed in P9: call ids are unique per session.
 
 ### Phase 2 — `tantra` profile · deps: P1 · ✅ DONE
 
@@ -448,7 +448,7 @@ Negotiated with `_meta.tantra = {"version": 1}` in both directions: the client s
 - **A denied `mode: write` on `session/new`** deletes the root it just created.
 - **Profile cancel** retries like prompt; plain v2 cancel keeps P1's single attempt.
 
-**Follow-up:** when `view` hides a child's `ChildCreated`, that child's lifecycle inputs to its parent no longer count as synthetic. They project as `user_message`, and the raw `[agent <id> …]` text reaches the client. Closing this means the projector must know which children `view` hid; this is P1 projection, so it needs its own decision.
+**Follow-up:** ~~when `view` hides a child's `ChildCreated`, that child's lifecycle inputs to its parent no longer count as synthetic. They project as `user_message`, and the raw `[agent <id> …]` text reaches the client.~~ Fixed in P9 (`Withheld`).
 
 ### Phase 3 — WebSocket transport · deps: P1 · ✅ DONE
 
@@ -595,7 +595,7 @@ Negotiated with `_meta.tantra = {"version": 1}` in both directions: the client s
 - **Requests:** with no `onRequest`, both request methods answer `-32601`. A throwing or rejecting `onRequest` → `handler_failed` and `-32603`.
 - **Fixture server** (`test/server.py`) stops through `POST /control/shutdown`, because uvicorn re-raises SIGTERM after `serve()`, which would skip `aclose()`. It simulates a lost response by swallowing the prompt response and closing with `1011`.
 
-**Follow-up:** a server whose stream fails right after go-live (`1011` from `agent.py:829`) makes the client reconnect about once a second indefinitely, with no `onError`, because every cycle reaches `open`.
+**Follow-up:** ~~a server whose stream fails right after go-live (`1011` from `agent.py:829`) makes the client reconnect about once a second indefinitely, with no `onError`, because every cycle reaches `open`.~~ Fixed in P9 (`reconnectStableMs`).
 
 ### Phase 5 — Sarathi on the new interface · deps: P4 · ✅ DONE
 
@@ -750,8 +750,8 @@ Deploy backend and UI together. Old pages need a refresh.
   - `encode_prompt` resolves strictly (missing files and symlink loops are rejected).
   - It rejects ` path=` in names or paths, and rejects marker-shaped lines anywhere in the text.
   - Why: `decode_input` splits on the last ` path=`, so either one could forge a link to another user's file.
-- **A `read` ticket can still call `session/new`:** `scope` can't see which operation called it. The empty session can't be prompted, and with the profile's default `mode: write` the claim fails and the session is deleted.
-- **The `api/acp` tracing exclusion is a substring match,** so it also untraces `POST /api/acp/ticket`.
+- ~~**A `read` ticket can still call `session/new`:** `scope` can't see which operation called it.~~ Fixed in P9: the policy sees `new`.
+- ~~**The `api/acp` tracing exclusion is a substring match,** so it also untraces `POST /api/acp/ticket`.~~ Fixed in P9: anchored to the socket path.
 - **The E2E override lists two models** (`e2e-model,e2e-other`), because `set_config_option` only accepts configured models.
 - **Owner-death E2E** uses `kill` (SIGKILL), so lease expiry is exercised.
 - **UI:**
@@ -759,7 +759,7 @@ Deploy backend and UI together. Old pages need a refresh.
   - `useChat` lives in `client.ts`, because Next.js type-checks layout exports.
   - A session is ready only while it is open in the client state, so returning to a chat shows the loader rather than stale entries.
 
-**Follow-up:** a user `resume()` that succeeds after `close()` was called for the same session on an open connection leaves it open on the server and untracked on the client. Closing it from the success path could close a newer resume of the same id.
+**Follow-up:** ~~a user `resume()` that succeeds after `close()` was called for the same session on an open connection leaves it open on the server and untracked on the client.~~ Fixed in P9: the close is deferred until pending resumes settle.
 
 ### Phase 6 — Remove the 017 transport · deps: P5 · ✅ DONE
 
@@ -859,8 +859,8 @@ Deploy backend and UI together. Old pages need a refresh.
 - **017-only checks dropped:** the server's outbound queue, `revalidate` and `auth_sql_connections`. ACP has no outbound queue; the `1013` and backlog checks cover it.
 - **Running it here:** `Database` calls `docker`, so the full run needs `docker` on `PATH`. In distrobox that is a shim around `distrobox-host-exec docker`.
 - **Follow-up:**
-  - `test_bench_behavior` hung once, with its schema drop blocked by its own idle-in-transaction connection. Two full suites were running against one database at the time. Run alone, it passes in 12 s.
-  - One `pytest` test failed in 2 of 5 full runs with `CancelledError` raised from `asyncio/locks.py`. The other 3 runs passed 1134/1134. Its name wasn't captured. P6b changed no package code, so the flake predates it. Rerun with `-rf` to name it.
+  - ~~`test_bench_behavior` hung once, with its schema drop blocked by its own idle-in-transaction connection.~~ Fixed in P9: the drop runs off the event loop with a 10 s `lock_timeout`.
+  - One `pytest` test failed in 2 of 5 full runs with `CancelledError` raised from `asyncio/locks.py`. Its name wasn't captured. **Not reproduced in P9:** no failure in any P9 run, including 6 full runs with `-rfE` under concurrent load.
 
 ### Phase 7 — Upstream proposal · deps: P6 · ✅ DONE
 
@@ -949,14 +949,14 @@ Deploy backend and UI together. Old pages need a refresh.
   - Only PostgreSQL raises `model_busy`.
 
 **Follow-up**
-- `docs/reference/acp.md` still describes these the old way: `unavailable`, cursor validity, child error codes and `model_busy`. The proposal is correct.
-- **Existence oracle:** some paths answer an existing id differently from an unknown one.
+- ~~`docs/reference/acp.md` still describes these the old way: `unavailable`, cursor validity, child error codes and `model_busy`.~~ Fixed in P9.
+- **Existence oracle** (fixed in P9): some paths answered an existing id differently from an unknown one.
   - A child id answers `-32602` before the policy check (`agent.py:270-271`).
   - Profile `_resume_child` checks the mode first (`:484-485`).
   - The `session/list` cursor is checked only for existence (`:427-431`).
   - Each needs the id already. The proposal lists this.
-- **Silent delete:** other connections get no update when a session is deleted (`agent.py:822-825`).
-- **Lost session on a failed re-resume:** a write-mode re-resume shuts down the old session (`agent.py:472-474`) before claiming (`:477-478`). A claim that fails after the policy pre-check therefore loses it.
+- ~~**Silent delete:** other connections get no update when a session is deleted (`agent.py:822-825`).~~ Fixed in P9 for profile clients: `_tantra_notice` `session_deleted`.
+- ~~**Lost session on a failed re-resume:** a write-mode re-resume shuts down the old session (`agent.py:472-474`) before claiming (`:477-478`).~~ Fixed in P9: claim first, swap after.
 
 ### Phase 8 — Runtime additions · deps: P1 · ✅ DONE
 
@@ -1018,9 +1018,89 @@ Deploy backend and UI together. Old pages need a refresh.
 - **Prefix spoofing is gone for new journals:** a user typing `[agent <child>] …` stays a `user_message`. A spawn input that begins with `[agent <parent>] ` is no longer stripped.
 
 **Follow-up**
-- Active flags could come from the root observation instead of one `coordinator.active` per actor per read.
-- Lease expiry still changes `active` with no notice.
-- A `watch_tree` consumer inside the read wait when the runtime closes can get one more snapshot before returning.
+- Active flags could come from the root observation instead of one `coordinator.active` per actor per read. Moved to P10.
+- ~~Lease expiry still changes `active` with no notice.~~ Fixed in P9.
+- ~~A `watch_tree` consumer inside the read wait when the runtime closes can get one more snapshot before returning.~~ Fixed in P9.
+
+### Phase 9 — Bug fixes · deps: P8 · ✅ DONE
+
+> ⚠ **This phase changes Runtime internals:** `loop.py` (call ids) and `runtime.py` (tree watch). Confirmed by plan approval, 2026-10-16. `coordinator.py`, `events.py` and the stores stay untouched.
+
+**Deliverables**
+- **Unique call ids** (`loop.py`):
+  - The engine rewrites any tool call id that collides within the turn or the loaded window.
+  - The rewritten id is `"call_" + blake2b(turn_id:sample_number:index:attempt)[:24 hex]`.
+  - Ids without a collision stay byte-identical.
+  - Why: the `call_{index}` fallback and providers that repeat ids aliased `_internal_id` and corrupted `assemble_messages` and compaction.
+- **Tree watch** (`runtime.py`):
+  - A change of owner instance, generation or validity bumps the hub. The fallback path re-reads on timeout while an actor is active.
+  - No snapshot is yielded after close starts.
+- **ACP server:**
+  - A `view`-hidden child's lifecycle inputs, and the parent's `send`/`status` calls naming it, project to internal no-ops (`Withheld`), so cursors keep their indices. Resuming a hidden child answers like an unknown id.
+  - Unauthorized existing ids answer exactly like unknown ones.
+  - Other profile connections get `_tantra_notice` `session_deleted` on deletion.
+  - A failed write re-resume keeps the old session: claim first, shutdown after.
+  - The policy sees `new`.
+- **TS client:**
+  - Dial counts reset only after `open` has lasted `timing.reconnectStableMs` (10 s).
+  - A `session/close` deferred while a resume is pending.
+  - `session_deleted` handling.
+- **Sarathi:** the trace exclusion is anchored to the socket path, and `read` tickets can't create sessions.
+- **Test infrastructure:** `drop_schema` off the event loop, with a `lock_timeout`.
+- **Docs and CHANGELOG:** the stale `reference/acp.md` passages; every 018 addition, including the migration 12 upgrade note.
+- **Not fixed, by design:** a plain v2 resume with a pending ask. It needs a Runtime "claim if no live writer" across workers; claiming unconditionally would fence another device silently.
+
+**Verify**
+- Each fix has a test that fails on `694aef0` and passes after.
+- `test_child_completion_strict_request_replay` passes, so recordings are unchanged.
+- Full package, stress, Sarathi and client suites pass with zero skips. `mkdocs --strict` is clean.
+- ACP bench: idle no worse than P8; active within noise.
+
+**Checklist**
+- [x] User reminded + confirmed before starting (plan approved 2026-10-16)
+- [x] Runtime fixes
+- [x] ACP server, Sarathi, docs
+- [x] TS client
+- [x] Verified
+
+**Verified**
+- `ruff` clean. `pytest` 1186 passed, `pytest stress` 157 passed, both zero skips on owned PostgreSQL. Sarathi backend 116 passed; Sarathi UI tests, lint and `tsc` clean. `tantra-acp-client` 68 passed, lint and typecheck clean. `mkdocs build --strict` clean.
+- Every fix test failed on `694aef0` first. Guard tests were checked against mutants.
+- `coordinator.py`, `events.py`, the stores, `tools.py`, `context.py` and `compaction.py` are untouched.
+- One review per part. All findings were fixed, among them a leak of a hidden child through the parent's own `send`/`status`.
+- **ACP bench full run:** `complete: true`, 100 journals verified, 0 errors. P8 and P9 ran back to back on the same machine. It was busier than at P8, so absolute latency is higher than the P8 table. Per worker:
+
+  | | P8 | P9 |
+  |---|---|---|
+  | Delivery p50 / p95 | 5448 / 7402 ms | 5336 / 7063 ms |
+  | Idle: CPU, SQL calls | ~2.3 s, 349 | ~2.35 s, 349 |
+  | Idle journal or event-body SQL | 0 | 0 |
+  | Active: CPU, SQL calls | ~5.5 s, ~26.95k | ~4.93 s, ~26.6k |
+  | Active: journal queries, header queries | ~1503, ~4518 | ~1517, ~4389 |
+
+**As built**
+- **Owner-change bump:** it re-reads the tree and skips that observation's change paging. Every claim and release also publishes `ownership`, so paging as well would read twice.
+- **Deletion notice:** sent after the session's resume or new response, only when a fresh `store.header(root)` is `None`, once per session. The deleting connection is skipped, unless its own `session/delete` errors or is cancelled after the deletion commits. A deletion during a resume answers `-32002` with no notice.
+- **Write re-resume:** the single `claim_writer` policy check is the pre-check, so `stress/bench/acp.py` expects `writers` claim checks, not `2 × writers`. After the claim, the swap runs as its own task that absorbs every `$/cancel_request` while the peer is open.
+  - Residual: a claim that takes effect but whose completion is lost fences the open session, which gets `replaced`.
+  - Residual: an `_open` failure after the claim loses the session and leaves no writer.
+- **Client:** stability is measured with `performance.now()` when the connection drops. The `connect()` connection counts too, so "closes during every resume" makes 10 dials, not 1 + 10. A superseded successful `resume()` rejects `closed`; a superseded failing one keeps its server error.
+- **Sarathi UI:** the loader hides while a banner shows for a session that isn't ready, and prompts of a dropped session no longer overwrite the deletion banner. Its `node_modules/tantra-acp-client` is a copy, so the running UI needs a reinstall to pick up client changes.
+- **Telemetry:** on a call-id collision, the chat span records the raw provider ids.
+
+**Follow-up**
+- The Sarathi sidebar doesn't refresh on `session_deleted`.
+- An unrelated banner also hides a child drawer's loader while it resumes. Cosmetic.
+- The `tools.py` docstrings for `ctx.ask`/`ctx.spawn` still describe re-execution on resume, which the actor runtime no longer does.
+
+### Phase 10 — Performance · deps: P9 · —
+- **Goal:** cut CPU and SQL per operation without changing behavior.
+- **Approach:** profile first. Candidates:
+  - active flags from the root observation;
+  - no hub read on usage-only header notices;
+  - fewer header queries (+47% since P7);
+  - hot paths that profiling finds.
+- Planned after P9 lands.
 
 ### Conventions (all phases)
 - **Workflow:**
@@ -1041,6 +1121,10 @@ Deploy backend and UI together. Old pages need a refresh.
   - After P2: the profile wire.
   - After P3: the `websocket()` signature and close codes.
   - After P4: the client API. P5 adds the transcript reducer exports; nothing existing changes.
+  - P9 adds, without changing anything existing:
+    - `Operation` `"new"`;
+    - the profile notice code `session_deleted`;
+    - the client option `timing.reconnectStableMs`.
   - Changing any of these means updating this spec first.
 - **Reference schema bumps:** a separate change. Re-vendor the schema, update the wire models and the divergence allowlist, then rerun P1, P2 and P4 verification.
 - **No third-party ACP packages** in Python or TS.
@@ -1097,3 +1181,6 @@ Deploy backend and UI together. Old pages need a refresh.
   - Read access isn't revalidated after the handshake.
 - **stdio:** writing to stdout corrupts the stream.
 - **P8 retries:** `InputQueued.__eq__` is lenient only when one side is legacy. The legacy-compatibility tests are mandatory.
+- **Migration 12:** every worker must run the new release before it is applied. An older worker writes no `journal_index` row for `AskRaised`, and `lookup_ask` has no fallback.
+- **`view` hiding is presentation, not authorization:** it withholds a child's outputs and refuses its resume, but the policy still decides access.
+- **Old journals with repeated call ids** stay as written; their windows assemble incorrectly until compaction moves past them.

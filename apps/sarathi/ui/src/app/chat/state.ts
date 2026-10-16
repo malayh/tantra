@@ -6,6 +6,7 @@ import {
   empty,
   removeRequest,
   reset,
+  TantraAcpError,
   type AgentRequest,
   type ClientState,
   type ContentBlock,
@@ -97,6 +98,14 @@ export const actorStatusLabel = (state: StateBody | null): string => {
 
 export const isReady = (state: ChatState, sessionId: string): boolean =>
   state.ready[sessionId] === true && sessionId in state.client.sessions;
+
+export const isLoading = (state: ChatState, sessionId: string): boolean =>
+  !isReady(state, sessionId) && state.banner === null;
+
+export const fromDroppedSession = (state: ChatState, sessionId: string, error: unknown): boolean =>
+  error instanceof TantraAcpError &&
+  (error.code === "uncertain" || error.code === "closed") &&
+  !(sessionId in state.client.sessions);
 
 export const isNearBottom = (scrollHeight: number, scrollTop: number, clientHeight: number): boolean =>
   scrollHeight - scrollTop - clientHeight <= 80;

@@ -41,7 +41,7 @@ from tantra.providers.base import ToolCall
 
 Signup = Callable[..., Awaitable[str]]
 NewSession = Callable[..., Awaitable[str]]
-OPERATIONS = ("resume", "prompt", "cancel", "claim_writer", "answer", "set_model", "delete")
+OPERATIONS = ("new", "resume", "prompt", "cancel", "claim_writer", "answer", "set_model", "delete")
 ARGUMENTS = {"kind": "preference", "title": "Drink", "body": "Tea"}
 
 
@@ -302,9 +302,12 @@ async def test_a_read_ticket_can_only_resume(acp: Acp, signup: Signup, new_sessi
             await rpc.request(
                 "session/resume", {"sessionId": session_id, "cwd": "/work", "_meta": {"tantra": {"mode": "write"}}}
             ),
+            await rpc.request("session/new", {"cwd": "/work", "mcpServers": [], "_meta": {"tantra": {"mode": "read"}}}),
         ]
+        listed = await rpc.call("session/list", {})
 
-    assert [response["error"]["code"] for response in denied] == [-32002] * 5
+    assert [response["error"]["code"] for response in denied] == [-32002] * 6
+    assert [session["sessionId"] for session in listed["sessions"]] == [session_id]
 
 
 async def test_other_users_cannot_see_or_touch_a_session(acp: Acp, signup: Signup, new_session: NewSession) -> None:

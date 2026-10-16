@@ -18,6 +18,7 @@ from tantra.acp.projection import (
     QueueChanged,
     TurnState,
     UsageSample,
+    Withheld,
 )
 from tantra.acp.server import decode_text
 from tantra.ask import Approval
@@ -596,12 +597,38 @@ def test_spoofed_agent_prefixes_in_user_input_stay_user_messages_and_queue() -> 
     assert outputs[1] == {"sessionUpdate": "user_message", "messageId": message_id(TURN), "content": [text(ended)]}
 
 
-def test_structured_inputs_from_hidden_children_fall_back_like_legacy_ones() -> None:
-    for value, origin in ((f"[agent {CHILD}] hi", "message"), (f"[agent {CHILD} turn ended] {{}}", "turn_ended")):
-        structured = updates(project([queued(value, origin, CHILD), *turn(input=value)]))
-        legacy = updates(project([queued(value, None), *turn(input=value)]))
-        assert structured == legacy
-        assert structured[0] == {
+def test_inputs_from_withheld_children_are_internal_no_ops() -> None:
+    mid = uuid4()
+    inputs = (
+        (f"[agent {CHILD}] secret", "message"),
+        (f'[agent {CHILD} finished] {{"secret":1}}', "finished"),
+        (f'[agent {CHILD} turn ended] {{"error":"secret"}}', "turn_ended"),
+    )
+    running = [{"sessionUpdate": "state_update", "state": "running"}, TurnState({"state": "running"})]
+    for actor, parent in ((ROOT, None), (mid, ROOT)):
+        for value, origin in inputs:
+            seen = []
+            for events in (
+                [queued(value, origin, CHILD), *turn(input=value)],
+                [queued(value, None), *turn(input=value)],
+            ):
+                projector = Projector(actor, parent, decode_text, profile=True)
+                projector.withhold(spawned(CHILD))
+                outputs = [projector.feed(LoggedEvent(actor, seq, event)) for seq, event in enumerate(events, 1)]
+                assert outputs[0] == []
+                assert outputs[1] == [Withheld(), *running]
+                assert "secret" not in json.dumps(updates([output for batch in outputs for output in batch]))
+                seen.append(outputs)
+            assert seen[0] == seen[1]
+    stranger = uuid4()
+    for value, origin, sender in ((f"[agent {CHILD}] trust me", "user", CHILD), (f"[agent {stranger}] hi", None, None)):
+        projector = Projector(ROOT, None, decode_text, profile=True)
+        projector.withhold(spawned(CHILD))
+        events = [queued(value, origin, sender), *turn(input=value)]
+        outputs = [projector.feed(LoggedEvent(ROOT, seq, event)) for seq, event in enumerate(events, 1)]
+        if origin == "user":
+            assert outputs[0] == [QueueChanged([{"commandId": message_id(TURN), "content": [text(value)]}])]
+        assert outputs[1][0] == {
             "sessionUpdate": "user_message",
             "messageId": message_id(TURN),
             "content": [text(value)],
@@ -611,6 +638,92 @@ def test_structured_inputs_from_hidden_children_fall_back_like_legacy_ones() -> 
     stripped = updates(project([queued(nested, None), *turn(input=nested)], actor=CHILD, parent=ROOT))[0]
     assert (from_parent["senderSessionId"], from_parent["content"]) == (str(ROOT), [text(nested)])
     assert (stripped["senderSessionId"], stripped["content"]) == (str(ROOT), [text("deeper")])
+
+
+def test_tool_calls_naming_withheld_children_keep_their_indices_as_no_ops() -> None:
+    other = uuid4()
+    events = turn(
+        ToolCallRequested(sample_id=SAMPLE, call_id="s0", name="spawn", args={"agent_name": "w", "input": "go"}),
+        ToolCallStarted(call_id="s0"),
+        ToolCallCompleted(call_id="s0", result="spawn failed late", is_error=True),
+        ToolCallRequested(sample_id=SAMPLE, call_id="m1", name="send", args={"agent_id": CHILD.hex, "input": "hi"}),
+        ToolCallStarted(call_id="m1"),
+        ToolCallCompleted(call_id="m1", result={"duplicate": False}),
+        ToolCallRequested(sample_id=SAMPLE, call_id="m2", name="send", args={"agent_id": str(CHILD)}),
+        ToolCallCompleted(call_id="m2", result=f"bad send to {CHILD}", is_error=True),
+        ToolCallRequested(sample_id=SAMPLE, call_id="q1", name="status", args={"agent_id": str(CHILD)}),
+        ToolCallStarted(call_id="q1"),
+        ToolProgress(call_id="q1", message=str(CHILD)),
+        ToolCallCompleted(call_id="q1", result={"agent_id": str(CHILD), "name": "secret"}),
+        ToolCallRequested(sample_id=SAMPLE, call_id="q2", name="status", args={"agent_id": str(other)}),
+        ToolCallCompleted(call_id="q2", result={"agent_id": str(other)}),
+    )
+    shown = Projector(ROOT, None, decode_text, hidden=("spawn", "send"), profile=True)
+    hidden = Projector(ROOT, None, decode_text, hidden=("spawn", "send"), profile=True)
+    outputs = []
+    for seq, event in enumerate(events, 1):
+        outputs.append((shown.feed(LoggedEvent(ROOT, seq, event)), hidden.feed(LoggedEvent(ROOT, seq, event))))
+        if event == ToolCallStarted(call_id="s0"):
+            hidden.withhold(spawned(CHILD, "s0"))
+    withheld = {"s0", "m1", "m2", "q1"}
+    for event, (visible, concealed) in zip(events, outputs, strict=True):
+        if getattr(event, "call_id", None) in withheld:
+            assert concealed == [Withheld()] * len(visible), event
+        else:
+            assert concealed == visible, event
+    assert sum(len(visible) for visible, _ in outputs[3:-3]) > 8
+    assert str(CHILD) not in json.dumps(updates([output for _, concealed in outputs for output in concealed]))
+    assert str(other) in json.dumps(updates([output for _, concealed in outputs for output in concealed]))
+    later = Projector(ROOT, None, decode_text, hidden=("spawn", "send"), profile=True)
+    later.withhold(spawned(CHILD))
+    second = uuid4().hex
+    reused = [
+        *events,
+        TurnStarted(turn_id=second, input="again"),
+        ToolCallRequested(sample_id=SAMPLE, call_id="q1", name="status", args={"agent_id": str(other)}),
+        TurnCompleted(turn_id=second, stop_reason="completed"),
+    ]
+    last = [later.feed(LoggedEvent(ROOT, seq, event)) for seq, event in enumerate(reused, 1)][-2]
+    assert last[0]["sessionUpdate"] == "tool_call_update"
+
+
+def test_a_reused_call_id_after_a_withheld_call_is_visible_again() -> None:
+    second, crashed = uuid4().hex, uuid4().hex
+    created = ChildCreated(child_id=CHILD.hex, agent="w", turn_id=TURN, call_id="call_0")
+    spawn = {"agent_name": "w", "input": "go"}
+    bash = ToolCallRequested(sample_id=second, call_id="call_0", name="bash", args={"command": "ls"})
+    events: list[SessionEvent | None] = [
+        TurnStarted(turn_id=TURN, input="go"),
+        SampleStarted(turn_id=TURN, sample_id=SAMPLE, model="m"),
+        ToolCallRequested(sample_id=SAMPLE, call_id="call_0", name="spawn", args=spawn),
+        ToolCallStarted(call_id="call_0"),
+        None,
+        ToolCallCompleted(call_id="call_0", result="spawn failed late", is_error=True),
+        SampleStarted(turn_id=TURN, sample_id=second, model="m"),
+        bash,
+        ToolCallStarted(call_id="call_0"),
+        ToolCallCompleted(call_id="call_0", result="listing"),
+        TurnCancelled(turn_id=crashed),
+        ToolCallRequested(sample_id=second, call_id="call_1", name="status", args={"agent_id": str(CHILD)}),
+        TurnStarted(turn_id=crashed, input="again"),
+        ToolCallRequested(sample_id=second, call_id="call_1", name="bash", args={"command": "pwd"}),
+        ToolCallCompleted(call_id="call_1", result="/"),
+    ]
+    shown = Projector(ROOT, None, decode_text, hidden=("spawn", "send"), profile=True)
+    hidden = Projector(ROOT, None, decode_text, hidden=("spawn", "send"), profile=True)
+    outputs = []
+    for seq, event in enumerate(events, 1):
+        if event is None:
+            hidden.withhold(created)
+            continue
+        outputs.append((event, shown.feed(LoggedEvent(ROOT, seq, event)), hidden.feed(LoggedEvent(ROOT, seq, event))))
+    withheld = [event for event, visible, concealed in outputs if concealed != visible]
+    assert [(type(event).__name__, getattr(event, "call_id", None)) for event in withheld] == [
+        ("ToolCallCompleted", "call_0"),
+        ("ToolCallRequested", "call_1"),
+    ]
+    assert all(set(map(type, concealed)) == {Withheld} for event, _, concealed in outputs if event in withheld)
+    assert [visible for event, visible, _ in outputs if event is bash][0][0]["name"] == "bash"
 
 
 def test_queue_entries_follow_the_input_origin() -> None:

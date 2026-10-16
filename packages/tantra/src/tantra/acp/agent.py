@@ -172,6 +172,7 @@ class _Session:
     announced: bool = False
     fenced: bool = False
     lost: bool = False
+    answered: bool = False
     closed: bool = False
     live: asyncio.Event = field(default_factory=asyncio.Event)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -182,6 +183,7 @@ class _Session:
     tree: asyncio.Task[None] | None = None
     changes: AsyncIterator[TreeChange] | None = None
     teardown: asyncio.Task[None] | None = None
+    gone: asyncio.Task[None] | None = None
 
 
 class AcpConnection:
@@ -192,6 +194,7 @@ class AcpConnection:
         self.auth = auth
         self.sessions: dict[UUID, _Session] = {}
         self.opening = asyncio.Lock()
+        self.deleting: list[UUID] = []
         self.elicitation = False
         self.profile = False
         self.tasks: set[asyncio.Task[Any]] = set()
@@ -264,7 +267,9 @@ class AcpConnection:
         if header is None:
             raise SessionNotFound(root_id.hex)
         if header.parent_id is not None:
-            raise _child_session()
+            if any(root_id in session.tails for session in self.sessions.values()):
+                raise _child_session()
+            raise SessionNotFound(root_id.hex)
         if header.agent != self.server.agent:
             raise SessionNotFound(root_id.hex)
         return header
@@ -400,11 +405,15 @@ class AcpConnection:
         meta = request.meta or {}
         write = self._writes(meta, "write")
         scope = await self._scope(meta)
+        session_id = uuid4()
+        metadata = {**scope, "acp_cwd": request.cwd}
+        provisional = SessionHeader(
+            id=session_id.hex, root_id=session_id.hex, agent=self.server.agent, metadata=metadata
+        )
+        await self._authorize("new", provisional, meta)
         async with self.opening:
             self._capacity()
-            root_id = await self.runtime.create(
-                self.server.agent, session_id=uuid4(), metadata={**scope, "acp_cwd": request.cwd}
-            )
+            root_id = await self.runtime.create(self.server.agent, session_id=session_id, metadata=metadata)
             session = await self._open(root_id, None)
         if write:
             try:
@@ -417,13 +426,19 @@ class AcpConnection:
 
     async def _list(self, params: Any) -> Any:
         request = _parse(wire.ListSessionsParams, params)
-        wanted: dict[str, Any] = await self._scope(request.meta or {})
+        scope = await self._scope(request.meta or {})
+        wanted: dict[str, Any] = dict(scope)
         if request.cwd is not None:
             wanted["acp_cwd"] = request.cwd
         before = request.cursor
         if before is not None:
             anchor = await self.runtime.store.header(before)
-            if anchor is None or anchor.parent_id is not None:
+            if (
+                anchor is None
+                or anchor.parent_id is not None
+                or anchor.agent != self.server.agent
+                or any(anchor.metadata.get(key) != value for key, value in scope.items())
+            ):
                 raise RpcError(INVALID_PARAMS, "Invalid cursor")
         roots: list[SessionHeader] = []
         exhausted = False
@@ -466,24 +481,67 @@ class AcpConnection:
             await self._authorize("claim_writer", header, meta)
         async with self.opening:
             existing = self.sessions.get(root_id)
-            if existing is not None:
-                await self._shutdown(existing)
-            self._capacity()
-            session = await self._open(root_id, after)
-        if write:
-            await self._claim_or_close(session, meta)
+            if existing is None:
+                self._capacity()
+            if write:
+                writer = await self._enter_writer(root_id, existing)
+                session = await self._swap(root_id, after, existing, writer)
+            else:
+                session = await self._replace(root_id, after, existing, None)
         result = wire.ResumeSessionResult(config_options=self._config(session.model))
         return Reply(wire.dump(result), lambda: self._go_live(session))
 
+    async def _replace(
+        self, root_id: UUID, after: tuple[int, int | None] | None, existing: _Session | None, writer: Connection | None
+    ) -> _Session:
+        if existing is not None:
+            try:
+                await self._shutdown(existing)
+                self._capacity()
+            except BaseException:
+                if writer is not None:
+                    await self._discard(writer)
+                raise
+        return await self._open(root_id, after, writer)
+
+    async def _swap(
+        self, root_id: UUID, after: tuple[int, int | None] | None, existing: _Session | None, writer: Connection
+    ) -> _Session:
+        task = asyncio.ensure_future(self._replace(root_id, after, existing, writer))
+        while True:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if task.done() or self.peer.closed or current is None:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    raise
+                current.uncancel()
+
+    async def _enter_writer(self, root_id: UUID, existing: _Session | None) -> Connection:
+        connection = self.runtime.connect(root_id, writable=True)
+        if existing is None:
+            await connection.__aenter__()
+            return connection
+        async with existing.lock:
+            await connection.__aenter__()
+            existing.announced = False
+        return connection
+
+    async def _discard(self, connection: Connection) -> None:
+        task = self._spawn(self._exit(connection), cleanup=True)
+        await asyncio.shield(task)
+
     async def _resume_child(self, request: wire.ResumeSessionParams, header: SessionHeader) -> Any:
         meta = request.meta or {}
-        if self._writes(meta, "read"):
-            raise _child_session()
         root_id = UUID(hex=header.root_id or header.id)
-        if root_id not in self.sessions:
+        if root_id not in self.sessions or await self._concealed(UUID(hex=header.id)):
             raise SessionNotFound(header.id)
         root = await self._load(root_id)
         await self._authorize("resume", root, meta, actor=header)
+        if self._writes(meta, "read"):
+            raise _child_session()
         after = self._replay_from(request.replay_from)
         if after is not None:
             _threshold(after, (await self.runtime.status(UUID(hex=header.id))).last_seq)
@@ -620,11 +678,15 @@ class AcpConnection:
         root_id = _session_id(request.session_id)
         header = await self._load(root_id)
         await self._authorize("delete", header, request.meta or {})
-        if not await self.runtime.delete(root_id, allow_active=True):
-            raise SessionNotFound(root_id.hex)
-        session = self.sessions.get(root_id)
-        if session is not None:
-            await self._shutdown(session)
+        self.deleting.append(root_id)
+        try:
+            if not await self.runtime.delete(root_id, allow_active=True):
+                raise SessionNotFound(root_id.hex)
+            session = self.sessions.get(root_id)
+            if session is not None:
+                await self._shutdown(session)
+        finally:
+            self.deleting.remove(root_id)
         return {}
 
     async def _set_config_option(self, params: Any) -> Any:
@@ -676,11 +738,18 @@ class AcpConnection:
         tail.task = self._spawn(self._run(session, tail))
         return tail
 
-    async def _open(self, root_id: UUID, after: tuple[int, int | None] | None) -> _Session:
-        header = await self._load(root_id)
-        status = await self.runtime.status(root_id)
-        emit_after, emit_index = _threshold(after, status.last_seq)
-        session = _Session(root_id, after is not None, title=header.title, model=header.model)
+    async def _open(
+        self, root_id: UUID, after: tuple[int, int | None] | None, writer: Connection | None = None
+    ) -> _Session:
+        try:
+            header = await self._load(root_id)
+            status = await self.runtime.status(root_id)
+            emit_after, emit_index = _threshold(after, status.last_seq)
+        except BaseException:
+            if writer is not None:
+                await self._discard(writer)
+            raise
+        session = _Session(root_id, after is not None, title=header.title, model=header.model, writer=writer)
         self.sessions[root_id] = session
         try:
             self._tail(
@@ -735,6 +804,10 @@ class AcpConnection:
         await self._stop(tail)
 
     async def _go_live(self, session: _Session) -> None:
+        session.answered = True
+        if session.lost:
+            self._lose(session)
+            return
         if session.closed:
             return
         tree = self.runtime.watch_tree(session.root_id)
@@ -764,7 +837,7 @@ class AcpConnection:
                 session.tree = self._spawn(self._follow(session, tree))
                 following = True
         except SessionNotFound:
-            await self._shutdown(session)
+            self._lose(session)
         except ConnectionError:
             raise
         except Exception:
@@ -816,9 +889,7 @@ class AcpConnection:
                     if writer is None:
                         await source.aclose()
         except SessionNotFound:
-            session.lost = True
-            if not session.closed:
-                self._spawn(self._shutdown(session))
+            self._lose(session)
         except ConnectionError:
             pass
         except Exception:
@@ -838,6 +909,8 @@ class AcpConnection:
         if self.server.view is not None:
             viewed = await self.server.view(LoggedEvent(item.agent_id, item.seq, item.event.model_copy(deep=True)))
             event = LoggedEvent(item.agent_id, item.seq, viewed.event) if viewed is not None else None
+            if isinstance(item.event, ChildCreated) and (event is None or not isinstance(event.event, ChildCreated)):
+                tail.projector.withhold(item.event)
         replay = mode != "live" and not self.profile
         outputs = tail.projector.feed(event, replay=replay) if event is not None else []
         tail.cursor = item.seq
@@ -990,6 +1063,19 @@ class AcpConnection:
         except Exception:
             logger.debug("writer release failed", exc_info=True)
 
+    def _lose(self, session: _Session) -> None:
+        session.lost = True
+        if session.answered and not session.closed and session.gone is None:
+            session.gone = self._spawn(self._gone(session))
+
+    async def _gone(self, session: _Session) -> None:
+        try:
+            deleted = self.profile and await self.runtime.store.header(session.root_id.hex) is None
+            if deleted and not session.closed and session.root_id not in self.deleting:
+                await self._notice(session, "session_deleted", "Session deleted")
+        finally:
+            await self._shutdown(session)
+
     async def _shutdown(self, session: _Session) -> None:
         session.closed = True
         if self.sessions.get(session.root_id) is session:
@@ -1137,9 +1223,7 @@ class AcpConnection:
                 if self.profile:
                     await self._mirror(session, change)
         except SessionNotFound:
-            session.lost = True
-            if not session.closed:
-                self._spawn(self._shutdown(session))
+            self._lose(session)
         except ConnectionError:
             pass
         except Exception:
@@ -1171,6 +1255,17 @@ class AcpConnection:
             if session.mirror.get(status.agent_id) != update:
                 session.mirror[status.agent_id] = update
                 await self._update(status.parent_id, update)
+
+    async def _concealed(self, child_id: UUID) -> bool:
+        if self.server.view is None:
+            return False
+        status = await self.runtime.status(child_id)
+        while status.parent_id is not None:
+            parent = await self.runtime.status(status.parent_id)
+            if await self._viewed(status, parent.last_seq) is None:
+                return True
+            status = parent
+        return False
 
     async def _viewed(self, status: ActorStatus, parent_seq: int) -> tuple[str, str | None] | None:
         error = _failure(status)

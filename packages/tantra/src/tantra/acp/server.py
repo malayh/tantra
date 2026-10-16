@@ -18,7 +18,7 @@ from tantra.runtime import LocatedAsk, Runtime
 if TYPE_CHECKING:
     from tantra.acp.websocket import AcpWebSocket
 
-Operation = Literal["resume", "prompt", "cancel", "claim_writer", "answer", "set_model", "delete"]
+Operation = Literal["new", "resume", "prompt", "cancel", "claim_writer", "answer", "set_model", "delete"]
 
 
 @dataclass(frozen=True)

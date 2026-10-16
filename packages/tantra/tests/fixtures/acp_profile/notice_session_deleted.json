@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "6f1c2a8e-3b4d-4e5f-9a7b-1c2d3e4f5a6b",
+    "update": {
+      "sessionUpdate": "_tantra_notice",
+      "level": "warning",
+      "code": "session_deleted",
+      "message": "Session deleted"
+    }
+  }
+}

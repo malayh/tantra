@@ -157,7 +157,7 @@ async def test_child_completion_strict_request_replay(postgres_dsn: str, tmp_pat
         await seed(postgres_dsn, schema, 1, [], model)
         await seed_behavior(postgres_dsn, schema)
         fresh_requests, fresh_evidence = await _strict_child_run(postgres_dsn, schema, fresh)
-        drop_schema(postgres_dsn, schema)
+        await asyncio.to_thread(drop_schema, postgres_dsn, schema)
         await seed(postgres_dsn, schema, 1, [], model)
         await seed_behavior(postgres_dsn, schema)
         replay = RecordedProvider(None, recordings, endpoint, limits, identity)
@@ -168,7 +168,7 @@ async def test_child_completion_strict_request_replay(postgres_dsn: str, tmp_pat
         assert replay_evidence["child_stats"] == {"count": 3, "total": 60}
         assert not (recordings / "misses").exists()
     finally:
-        drop_schema(postgres_dsn, schema)
+        await asyncio.to_thread(drop_schema, postgres_dsn, schema)
 
 
 @pytest.mark.parametrize(("parent_text", "accepted"), [('"60"', True), ("61", False)])
@@ -207,7 +207,7 @@ async def test_child_parent_final_text(
             with pytest.raises(ModelBehaviorError, match="child parent returned '61'"):
                 await _strict_child_run(postgres_dsn, schema, provider, policy)
     finally:
-        drop_schema(postgres_dsn, schema)
+        await asyncio.to_thread(drop_schema, postgres_dsn, schema)
 
 
 async def test_child_oracle_rejects_failed_stats_tool(
@@ -238,7 +238,7 @@ async def test_child_oracle_rejects_failed_stats_tool(
         with pytest.raises(OracleError, match="did not read the fixture"):
             await _strict_child_run(postgres_dsn, schema, provider)
     finally:
-        drop_schema(postgres_dsn, schema)
+        await asyncio.to_thread(drop_schema, postgres_dsn, schema)
 
 
 async def test_behavior_scenarios_and_oracles(postgres_dsn: str) -> None:
@@ -313,4 +313,4 @@ async def test_behavior_scenarios_and_oracles(postgres_dsn: str) -> None:
     finally:
         for worker in workers:
             await asyncio.to_thread(worker.stop)
-        drop_schema(postgres_dsn, schema)
+        await asyncio.to_thread(drop_schema, postgres_dsn, schema)

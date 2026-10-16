@@ -14,7 +14,7 @@ _OTEL_VARS = (
     "OTEL_RESOURCE_ATTRIBUTES",
     "OTEL_SERVICE_NAME",
 )
-_INSTRUMENTATION_EXCLUDED_URLS = "api/health,api/acp"
+_INSTRUMENTATION_EXCLUDED_URLS = r"api/health,/api/acp(\?|$)"
 
 _logger_provider: Any = None
 

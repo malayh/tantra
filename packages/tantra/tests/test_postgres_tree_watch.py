@@ -15,6 +15,7 @@ from tantra.providers.fake import Sample
 from tantra.stores import postgres
 
 psycopg = pytest.importorskip("psycopg")
+sql = pytest.importorskip("psycopg.sql")
 
 
 class Worker(Agent):
@@ -127,3 +128,55 @@ async def test_a_non_owner_watches_the_tree_without_reading_journals(
     states = [change.actors[1].state for change in seen if len(change.actors) == 2]
     assert states.index("running") < states.index("finished")
     assert all(left != right for left, right in zip(seen, seen[1:], strict=False))
+
+
+async def test_an_expired_lease_turns_the_observed_tree_inactive(postgres_dsn: str, pg_schema: str) -> None:
+    release = asyncio.Event()
+    instances = []
+    for _ in range(2):
+        store = PostgresStore(postgres_dsn, schema=pg_schema)
+        coordinator = PostgresCoordinator(store, lease_ttl=2.0, request_timeout=5.0, catch_up_interval=0.02)
+        runtime = Runtime(script(release), store, [Root], default_model="m", coordinator=coordinator)
+        await runtime.start()
+        instances.append((store, runtime))
+    (_, owner), (_, observer) = instances
+    root_id = await owner.create(Root)
+    tree = observer.watch_tree(root_id)
+    pending: asyncio.Future[TreeChange] | None = None
+    try:
+        seen = [await anext(tree)]
+        async with owner.connect(root_id, writable=True) as connection:
+            await connection.send("go", command_id=uuid4())
+            await until(
+                tree,
+                seen,
+                lambda change: len(change.actors) == 2 and change.actors[1].active and not change.actors[0].active,
+            )
+        pending = asyncio.ensure_future(anext(tree))
+        while (await asyncio.wait({pending}, timeout=0.3))[0]:
+            seen.append(pending.result())
+            pending = asyncio.ensure_future(anext(tree))
+        assert seen[-1].actors[1].active
+        renewal = owner._renewals[root_id.hex]
+        renewal.cancel()
+        await asyncio.gather(renewal, return_exceptions=True)
+        async with await psycopg.AsyncConnection.connect(postgres_dsn, autocommit=True) as conn:
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {}.coordinator_roots SET expires_at=clock_timestamp()-interval '1 second' WHERE root_id=%s"
+                ).format(sql.Identifier(pg_schema)),
+                (root_id.hex,),
+            )
+        change = await asyncio.wait_for(pending, 3)
+        assert not any(actor.active for actor in change.actors)
+        assert change == TreeChange(None, "root", tuple(await observer.tree_status(root_id)))
+        assert change.actors[1].state == "running"
+    finally:
+        release.set()
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        await tree.aclose()
+        for store, runtime in reversed(instances):
+            await runtime.aclose()
+            await store.close()

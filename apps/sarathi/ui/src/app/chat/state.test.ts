@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  TantraAcpError,
   apply,
   askOf,
   empty,
@@ -18,6 +19,8 @@ import {
   attachmentsOf,
   composerDisabled,
   createChatStore,
+  fromDroppedSession,
+  isLoading,
   isNearBottom,
   isReady,
   stopOffered,
@@ -193,6 +196,40 @@ test("a session is ready only while marked ready and open in the client", () => 
     .setClient({ connection: "open", sessions: { [ROOT]: { writer: false, cursor: "3.0", paused: false } } });
   store.getState().reset(ROOT);
   assert.equal(isReady(store.getState(), ROOT), false);
+});
+
+test("a chat dropped while open shows its banner instead of the loader", () => {
+  const store = createChatStore();
+  store.getState().reset(ROOT);
+  assert.equal(isLoading(store.getState(), ROOT), true);
+  store
+    .getState()
+    .setClient({ connection: "open", sessions: { [ROOT]: { writer: true, cursor: "3.0", paused: false } } });
+  store.getState().setReady(ROOT);
+  assert.equal(isLoading(store.getState(), ROOT), false);
+  store.getState().setClient({ connection: "open", sessions: {} });
+  store.getState().setBanner("This chat no longer exists.");
+  assert.equal(isReady(store.getState(), ROOT), false);
+  assert.equal(isLoading(store.getState(), ROOT), false);
+  store.getState().setBanner(null);
+  assert.equal(isLoading(store.getState(), ROOT), true);
+});
+
+test("uncertain and closed prompts are moot once their session was dropped", () => {
+  const store = createChatStore();
+  const uncertain = new TantraAcpError("uncertain", "Prompt outcome unknown");
+  const closed = new TantraAcpError("closed", "Session closed");
+  const fenced = new TantraAcpError("writer_required", "Writer required");
+  store
+    .getState()
+    .setClient({ connection: "open", sessions: { [ROOT]: { writer: true, cursor: null, paused: false } } });
+  assert.equal(fromDroppedSession(store.getState(), ROOT, uncertain), false);
+  assert.equal(fromDroppedSession(store.getState(), ROOT, closed), false);
+  store.getState().setClient({ connection: "open", sessions: {} });
+  assert.equal(fromDroppedSession(store.getState(), ROOT, uncertain), true);
+  assert.equal(fromDroppedSession(store.getState(), ROOT, closed), true);
+  assert.equal(fromDroppedSession(store.getState(), ROOT, fenced), false);
+  assert.equal(fromDroppedSession(store.getState(), ROOT, new Error("x")), false);
 });
 
 test("near-bottom threshold follows at 80px and stops above it", () => {

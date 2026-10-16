@@ -88,7 +88,7 @@ async def store(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIterator
         await close_tracked_runtimes()
         await close_store(made)
         if dsn:
-            drop_schema(dsn, schema)
+            await asyncio.to_thread(drop_schema, dsn, schema)
 
 
 async def close_store(store: Store) -> None:
@@ -100,6 +100,7 @@ async def close_store(store: Store) -> None:
 def drop_schema(dsn: str, schema: str) -> None:
     """Discard a per-test schema so an external `TANTRA_POSTGRES_DSN` does not accumulate them."""
     with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET lock_timeout = '10s'")
         conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 
 

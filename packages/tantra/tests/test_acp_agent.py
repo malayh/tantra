@@ -450,7 +450,7 @@ async def test_policy_denial_and_unknown_sessions_return_resource_not_found() ->
 
 async def test_prompt_needing_writer_is_denied_by_the_prompt_policy() -> None:
     async def read_only(access: AcpAccess) -> bool:
-        return access.operation == "resume"
+        return access.operation in ("new", "resume")
 
     runtime, server = serve(FakeProvider([]), policy=read_only)
     async with Client(server) as client:
@@ -459,6 +459,32 @@ async def test_prompt_needing_writer_is_denied_by_the_prompt_policy() -> None:
             await client.prompt(session_id, "hi")
     assert denied.value.code == -32002
     assert not [event for event in await journal(runtime, session_id) if isinstance(event, InputQueued)]
+    await runtime.aclose()
+
+
+async def test_a_read_only_policy_cannot_create_sessions() -> None:
+    accesses: list[AcpAccess] = []
+
+    async def read_only(access: AcpAccess) -> bool:
+        accesses.append(access)
+        return access.operation == "resume"
+
+    runtime, server = serve(FakeProvider([]), policy=read_only)
+    async with Client(server) as plain, Client(server, profile=True) as profiled:
+        answers = []
+        for client in (plain, profiled):
+            with pytest.raises(RpcError) as denied:
+                await client.new("/work/project")
+            answers.append((denied.value.code, denied.value.message, denied.value.data))
+        assert not plain.connection.sessions and not profiled.connection.sessions
+    assert answers == [(-32002, "Session not found", None)] * 2
+    assert await runtime.store.list() == []
+    [first, _] = accesses
+    assert first.operation == "new"
+    assert first.root is not first.actor and first.root == first.actor
+    assert (first.root.parent_id, first.root.agent) == (None, "bot")
+    assert first.root.id == first.root.root_id
+    assert first.root.metadata == {"user": "u", "acp_cwd": "/work/project"}
     await runtime.aclose()
 
 
@@ -791,6 +817,27 @@ async def test_session_list_pages_roots_with_a_cursor() -> None:
     listed = [item["sessionId"] for item in first["sessions"] + second["sessions"]]
     assert listed == [str(root) for root in reversed(roots)]
     assert invalid.value.code == -32602
+    await runtime.aclose()
+
+
+async def test_a_list_cursor_outside_the_callers_scope_is_invalid() -> None:
+    class Other(Agent):
+        pass
+
+    runtime = Runtime(FakeProvider([]), MemoryStore(), [Bot, Other], default_model="m")
+    server = AcpServer(runtime, agent=Bot, scope=scope, policy=allow, name="bot")
+    mine = await runtime.create(Bot, metadata={"user": "u", "acp_cwd": "/elsewhere"})
+    foreign = await runtime.create(Bot, metadata={"user": "other", "acp_cwd": "/work"})
+    alien = await runtime.create(Other, metadata={"user": "u", "acp_cwd": "/work"})
+    async with Client(server) as client:
+        answers = []
+        for cursor in (foreign.hex, alien.hex, uuid4().hex, "nope"):
+            with pytest.raises(RpcError) as invalid:
+                await client.call("session/list", {"cursor": cursor})
+            answers.append((invalid.value.code, invalid.value.message, invalid.value.data))
+        listed = await client.call("session/list", {"cwd": "/work", "cursor": mine.hex})
+    assert set(answers) == {(-32602, "Invalid cursor", None)}
+    assert listed == {"sessions": []}
     await runtime.aclose()
 
 

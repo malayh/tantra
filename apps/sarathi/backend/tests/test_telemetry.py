@@ -45,7 +45,9 @@ def test_http_instrumentation_excludes_websocket_query_strings() -> None:
     excluded = parse_excluded_urls(_INSTRUMENTATION_EXCLUDED_URLS)
 
     assert excluded.url_disabled("ws://localhost/api/acp?ticket=redacted")
+    assert excluded.url_disabled("ws://localhost/api/acp")
     assert excluded.url_disabled("http://localhost/api/health")
+    assert not excluded.url_disabled("http://localhost/api/acp/ticket")
     assert not excluded.url_disabled("http://localhost/api/memory")
 
 

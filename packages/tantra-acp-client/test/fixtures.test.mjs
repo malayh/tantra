@@ -132,6 +132,63 @@ test("cursor, queue, notice, and mirror fixtures reach onUpdate", async () => {
   assert.deepEqual(state().sessions, {});
 });
 
+test("the session_deleted fixture drops the tree, reports not_found, then reaches onUpdate", async () => {
+  const errors = [];
+  const seen = [];
+  let current = () => ({ sessions: {} });
+  const { agent, client, state } = await harness({
+    onError: (error) => errors.push(error),
+    onUpdate: (sessionId, update) => {
+      seen.push({
+        sessionId,
+        update,
+        errors: errors.map((error) => error.code),
+        sessions: Object.keys(current().sessions),
+      });
+    },
+  });
+  current = state;
+  agent.handlers["session/prompt"] = () => {};
+  push(agent, fixtures.mirror_subagent_update);
+  await client.resume(CHILD);
+  const sent = client.prompt(ROOT, [{ type: "text", text: "a" }]);
+  await until(() => agent.sent("session/prompt").length === 1);
+  push(agent, fixtures.notice_session_deleted);
+  await until(() => seen.at(-1)?.update.sessionUpdate === "_tantra_notice");
+  assert.deepEqual(state().sessions, {});
+  await assert.rejects(sent, { code: "uncertain", commandId: sent.commandId });
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].code, "not_found");
+  assert.equal(errors[0].sessionId, ROOT);
+  const { sessionId, update, ...observed } = seen.at(-1);
+  assert.deepEqual(
+    { sessionId, update },
+    fixtures.notice_session_deleted.params,
+  );
+  assert.deepEqual(observed, { errors: ["not_found"], sessions: [] });
+  assert.equal(client.parents.size, 0);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(agent.sent("session/close"), []);
+});
+
+test("a session_deleted notice for a session that is not open is only forwarded", async () => {
+  const errors = [];
+  const { agent, updates, state } = await harness({
+    onError: (error) => errors.push(error),
+  });
+  const notice = {
+    ...fixtures.notice_session_deleted,
+    params: { ...fixtures.notice_session_deleted.params, sessionId: CHILD },
+  };
+  push(agent, notice);
+  await until(() => updates.length === 1);
+  assert.deepEqual(updates[0], notice.params);
+  assert.deepEqual(Object.keys(state().sessions), [ROOT]);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(errors, []);
+  assert.deepEqual(agent.sent("session/close"), []);
+});
+
 test("response fixtures resolve and error fixtures map to codes", async () => {
   const agent = new FakeAgent();
   const responses = {

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import threading
 import uuid
 from collections.abc import AsyncIterator
@@ -26,6 +28,7 @@ from tantra.events import (
     TextPart,
     ToolCallCompleted,
     ToolCallRequested,
+    ToolProgress,
     TurnCompleted,
     TurnFailed,
     TurnStarted,
@@ -33,11 +36,20 @@ from tantra.events import (
 )
 from tantra.hooks import Hook
 from tantra.loop import RetryConfig, TurnEngine
-from tantra.providers.base import ModelLimits, ProviderEvent, SampleRequest, StreamEnd, ToolCall, ToolResultMessage
+from tantra.providers.base import (
+    AssistantMessage,
+    Message,
+    ModelLimits,
+    ProviderEvent,
+    SampleRequest,
+    StreamEnd,
+    ToolCall,
+    ToolResultMessage,
+)
 from tantra.providers.fake import FAKE_LIMITS, FakeProvider, Sample
 from tantra.skills import SkillInfo
 from tantra.stores.memory import MemoryStore
-from tantra.tools import tool
+from tantra.tools import Context, tool
 from tantra.tracing import NULL_TRACER
 
 
@@ -763,3 +775,182 @@ async def test_persisted_delta_from_an_ordinary_retry_blocks_later_overflow_reco
     assert len([event for event in journal if isinstance(event, TextDelta)]) == 1
     assert len([event for event in journal if isinstance(event, CompactionApplied)]) == 0
     assert tracer.attempts == [2]
+
+
+CALL_ID = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+
+
+@tool
+async def echo(value: str) -> str:
+    return value
+
+
+class Echo(Agent):
+    tools = [echo]
+
+
+def requested_ids(journal: list[SessionEvent]) -> list[str]:
+    return [event.call_id for event in journal if isinstance(event, ToolCallRequested)]
+
+
+def paired(messages: list[Message]) -> list[str]:
+    ids = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, AssistantMessage):
+            continue
+        for item in message.tool_calls:
+            results = [
+                (position, other)
+                for position, other in enumerate(messages)
+                if isinstance(other, ToolResultMessage) and other.call_id == item.id
+            ]
+            assert len(results) == 1 and results[0][0] > index
+            assert results[0][1].content == json.loads(item.args)["value"]
+            ids.append(item.id)
+    assert len(ids) == sum(isinstance(message, ToolResultMessage) for message in messages)
+    return ids
+
+
+async def test_call_ids_repeated_across_samples_are_rewritten_and_stay_paired() -> None:
+    contexts: list[str] = []
+    hooked: list[str] = []
+
+    @tool
+    async def traced(value: str, ctx: Context) -> str:
+        contexts.append(ctx.call_id)
+        await ctx.emit(value)
+        return value
+
+    class Recorder(Hook):
+        async def before_tool(self, call: ToolCallRequested, turn: TurnContext) -> None:
+            hooked.append(call.call_id)
+
+    class Bot(Agent):
+        tools = [traced]
+
+    samples = [
+        Sample(tool_calls=[call("traced", '{"value":"one"}', "call_0")]),
+        Sample(tool_calls=[call("traced", '{"value":"two"}', "call_0"), call("traced", '{"value":"three"}', "call_0")]),
+        Sample(text="done"),
+    ]
+    provider = FakeProvider(samples)
+    tracer = ToolTracer()
+    engine, store, queued = await build([], Bot, provider=provider, hooks=[Recorder()], tracer=tracer)
+
+    terminal = await engine.run(queued)
+    journal = await events(store, engine.header.id)
+    requested = requested_ids(journal)
+    completed = [(event.call_id, event.result) for event in journal if isinstance(event, ToolCallCompleted)]
+
+    assert len(set(requested)) == 3
+    assert requested[0] == "call_0"
+    assert all(CALL_ID.match(call_id) for call_id in requested)
+    assert sorted(completed) == sorted(zip(requested, ["one", "two", "three"], strict=True))
+    assert sorted(contexts) == sorted(hooked) == sorted(requested)
+    assert sorted(event.call_id for event in journal if isinstance(event, ToolProgress)) == sorted(requested)
+    assert paired(provider.requests[-1].messages) == requested
+    assert len(tracer.started) == 3
+    assert [item.id for sample in samples for item in sample.tool_calls] == ["call_0"] * 3
+    assert isinstance(terminal, TurnCompleted)
+
+
+async def test_a_repeated_call_id_with_invalid_json_does_not_skip_its_valid_twin() -> None:
+    ran: list[str] = []
+
+    @tool
+    async def record(value: str) -> str:
+        ran.append(value)
+        return value
+
+    class Bot(Agent):
+        tools = [record]
+
+    engine, store, queued = await build(
+        [
+            Sample(tool_calls=[call("record", "{bad", "call_0"), call("record", '{"value":"ok"}', "call_0")]),
+            Sample(text="done"),
+        ],
+        Bot,
+    )
+
+    terminal = await engine.run(queued)
+    journal = await events(store, engine.header.id)
+    requested = requested_ids(journal)
+    completed = [
+        (event.call_id, event.result, event.is_error) for event in journal if isinstance(event, ToolCallCompleted)
+    ]
+
+    assert ran == ["ok"]
+    assert requested[0] == "call_0" and len(set(requested)) == 2
+    assert completed[0][0] == "call_0" and completed[0][2]
+    assert completed[0][1].startswith("invalid JSON arguments")
+    assert completed[1:] == [(requested[1], "ok", False)]
+    assert isinstance(terminal, TurnCompleted)
+
+
+async def test_a_call_id_repeated_in_a_later_turn_is_rewritten_against_the_journal() -> None:
+    provider = FakeProvider(
+        [
+            Sample(tool_calls=[call("echo", '{"value":"one"}', "call_0")]),
+            Sample(text="first"),
+            Sample(tool_calls=[call("echo", '{"value":"two"}', "call_0")]),
+            Sample(text="second"),
+        ]
+    )
+    engine, store, queued = await build([], Echo, provider=provider)
+    await engine.run(queued)
+    header = await store.header(engine.header.id)
+    assert header is not None
+    again = InputQueued(command_id=uuid.uuid4().hex, input="again")
+    await store.enqueue(header.id, again)
+    second = TurnEngine(
+        store=store,
+        provider=provider,
+        header=header,
+        agent=Echo,
+        tools={entry.name: entry for entry in Echo.tools},
+        model="fake/model",
+        retry=RetryConfig(max_attempts=1),
+    )
+
+    terminal = await second.run(again)
+    requested = requested_ids(await events(store, header.id))
+
+    assert requested[0] == "call_0" and len(set(requested)) == 2
+    assert paired(provider.requests[-1].messages) == requested
+    assert isinstance(terminal, TurnCompleted)
+
+
+async def test_distinct_call_ids_are_kept_byte_identical() -> None:
+    engine, store, queued = await build(
+        [
+            Sample(tool_calls=[call("echo", '{"value":"a"}', "toolu_01"), call("echo", '{"value":"b"}', "c-2")]),
+            Sample(tool_calls=[call("echo", '{"value":"c"}', "call_0")]),
+            Sample(text="done"),
+        ],
+        Echo,
+    )
+
+    await engine.run(queued)
+
+    assert requested_ids(await events(store, engine.header.id)) == ["toolu_01", "c-2", "call_0"]
+
+
+async def test_rewritten_call_ids_are_deterministic_for_one_turn() -> None:
+    def script() -> list[Sample]:
+        return [
+            Sample(tool_calls=[call("echo", '{"value":"a"}', "call_0"), call("echo", '{"value":"b"}', "call_0")]),
+            Sample(tool_calls=[call("echo", '{"value":"c"}', "call_0")]),
+            Sample(text="done"),
+        ]
+
+    first, first_store, queued = await build(script(), Echo)
+    second, second_store, _ = await build(script(), Echo)
+
+    await first.run(queued)
+    await second.run(queued)
+    left = requested_ids(await events(first_store, first.header.id))
+    right = requested_ids(await events(second_store, second.header.id))
+
+    assert left == right
+    assert left[0] == "call_0" and len(set(left)) == 3

@@ -2284,3 +2284,51 @@ async def test_every_input_path_records_its_sender_and_origin_with_unchanged_tex
         (f"[agent {root_uuid}] more", root_id.hex, "message"),
     ]
     await runtime.aclose()
+
+
+async def test_spawns_repeating_one_call_id_across_samples_create_two_children() -> None:
+    class Worker(Agent):
+        model = "worker"
+
+    class Root(Agent):
+        model = "root"
+        subagents = [Worker]
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.root_calls = 0
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            if req.model == "root":
+                self.root_calls += 1
+                if self.root_calls <= 2:
+                    task = "a" if self.root_calls == 1 else "b"
+                    yield StreamEnd(
+                        tool_calls=[call("spawn", json.dumps({"agent_name": "worker", "input": task}), "call_0")]
+                    )
+                else:
+                    yield StreamEnd(text="spawned")
+                return
+            yield StreamEnd(text="child done")
+
+    store = MemoryStore()
+    runtime = Runtime(Provider(), store, [Root])
+    root_id = await runtime.create(Root)
+    async with runtime.connect(root_id, writable=True) as connection:
+        result = await asyncio.wait_for(connection.prompt("start", command_id=uuid4()), timeout=2)
+    events = await journal(store, root_id.hex)
+    children = await store.list(parent_id=root_id.hex)
+    await wait_idle(runtime, *(child.id for child in children))
+    completed = [event for event in events if isinstance(event, ToolCallCompleted)]
+    created = [event for event in events if isinstance(event, ChildCreated)]
+    inputs = [
+        next(event.input for event in await journal(store, child.id) if isinstance(event, InputQueued))
+        for child in children
+    ]
+
+    assert result.text == "spawned"
+    assert not any(event.is_error for event in completed)
+    assert len(children) == 2 and sorted(inputs) == ["a", "b"]
+    assert len({event.call_id for event in created}) == 2
+    assert sorted(event.call_id for event in completed) == sorted(event.call_id for event in created)
+    await runtime.aclose()

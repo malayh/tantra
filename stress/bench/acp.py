@@ -139,7 +139,7 @@ def verify_idle(metrics: dict[str, Any]) -> None:
 
 
 def verify_active(metrics: dict[str, Any], writers: int) -> None:
-    expected = {"bind": writers, "policy_resume": writers, "policy_claim_writer": 2 * writers, "policy_prompt": writers}
+    expected = {"bind": writers, "policy_resume": writers, "policy_claim_writer": writers, "policy_prompt": writers}
     assert metrics["auth"] == {key: value for key, value in expected.items() if value}, metrics["auth"]
     assert not {"1011", "1013"} & set(metrics["transport"]["closes"]), metrics["transport"]["closes"]
     assert metrics["transport"]["frames"] > 0

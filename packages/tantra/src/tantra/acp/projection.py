@@ -92,7 +92,12 @@ class QueueChanged:
     entries: list[dict[str, Any]]
 
 
-Output = dict[str, Any] | AskPending | AskResolved | ChildAnnounced | TurnState | UsageSample | QueueChanged
+@dataclass(frozen=True)
+class Withheld:
+    pass
+
+
+Output = dict[str, Any] | AskPending | AskResolved | ChildAnnounced | TurnState | UsageSample | QueueChanged | Withheld
 
 
 def entity_id(value: str) -> str:
@@ -139,6 +144,8 @@ class Projector:
         self._calls: dict[str, ToolCallRequested] = {}
         self._tools: dict[str, str] = {}
         self._children: set[str] = set()
+        self._withheld: set[str] = set()
+        self._withheld_calls: set[str] = set()
         self._open: list[tuple[str, str]] = []
         self._deltas: dict[tuple[str, str], str] = {}
         self._queue: dict[str, dict[str, Any]] = {}
@@ -152,6 +159,10 @@ class Projector:
     def queue(self) -> list[dict[str, Any]]:
         return list(self._queue.values())
 
+    def withhold(self, created: ChildCreated) -> None:
+        self._withheld.add(entity_id(created.child_id))
+        self._withheld_calls.add(created.call_id)
+
     def feed(self, item: LoggedEvent, *, replay: bool = False) -> list[Output]:
         event = item.event
         if replay and isinstance(event, TextDelta | ReasoningDelta):
@@ -162,6 +173,11 @@ class Projector:
                 self._deltas[key] = self._deltas.get(key, "") + event.text
             return []
         outputs = self._project(item.seq, event)
+        if (
+            isinstance(event, ToolCallRequested | ToolCallStarted | ToolProgress | ToolCallCompleted)
+            and event.call_id in self._withheld_calls
+        ):
+            outputs = [Withheld() for _ in outputs]
         if not replay or not outputs:
             return outputs
         if isinstance(event, TextPart | ReasoningPart):
@@ -236,6 +252,9 @@ class Projector:
             return [dump(update)]
         if isinstance(event, ToolCallRequested):
             self._tools[event.call_id] = self._tool_id(event.sample_id, event.call_id)
+            self._withheld_calls.discard(event.call_id)
+            if event.name in ("send", "status") and entity_id(str(event.args.get("agent_id"))) in self._withheld:
+                self._withheld_calls.add(event.call_id)
             if event.name in self.hidden:
                 self._calls[event.call_id] = event
                 return []
@@ -282,6 +301,10 @@ class Projector:
         return []
 
     def _synthetic(self, text: str, message_id: str) -> list[Output] | None:
+        for pattern in (_TURN_ENDED, _FINISHED, _MESSAGE):
+            match = pattern.match(text)
+            if match is not None and match[1] in self._withheld:
+                return [Withheld()]
         ended = _TURN_ENDED.match(text)
         if ended is not None and ended[1] in self._children:
             return []
@@ -299,6 +322,8 @@ class Projector:
         if origin == "user":
             return None
         sender_id = entity_id(sender) if sender is not None else None
+        if origin in ("message", "finished", "turn_ended") and sender_id in self._withheld:
+            return [Withheld()]
         parent = str(self.parent_id) if self.parent_id is not None else None
         child = sender_id in self._children
         if origin == "spawn" and sender_id is not None and sender_id == parent:
@@ -410,6 +435,7 @@ class Projector:
         self._turn = None
         self._calls = {}
         self._tools = {}
+        self._withheld_calls = set()
         resolved: list[Output] = [AskResolved(ask_id) for ask_id in self.asks]
         self.asks = {}
         if isinstance(event, TurnCompleted):

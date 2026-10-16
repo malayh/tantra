@@ -87,6 +87,7 @@ export type SocketLike = Pick<
 export interface ClientTiming {
   reconnectBaseMs?: number;
   reconnectCapMs?: number;
+  reconnectStableMs?: number;
 }
 
 interface RequestBase {
@@ -159,8 +160,11 @@ export class TantraAcpClient {
   private readonly cwd: string;
   private readonly baseMs: number;
   private readonly capMs: number;
+  private readonly stableMs: number;
   private readonly sessions = new Map<string, Session>();
   private readonly parents = new Map<string, string>();
+  private readonly pendingResumes = new Map<string, number>();
+  private readonly deferredClose = new Set<string>();
   private connection: ConnectionState = "closed";
   private socket: SocketLike | null = null;
   private peer: Peer | null = null;
@@ -171,12 +175,16 @@ export class TantraAcpClient {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private wake: ((error: unknown) => void) | undefined;
   private halt: TantraAcpError = closed("Disconnected");
+  private failures = 0;
+  private waits = -1;
+  private openedAt = 0;
 
   constructor(options: TantraAcpClientOptions) {
     this.options = options;
     this.cwd = options.cwd ?? "/";
     this.baseMs = options.timing?.reconnectBaseMs ?? 1_000;
     this.capMs = options.timing?.reconnectCapMs ?? 30_000;
+    this.stableMs = options.timing?.reconnectStableMs ?? 10_000;
   }
 
   connect(): Promise<void> {
@@ -212,13 +220,31 @@ export class TantraAcpClient {
     const existing = this.sessions.has(sessionId);
     const opening = this.open(sessionId, options.mode ?? "read", true);
     const target = this.sessions.get(sessionId);
-    return opening.catch((error: unknown) => {
-      if (this.sessions.get(sessionId) === target) {
-        if (existing) this.detach(sessionId);
-        else this.drop(sessionId, false);
-      }
-      throw error;
-    });
+    const generation = this.generation;
+    this.pendingResumes.set(
+      sessionId,
+      (this.pendingResumes.get(sessionId) ?? 0) + 1,
+    );
+    return opening.then(
+      (result) => {
+        this.resumed(sessionId, generation);
+        if (this.sessions.get(sessionId) !== target)
+          throw closed("Session closed", { sessionId });
+        return result;
+      },
+      (error: unknown) => {
+        this.resumed(sessionId, generation);
+        if (this.sessions.get(sessionId) === target) {
+          if (existing) this.detach(sessionId);
+          else {
+            this.drop(sessionId, false);
+            if (this.pendingResumes.has(sessionId))
+              this.deferredClose.add(sessionId);
+          }
+        }
+        throw error;
+      },
+    );
   }
 
   close(sessionId: string): Promise<EmptyResult> {
@@ -310,23 +336,26 @@ export class TantraAcpClient {
 
   private async run(epoch: number, reconnecting: boolean): Promise<void> {
     this.setConnection("connecting");
-    let failures = 0;
-    let waits = reconnecting ? 0 : -1;
+    if (!reconnecting) {
+      this.failures = 0;
+      this.waits = -1;
+    }
     for (;;) {
       try {
-        if (waits >= 0) await this.backoff(waits);
-        waits++;
+        if (this.waits >= 0) await this.backoff(this.waits);
+        this.waits++;
         await this.dial(epoch);
         await this.resumeAll();
         this.current(epoch);
         if (!this.peer) throw closed("Connection lost");
+        this.openedAt = globalThis.performance.now();
         this.setConnection("open");
         for (const sessionId of [...this.sessions.keys()]) this.pump(sessionId);
         return;
       } catch (error) {
         if (epoch !== this.epoch) throw this.halt;
         this.retire(closed("Connection lost"));
-        if (++failures === MAX_DIALS)
+        if (++this.failures === MAX_DIALS)
           throw this.fail(
             new TantraAcpError("dial_failed", "Could not connect", {
               cause: error,
@@ -447,6 +476,7 @@ export class TantraAcpClient {
     };
     if (mode === "write") params["_meta"] = { tantra: { mode } };
     return this.rpc<ResumeSessionResult>("session/resume", params, () => {
+      if (this.sessions.get(sessionId) !== target) return;
       if (replace && !this.parents.has(sessionId))
         for (const child of this.descendants(sessionId))
           this.drop(child, false);
@@ -490,6 +520,16 @@ export class TantraAcpClient {
         target.writer = false;
         this.emit();
       }
+    }
+    if (
+      target &&
+      update.sessionUpdate === "_tantra_notice" &&
+      update.code === "session_deleted"
+    ) {
+      this.drop(sessionId, true);
+      this.report(
+        new TantraAcpError("not_found", "Session deleted", { sessionId }),
+      );
     }
     await this.options.onUpdate(sessionId, update);
     if (
@@ -650,8 +690,22 @@ export class TantraAcpClient {
       if (target.writer) target.paused = true;
       target.writer = false;
     }
-    this.retire(closed("Connection lost"));
-    if (this.connection === "open") void this.start(true).catch(() => {});
+    const reason = closed("Connection lost");
+    this.retire(reason);
+    if (this.connection === "open") {
+      if (globalThis.performance.now() - this.openedAt >= this.stableMs) {
+        this.failures = 0;
+        this.waits = 0;
+      } else if (++this.failures === MAX_DIALS) {
+        this.fail(
+          new TantraAcpError("dial_failed", "Could not connect", {
+            cause: reason,
+          }),
+        );
+        return;
+      }
+      void this.start(true).catch(() => {});
+    }
     this.emit();
   }
 
@@ -662,6 +716,8 @@ export class TantraAcpClient {
     this.socket = null;
     this.peer = null;
     this.chain = Promise.resolve();
+    this.pendingResumes.clear();
+    this.deferredClose.clear();
     peer?.close(reason);
     if (socket && socket.readyState < 2) socket.close(1000);
   }
@@ -691,9 +747,25 @@ export class TantraAcpClient {
   private detach(sessionId: string): Promise<EmptyResult> {
     this.drop(sessionId, !this.parents.has(sessionId));
     if (this.connection !== "open") return Promise.resolve({});
+    if (this.pendingResumes.has(sessionId)) {
+      this.deferredClose.add(sessionId);
+      return Promise.resolve({});
+    }
     const closing = this.rpc<EmptyResult>("session/close", { sessionId });
     closing.catch(() => {});
     return closing;
+  }
+
+  private resumed(sessionId: string, generation: number): void {
+    if (generation !== this.generation) return;
+    const pending = (this.pendingResumes.get(sessionId) ?? 1) - 1;
+    if (pending > 0) {
+      this.pendingResumes.set(sessionId, pending);
+      return;
+    }
+    this.pendingResumes.delete(sessionId);
+    if (this.deferredClose.delete(sessionId) && !this.sessions.has(sessionId))
+      this.rpc("session/close", { sessionId }).catch(() => {});
   }
 
   private drop(sessionId: string, descendants: boolean): void {

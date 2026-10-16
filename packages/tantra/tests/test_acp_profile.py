@@ -9,7 +9,7 @@ import types
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import pytest
 from acp_support import VALIDATOR, Client, Scripted, cursor_of, reduce
@@ -27,6 +27,7 @@ from tantra.events import (
     InputQueued,
     LoggedEvent,
     ReasoningDelta,
+    ToolCallCompleted,
     TurnCancelled,
     TurnCompleted,
     TurnFailed,
@@ -136,6 +137,21 @@ class HeldTransport:
         if '"session_info_update"' in frame and not self.release.is_set():
             self.held.set()
             await self.release.wait()
+        await self.inner.send(frame)
+
+    async def receive(self) -> str | None:
+        return await self.inner.receive()
+
+    async def close(self) -> None:
+        await self.inner.close()
+
+
+class SlowTransport:
+    def __init__(self, inner: Transport) -> None:
+        self.inner = inner
+
+    async def send(self, frame: str) -> None:
+        await asyncio.sleep(0.01)
         await self.inner.send(frame)
 
     async def receive(self) -> str | None:
@@ -676,6 +692,169 @@ async def test_children_are_mirrored_and_delivered_only_when_resumed() -> None:
     await runtime.aclose()
 
 
+async def test_a_child_resume_checks_the_root_and_policy_before_the_mode() -> None:
+    async def owner_only_children(access: AcpAccess) -> bool:
+        return access.actor.id == access.root.id or access.auth.principal != "guest"
+
+    provider = Scripted(
+        root=[Sample(tool_calls=calls("s1", "spawn", agent_name="worker", input="x")), Sample(text="a")],
+        worker=[Sample(text="w")],
+    )
+    runtime, server = serve(provider, [Root], policy=owner_only_children)
+    async with (
+        Client(server, profile=True) as owner,
+        Client(server, AcpAuth(principal="guest"), profile=True) as guest,
+        Client(server, profile=True) as stranger,
+    ):
+        root = await owner.new()
+        await owner.prompt(root, "go")
+        [worker] = await owner.until(lambda: list(mirror(owner, root)))
+        await owner.idle(root)
+        await guest.resume(root)
+        answers = []
+        for client in (guest, stranger):
+            for target in (worker, str(uuid4())):
+                for mode in ("write", "admin"):
+                    with pytest.raises(RpcError) as failed:
+                        await client.resume(target, **tantra(mode=mode))
+                    answers.append((failed.value.code, failed.value.message, failed.value.data))
+        with pytest.raises(RpcError) as writable:
+            await owner.resume(worker, **tantra(mode="write"))
+    assert set(answers) == {(-32002, "Session not found", None)}
+    assert writable.value.code == -32602
+    await runtime.aclose()
+
+
+async def test_only_other_profile_connections_are_told_about_a_deletion() -> None:
+    provider = GatedScripted(
+        "worker",
+        root=[spawning(("worker", "scout")), Sample(text="spawned")],
+        worker=[Sample(text="still digging")],
+    )
+    runtime, server = serve(provider, [Root])
+    async with (
+        Client(server, profile=True) as deleter,
+        Client(server, profile=True, server_transport=SlowTransport) as watcher,
+        Client(server, profile=True) as bystander,
+        Client(server) as plain,
+    ):
+        session_id = await deleter.new()
+        kept = await bystander.new()
+        await deleter.prompt(session_id, "go")
+        [worker] = await deleter.until(
+            lambda: [k for k, u in mirror(deleter, session_id).items() if u["state"] == {"state": "running"}]
+        )
+        for client in (watcher, bystander, plain):
+            await client.resume(session_id)
+            await settle(client, session_id)
+        await watcher.resume(worker, replayFrom=after(None))
+        await settle(watcher, worker)
+        finish = runtime._finish_deletion
+
+        async def slow_finish(*args: Any) -> None:
+            await finish(*args)
+            await asyncio.sleep(0.05)
+
+        runtime._finish_deletion = slow_finish
+        assert await deleter.call("session/delete", {"sessionId": session_id}) == {}
+
+        async def stopped() -> bool:
+            clients = (deleter, watcher, bystander, plain)
+            return all(UUID(session_id) not in client.connection.sessions for client in clients)
+
+        await eventually(stopped)
+        await asyncio.sleep(0.1)
+        assert list(bystander.connection.sessions) == [UUID(kept)]
+        assert not watcher.connection.sessions
+    notice = {
+        "sessionUpdate": "_tantra_notice",
+        "level": "warning",
+        "code": "session_deleted",
+        "message": "Session deleted",
+    }
+    assert watcher.of(session_id, "_tantra_notice") == bystander.of(session_id, "_tantra_notice") == [notice]
+    assert [update for update in profile_only(watcher) if update["sessionUpdate"] == "_tantra_notice"] == [notice]
+    assert [update for update in profile_only(deleter) if update["sessionUpdate"] == "_tantra_notice"] == []
+    assert profile_only(plain) == []
+    await runtime.aclose()
+
+
+async def test_a_lost_session_is_reported_deleted_only_while_open_and_its_root_is_gone() -> None:
+    runtime, server = serve(Scripted(m=[]), [Bot])
+    watch_tree = runtime.watch_tree
+    triggers: dict[str, asyncio.Event] = {}
+
+    async def losing(root_id: UUID) -> Any:
+        tree = watch_tree(root_id)
+        try:
+            yield await anext(tree)
+            await triggers.setdefault(str(root_id), asyncio.Event()).wait()
+            raise acp_agent.SessionNotFound(root_id.hex)
+        finally:
+            await tree.aclose()
+
+    header = runtime.store.header
+    gated: set[str] = set()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def gone(actor: str) -> Any:
+        if actor in gated:
+            entered.set()
+            await release.wait()
+            return None
+        return await header(actor)
+
+    runtime.watch_tree = losing
+    runtime.store.header = gone
+    async with Client(server, profile=True) as owner, Client(server, profile=True) as client:
+        kept, closed = await owner.new(), await owner.new()
+        for session_id in (kept, closed):
+            triggers[session_id] = asyncio.Event()
+            await client.resume(session_id)
+            await settle(client, session_id)
+        triggers[kept].set()
+
+        async def lost() -> bool:
+            return UUID(kept) not in client.connection.sessions
+
+        await eventually(lost)
+        gated.add(UUID(closed).hex)
+        triggers[closed].set()
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        assert await client.call("session/close", {"sessionId": closed}) == {}
+        release.set()
+        await asyncio.sleep(0.05)
+        gated.clear()
+        assert list(client.connection.sessions) == []
+    assert [update for update in profile_only(client) if update["sessionUpdate"] == "_tantra_notice"] == []
+    assert await runtime.store.header(UUID(kept).hex) is not None
+    await runtime.aclose()
+
+
+async def test_a_deletion_while_a_resume_replays_fails_it_without_a_notice() -> None:
+    runtime, server = serve(Scripted(m=[]), [Bot])
+    status = runtime.status
+
+    async def deleting(agent_id: UUID) -> Any:
+        found = await status(agent_id)
+        await runtime.delete(agent_id, allow_active=True)
+        return found
+
+    async with Client(server, profile=True) as owner, Client(server, profile=True) as client:
+        session_id = await owner.new()
+        runtime.status = deleting
+        with pytest.raises(RpcError) as failed:
+            await client.resume(session_id)
+        del runtime.status
+        await owner.until(lambda: owner.of(session_id, "_tantra_notice"))
+        await asyncio.sleep(0.05)
+        assert not client.connection.sessions
+    assert (failed.value.code, failed.value.message, failed.value.data) == (-32002, "Session not found", None)
+    assert client.of(session_id) == []
+    assert [update["code"] for update in owner.of(session_id, "_tantra_notice")] == ["session_deleted"]
+    await runtime.aclose()
+
+
 async def test_lazily_resumed_children_count_toward_the_session_limit() -> None:
     provider = Scripted(
         root=[
@@ -794,6 +973,10 @@ async def captured_frames() -> list[Any]:
         writer._check_iteration = lease_lost
         await runtime._notify(UUID(root).hex)
         await fourth.until(lambda: LOST in fourth.of(root, "_tantra_writer"))
+        deleted = await second.new()
+        await third.resume(deleted)
+        await second.call("session/delete", {"sessionId": deleted})
+        await third.until(lambda: third.of(deleted, "_tantra_notice"))
         provider.gate.set()
     await runtime.aclose()
     return [frame for client in clients for frame in (*client.transport.sent, *client.transport.received)]
@@ -801,7 +984,7 @@ async def captured_frames() -> list[Any]:
 
 async def test_profile_fixtures_are_valid_and_match_real_messages() -> None:
     fixtures = {path.stem: json.loads(path.read_text()) for path in sorted(FIXTURES.glob("*.json"))}
-    assert len(fixtures) == 20
+    assert len(fixtures) == 21
     frames = await captured_frames()
     shapes = [shape(frame) for frame in frames]
     for name, fixture in fixtures.items():
@@ -901,6 +1084,109 @@ async def test_a_view_that_hides_a_child_hides_its_subtree_from_the_mirror() -> 
     assert set(mirror(client, root)) == {worker}
     assert [params for params in client.updates if params["sessionId"] in hidden] == []
     assert [params for params in client.updates if params["update"].get("sessionId") in hidden] == []
+    await runtime.aclose()
+
+
+async def test_a_hidden_child_leaks_no_lifecycle_input_and_cuts_still_hold() -> None:
+    async def hide_children(item: LoggedEvent) -> LoggedEvent | None:
+        return None if isinstance(item.event, ChildCreated) else item
+
+    provider = GatedScripted(
+        "worker", root=[], worker=[], mid=[Sample(text="digging", tool_calls=calls("m1", "missing"))]
+    )
+    runtime, server = serve(provider, [Root], view=hide_children)
+    command = uuid4()
+    async with Client(server, profile=True) as live:
+        root = await live.new()
+        worker = str(uuid5(UUID(root), f"{command.hex}:s0:spawn"))
+        provider.add(
+            "root",
+            spawning(("worker", "scout"), ("mid", "planner")),
+            Sample(
+                tool_calls=[
+                    *calls("t1", "send", agent_id=worker, input="secret-send"),
+                    *calls("t2", "send", agent_id=worker),
+                    *calls("t3", "status", agent_id=worker),
+                ]
+            ),
+            *[Sample(text=f"r{n}") for n in range(6)],
+        )
+        provider.add(
+            "worker",
+            Sample(text="working", tool_calls=calls("w1", "send", agent_id=root, input="secret-message")),
+            Sample(tool_calls=calls("w2", "finish", result="secret-result")),
+        )
+        await live.prompt(root, "go", **tantra(commandId=str(command)))
+
+        async def called() -> bool:
+            completed = [event for event in await journal(runtime, root) if isinstance(event, ToolCallCompleted)]
+            return {event.call_id for event in completed} >= {"t1", "t2", "t3"}
+
+        await eventually(called)
+        provider.gate.set()
+
+        async def settled() -> bool:
+            events = await journal(runtime, root)
+            started = [event for event in events if isinstance(event, TurnStarted)]
+            ended = [event for event in events if isinstance(event, TurnCompleted | TurnFailed)]
+            return len(started) == len(ended) == 4 and not reduce_journal(events).pending
+
+        await eventually(settled)
+        await live.idle(root, 4)
+    events = await journal(runtime, root)
+    lifecycle = [event.input for event in events if isinstance(event, TurnStarted) and event.input != "go"]
+    origins = {event.origin for event in events if isinstance(event, InputQueued)}
+    children = [str(status.agent_id) for status in await runtime.tree_status(UUID(root)) if status.parent_id]
+    outcomes = {event.call_id: event.is_error for event in events if isinstance(event, ToolCallCompleted)}
+    received = json.dumps(live.transport.received)
+    assert len(lifecycle) == 3 and len(children) == 2 and worker in children
+    assert {"message", "finished", "turn_ended"} <= origins
+    assert {key: outcomes[key] for key in ("t1", "t2", "t3")} == {"t1": False, "t2": True, "t3": False}
+    secrets = [*lifecycle, *children, "secret-message", "secret-result", "secret-send", "scout", "planner"]
+    assert [text for text in secrets if text in received] == []
+    assert live.of(root, "tool_call_update") == live.of(root, "session_message") == []
+    go = [{"type": "text", "text": "go"}]
+    assert [update["content"] for update in live.of(root, "user_message")] == [go]
+    assert [entry["content"] for update in live.of(root, "_tantra_queue_update") for entry in update["entries"]] == [go]
+    full = cursored(live, root)
+    assert increasing(full)
+    for cut in range(len(full) + 1):
+        resumed = await replay(server, root, after(cursor_of(full[cut - 1]) if cut else None))
+        assert full[:cut] + resumed == full, cut
+    await runtime.aclose()
+
+
+async def test_a_hidden_child_resumes_like_an_unknown_id() -> None:
+    async def hide_mid(item: LoggedEvent) -> LoggedEvent | None:
+        if isinstance(item.event, ChildCreated) and item.event.agent == "mid":
+            return None
+        return item
+
+    provider = Scripted(
+        root=[spawning(("mid", "planner"), ("worker", "scout")), *[Sample(text=f"r{n}") for n in range(8)]],
+        mid=[Sample(tool_calls=calls("m1", "spawn", agent_name="leaf", input="dig")), Sample(text="m2")],
+        leaf=[Sample(text="leaf done")],
+        worker=[Sample(text="worker done")],
+    )
+    provider.add("mid", Sample(text="m3"))
+    runtime, server = serve(provider, [Root], view=hide_mid)
+    async with Client(server, profile=True) as client:
+        root = await client.new()
+        await client.prompt(root, "go")
+
+        async def spawned() -> bool:
+            return len(await runtime.tree_status(UUID(root))) == 4
+
+        await eventually(spawned)
+        statuses = {status.agent: str(status.agent_id) for status in await runtime.tree_status(UUID(root))}
+        answers = []
+        for target in (statuses["mid"], statuses["leaf"], str(uuid4())):
+            with pytest.raises(RpcError) as failed:
+                await client.resume(target, replayFrom=after(None))
+            answers.append((failed.value.code, failed.value.message, failed.value.data))
+        assert await client.resume(statuses["worker"]) == {}
+        assert list(client.connection.sessions[UUID(root)].tails) == [UUID(root), UUID(statuses["worker"])]
+    assert answers == [(-32002, "Session not found", None)] * 3
     await runtime.aclose()
 
 
@@ -1338,4 +1624,178 @@ async def test_a_denied_write_resume_leaves_the_open_session_working() -> None:
         await guest.idle(session_id)
     assert denied.value.code == -32002
     assert guest.of(session_id, "agent_message")[-1]["content"] == [{"type": "text", "text": "still streaming"}]
+    await runtime.aclose()
+
+
+async def test_an_unavailable_write_resume_keeps_the_open_writer() -> None:
+    runtime, server = serve(Scripted(m=[Sample(text="after the failed swap")]), [Bot])
+    claim = runtime._claim
+
+    async def unavailable(connection: Any) -> None:
+        if connection.writable:
+            raise CoordinatorUnavailable("coordinator down")
+        await claim(connection)
+
+    async with Client(server, profile=True) as client:
+        session_id = await client.new()
+        await client.until(lambda: client.of(session_id, "_tantra_writer"))
+        session = client.connection.sessions[UUID(session_id)]
+        writer = session.writer
+        runtime._claim = unavailable
+        with pytest.raises(RpcError) as failed:
+            await client.resume(session_id, **tantra(mode="write"))
+        del runtime._claim
+        assert client.connection.sessions[UUID(session_id)] is session and not session.closed
+        assert session.writer is writer and writer is not None
+        await client.prompt(session_id, "hi")
+        await client.idle(session_id)
+    assert (failed.value.code, failed.value.data) == (-32603, {"tantra": {"code": "unavailable"}})
+    assert client.of(session_id, "_tantra_writer") == [CLAIMED]
+    assert client.of(session_id, "agent_message")[-1]["content"] == [{"type": "text", "text": "after the failed swap"}]
+    await runtime.aclose()
+
+
+async def test_a_cancelled_write_resume_keeps_the_open_writer() -> None:
+    runtime, server = serve(Scripted(m=[Sample(text="after the cancelled swap")]), [Bot])
+    claim = runtime._claim
+    claiming = asyncio.Event()
+
+    async def blocked(connection: Any) -> None:
+        if connection.writable:
+            claiming.set()
+            await asyncio.Future()
+        await claim(connection)
+
+    async with Client(server, profile=True) as client:
+        session_id = await client.new()
+        await client.until(lambda: client.of(session_id, "_tantra_writer"))
+        session = client.connection.sessions[UUID(session_id)]
+        writer = session.writer
+        runtime._claim = blocked
+        resuming = asyncio.create_task(client.resume(session_id, **tantra(mode="write")))
+        await asyncio.wait_for(claiming.wait(), timeout=2)
+        await client.notify("$/cancel_request", {"requestId": client.request_id("session/resume")})
+        with pytest.raises(RpcError) as cancelled:
+            await resuming
+        del runtime._claim
+        assert client.connection.sessions[UUID(session_id)] is session and not session.closed
+        assert session.writer is writer and writer is not None
+        await client.prompt(session_id, "hi")
+        await client.idle(session_id)
+    assert cancelled.value.code == -32800
+    assert client.of(session_id, "_tantra_writer") == [CLAIMED]
+    assert list(runtime._connections) == []
+    await runtime.aclose()
+
+
+async def test_a_write_resume_over_the_writer_claims_before_closing_the_old_session() -> None:
+    runtime, server = serve(Scripted(m=[Sample(text="on the new writer")]), [Bot])
+    claim = runtime._claim
+
+    async def slow(connection: Any) -> None:
+        await claim(connection)
+        if connection.writable:
+            await asyncio.sleep(0.05)
+
+    async with Client(server, profile=True) as client:
+        session_id = await client.new()
+        await client.until(lambda: client.of(session_id, "_tantra_writer"))
+        old = client.connection.sessions[UUID(session_id)]
+        runtime._claim = slow
+        await client.resume(session_id, **tantra(mode="write"))
+        del runtime._claim
+        await client.until(lambda: len(client.of(session_id, "_tantra_writer")) == 2)
+        new = client.connection.sessions[UUID(session_id)]
+        assert new is not old and old.closed and old.writer is None
+        assert new.writer is not None and list(runtime._connections) == [new.writer._connection_id]
+        await client.prompt(session_id, "hi")
+        await client.idle(session_id)
+    assert client.of(session_id, "_tantra_writer") == [CLAIMED, CLAIMED]
+    await runtime.aclose()
+
+
+async def test_a_failed_open_after_the_claim_leaks_no_writer() -> None:
+    runtime, server = serve(Scripted(m=[]), [Bot])
+    status = runtime.status
+    failures = [CoordinatorUnavailable("store down")]
+
+    async def flaky(agent_id: UUID) -> Any:
+        if failures:
+            raise failures.pop()
+        return await status(agent_id)
+
+    async with Client(server, profile=True) as client:
+        session_id = await client.new()
+        await client.until(lambda: client.of(session_id, "_tantra_writer"))
+        runtime.status = flaky
+        with pytest.raises(RpcError) as failed:
+            await client.resume(session_id, **tantra(mode="write"))
+        del runtime.status
+        assert not runtime._connections
+        assert not client.connection.sessions
+        await client.resume(session_id, **tantra(mode="write"))
+        await client.until(lambda: len(client.of(session_id, "_tantra_writer")) == 2)
+    assert failed.value.data == {"tantra": {"code": "unavailable"}}
+    await runtime.aclose()
+
+
+async def test_cancels_after_the_claim_still_complete_the_write_resume() -> None:
+    runtime, server = serve(Scripted(m=[Sample(text="on the swapped writer")]), [Bot])
+    status = runtime.status
+    reached, release = asyncio.Event(), asyncio.Event()
+
+    async def held(agent_id: UUID) -> Any:
+        reached.set()
+        await release.wait()
+        return await status(agent_id)
+
+    async with Client(server, profile=True) as client:
+        session_id = await client.new()
+        await client.until(lambda: client.of(session_id, "_tantra_writer"))
+        old = client.connection.sessions[UUID(session_id)]
+        runtime.status = held
+        resuming = asyncio.create_task(client.resume(session_id, **tantra(mode="write")))
+        await asyncio.wait_for(reached.wait(), timeout=2)
+        for _ in range(2):
+            await client.notify("$/cancel_request", {"requestId": client.request_id("session/resume")})
+            await asyncio.sleep(0.05)
+        release.set()
+        assert await resuming == {}
+        del runtime.status
+        await client.until(lambda: len(client.of(session_id, "_tantra_writer")) == 2)
+        new = client.connection.sessions[UUID(session_id)]
+        assert new is not old and old.closed and new.writer is not None
+        assert list(runtime._connections) == [new.writer._connection_id]
+        await client.prompt(session_id, "hi")
+        await client.idle(session_id)
+    assert client.of(session_id, "_tantra_writer") == [CLAIMED, CLAIMED]
+    await runtime.aclose()
+
+
+async def test_closing_the_connection_during_the_swap_leaks_no_writer() -> None:
+    runtime, server = serve(Scripted(m=[]), [Bot])
+    status = runtime.status
+    reached = asyncio.Event()
+
+    async def held(agent_id: UUID) -> Any:
+        reached.set()
+        await asyncio.Future()
+        return await status(agent_id)
+
+    client = Client(server, profile=True)
+    await client.open()
+    session_id = await client.new()
+    await client.until(lambda: client.of(session_id, "_tantra_writer"))
+    runtime.status = held
+    resuming = asyncio.create_task(client.resume(session_id, **tantra(mode="write")))
+    await asyncio.wait_for(reached.wait(), timeout=2)
+    await client.close()
+    await asyncio.gather(resuming, return_exceptions=True)
+    del runtime.status
+
+    async def released() -> bool:
+        return not runtime._connections
+
+    await eventually(released)
+    assert not client.connection.sessions
     await runtime.aclose()

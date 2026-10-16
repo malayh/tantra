@@ -280,17 +280,67 @@ test("url is called on every dial and backoff stays within bounds", async (t) =>
   });
 });
 
-test("reaching open resets the dial count", async () => {
+test("only staying open for reconnectStableMs resets the dial count", async (t) => {
+  let clock = 1_000;
+  t.mock.method(globalThis.performance, "now", () => clock);
   const agent = new FakeAgent();
-  const { client, state } = tracked(agent);
+  const { client, state, errors } = tracked(agent, {
+    timing: { reconnectBaseMs: 1, reconnectCapMs: 4, reconnectStableMs: 100 },
+  });
   agent.refuse = 9;
   await client.connect();
+  clock += 100;
   agent.refuse = 9;
   agent.socket.drop(1012);
   await until(
     () => agent.sockets.length === 20 && state().connection === "open",
     "recovery",
   );
+  clock += 99;
+  agent.socket.drop(1012);
+  await until(() => state().connection === "failed", "failed");
+  await settled();
+  assert.equal(agent.sockets.length, 20);
+  assert.deepEqual(
+    errors.map((error) => error.code),
+    ["dial_failed"],
+  );
+});
+
+test("a server that drops every connection right after open fails after 10 dials", async (t) => {
+  const fixture = await opened();
+  const { agent, client, state, states, errors } = fixture;
+  agent.handlers["session/resume"] = function (socket, frame) {
+    this.reply(socket, frame, {});
+    setImmediate(() => socket.drop(1011));
+  };
+  const timer = t.mock.method(globalThis, "setTimeout");
+  agent.socket.drop(1011);
+  try {
+    await until(() => state().connection === "failed", "failed");
+  } finally {
+    await client.disconnect();
+  }
+  const opens = states.filter(
+    (entry, index) =>
+      entry.connection === "open" && states[index - 1]?.connection !== "open",
+  );
+  assert.equal(opens.length, 10);
+  assert.equal(agent.sockets.length, 10);
+  assert.deepEqual(
+    errors.map((error) => error.code),
+    ["dial_failed"],
+  );
+  assert.equal(errors[0].cause.code, "closed");
+  const delays = timer.mock.calls.map((call) => call.arguments[1]);
+  assert.equal(delays.length, 9);
+  delays.forEach((delay, index) => {
+    const ceiling = Math.min(4, 1 * 2 ** index);
+    assert.ok(
+      delay >= ceiling / 2 && delay <= ceiling,
+      `${delay} outside ${ceiling}`,
+    );
+  });
 });
 
 test("a server that closes during every resume fails after 10 dials", async () => {
@@ -308,7 +358,7 @@ test("a server that closes during every resume fails after 10 dials", async () =
     await client.disconnect();
   }
   await assert.rejects(held, { code: "uncertain", commandId: held.commandId });
-  assert.equal(agent.sockets.length, 1 + 10);
+  assert.equal(agent.sockets.length, 10);
   assert.equal(errors.at(-1).code, "dial_failed");
 });
 
@@ -882,5 +932,85 @@ test("a stale failed resume leaves a newer resume of the session open", async ()
   assert.deepEqual(Object.keys(state().sessions), [CHILD]);
   const prompt = client.prompt(CHILD, text("still open"));
   assert.deepEqual(await prompt, { messageId: prompt.commandId });
-  assert.deepEqual(agent.sent("session/close").length, 1);
+  assert.deepEqual(agent.sent("session/close").length, 0);
+});
+
+test("a failed resume sharing its entry with a pending one closes the session once that one returns", async () => {
+  const agent = new FakeAgent();
+  const { client, state } = tracked(agent);
+  await client.connect();
+  let release;
+  let resumes = 0;
+  agent.handlers["session/resume"] = function (socket, frame) {
+    if (++resumes === 1)
+      this.fail(socket, frame, -32602, "Too many open sessions");
+    else release = () => this.reply(socket, frame, {});
+  };
+  const first = client.resume(CHILD);
+  const second = client.resume(CHILD);
+  await assert.rejects(first, { code: "invalid_params" });
+  await settled();
+  assert.deepEqual(agent.sent("session/close"), []);
+  release();
+  await assert.rejects(second, { code: "closed", sessionId: CHILD });
+  await until(() => agent.sent("session/close").length === 1, "close");
+  assert.deepEqual(agent.sent("session/close")[0].params, {
+    sessionId: CHILD,
+  });
+  assert.deepEqual(state().sessions, {});
+});
+
+test("resume, close, then resume again keeps the latest resume open on the server", async () => {
+  const agent = new FakeAgent();
+  const { client, state } = tracked(agent);
+  await client.connect();
+  const open = new Set();
+  agent.handlers["session/resume"] = function (socket, frame) {
+    setTimeout(() => {
+      open.add(frame.params.sessionId);
+      this.reply(socket, frame, {});
+      this.writer(socket, frame.params.sessionId, "claimed");
+    }, 5);
+  };
+  agent.handlers["session/close"] = function (socket, frame) {
+    setTimeout(() => {
+      open.delete(frame.params.sessionId);
+      this.reply(socket, frame, {});
+    }, 10);
+  };
+  const stale = client.resume(CHILD, { mode: "write" });
+  const closing = client.close(CHILD);
+  const latest = client.resume(CHILD, { mode: "write" });
+  await assert.rejects(stale, { code: "closed", sessionId: CHILD });
+  assert.deepEqual(await closing, {});
+  assert.deepEqual(await latest, {});
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual([...open], [CHILD]);
+  assert.deepEqual(agent.sent("session/close"), []);
+  assert.deepEqual(Object.keys(state().sessions), [CHILD]);
+  const prompt = client.prompt(CHILD, text("still open"));
+  assert.deepEqual(await prompt, { messageId: prompt.commandId });
+});
+
+test("a close during a pending resume is sent once the resume returns", async () => {
+  const agent = new FakeAgent();
+  const { client, state } = tracked(agent);
+  await client.connect();
+  let release;
+  agent.handlers["session/resume"] = function (socket, frame) {
+    release = () => this.reply(socket, frame, {});
+  };
+  const stale = client.resume(CHILD, { mode: "write" });
+  assert.deepEqual(await client.close(CHILD), {});
+  await settled();
+  assert.deepEqual(agent.sent("session/close"), []);
+  release();
+  await assert.rejects(stale, { code: "closed", sessionId: CHILD });
+  await until(() => agent.sent("session/close").length === 1, "close");
+  assert.deepEqual(agent.sent("session/close")[0].params, {
+    sessionId: CHILD,
+  });
+  await settled();
+  assert.equal(agent.sent("session/close").length, 1);
+  assert.deepEqual(state().sessions, {});
 });

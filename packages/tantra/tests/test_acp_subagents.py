@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from uuid import UUID, uuid4
 
 import pytest
 from acp_support import Client, Scripted, reduce
@@ -248,4 +249,36 @@ async def test_a_child_cannot_be_resumed_or_prompted() -> None:
             await client.prompt(worker, "hi")
         await client.idle(root, 2)
     assert resumed.value.code == prompted.value.code == -32602
+    await runtime.aclose()
+
+
+async def test_a_child_not_open_here_answers_like_an_unknown_id() -> None:
+    provider = Scripted(
+        root=[tool_call("spawn", "s1", agent_name="worker", input="x"), text("a"), text("b")], worker=[text("w")]
+    )
+    runtime = Runtime(provider, MemoryStore(), [Root])
+    server = AcpServer(runtime, agent=Root, scope=scope, policy=allow, models=["root", "other"], name="tree")
+    async with Client(server) as owner, Client(server) as stranger, Client(server, profile=True) as profiled:
+        root = await owner.new()
+        await owner.prompt(root, "go")
+        await owner.until(lambda: children(owner, root))
+        [worker] = children(owner, root)
+        await owner.idle(root, 2)
+        answers = {}
+        for client in (stranger, profiled):
+            for target in (worker, str(uuid4())):
+                for method, params in (
+                    ("session/resume", {"cwd": "/work"}),
+                    ("session/delete", {}),
+                    ("session/set_config_option", {"configId": "model", "type": "id", "value": "other"}),
+                ):
+                    with pytest.raises(RpcError) as failed:
+                        await client.call(method, {"sessionId": target, **params})
+                    error = failed.value
+                    answers[(id(client), target == worker, method)] = (error.code, error.message, error.data)
+        with pytest.raises(RpcError) as open_here:
+            await owner.call("session/delete", {"sessionId": worker})
+    assert {answers[key] for key in answers} == {(-32002, "Session not found", None)}
+    assert open_here.value.code == -32602
+    assert await runtime.store.header(UUID(worker).hex) is not None
     await runtime.aclose()

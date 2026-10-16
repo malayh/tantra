@@ -96,7 +96,7 @@ async def substrate(request: pytest.FixtureRequest, tmp_path: Path) -> AsyncIter
         for store in opened:
             await close_store(store)
         if dsn:
-            drop_schema(dsn, schema)
+            await asyncio.to_thread(drop_schema, dsn, schema)
 
 
 @tool

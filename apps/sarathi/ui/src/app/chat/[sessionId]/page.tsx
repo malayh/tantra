@@ -14,7 +14,7 @@ import { ModelPicker } from "../components/model-picker";
 import { QueueStrip } from "../components/queue-strip";
 import { Sidebar } from "../components/sidebar";
 import { Transcript } from "../components/transcript";
-import { composerDisabled, isReady, stopOffered } from "../state";
+import { composerDisabled, fromDroppedSession, isReady, stopOffered } from "../state";
 
 const reclaimText = (paused: boolean, reason: string | null): string => {
   if (paused) return "The connection was interrupted. Unsent messages are held until you reclaim control.";
@@ -53,10 +53,11 @@ export default function SessionPage() {
       return (error: unknown) => {
         if (token === null || shown.current !== token) return;
         if (quiet && error instanceof TantraAcpError && error.code === "closed") return;
+        if (fromDroppedSession(store.getState(), sessionId, error)) return;
         store.getState().setBanner(errorText(error));
       };
     },
-    [store],
+    [sessionId, store],
   );
 
   useEffect(() => {

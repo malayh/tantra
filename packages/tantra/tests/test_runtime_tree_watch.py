@@ -72,6 +72,7 @@ class Observed:
         self.pages = 0
         self.outages = 0
         self.actives = 0
+        self.live = False
 
     async def start(self, handler: Any = None) -> None:
         return None
@@ -98,9 +99,17 @@ class Observed:
         if self.outages:
             self.outages -= 1
             raise CoordinatorUnavailable("coordinator down")
-        return False
+        return self.live
 
-    async def emit(self, root_id: str, change_id: int, kind: str | None = None) -> None:
+    async def emit(
+        self,
+        root_id: str,
+        change_id: int,
+        kind: str | None = None,
+        *,
+        owner_instance: str | None = None,
+        owner_valid: bool = False,
+    ) -> None:
         if kind is not None:
             self.notices.append(ChangeNotice(change_id=change_id, root_id=root_id, kind=kind))
         await self.observations.put(
@@ -109,14 +118,35 @@ class Observed:
                 sample=0,
                 change_id=change_id,
                 writer_connection=None,
-                owner_instance=None,
+                owner_instance=owner_instance,
                 owner_generation=0,
-                owner_valid=False,
+                owner_valid=owner_valid,
                 recovery={},
                 actors={},
                 expires_at=datetime.now(UTC),
             )
         )
+
+
+class Watched:
+    catch_up_interval = 0.01
+
+    def __init__(self) -> None:
+        self.live = True
+        self.notices: asyncio.Queue[ChangeNotice] = asyncio.Queue()
+
+    async def start(self, handler: Any = None) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def active(self, root_id: str, actor_id: str | None = None) -> bool:
+        return self.live
+
+    async def watch(self, root_id: str, *, after: int = 0) -> AsyncIterator[ChangeNotice]:
+        while True:
+            yield await self.notices.get()
 
 
 def spawn(input: str) -> Sample:
@@ -458,3 +488,93 @@ async def test_patch_header_refuses_after_close() -> None:
         await runtime.patch_header(root_id, title="late")
     header = await runtime.store.header(root_id.hex)
     assert header is not None and header.title is None
+
+
+def counting(runtime: Runtime) -> list[int]:
+    reads = [0]
+    tree_headers = runtime._tree_headers
+
+    async def counted(root: str) -> Any:
+        reads[0] += 1
+        return await tree_headers(root)
+
+    runtime._tree_headers = counted
+    return reads
+
+
+async def test_a_lost_lease_without_a_change_turns_the_tree_inactive() -> None:
+    coordinator = Observed()
+    coordinator.live = True
+    runtime, root_id = await coordinated(coordinator)
+    root = root_id.hex
+    reads = counting(runtime)
+    tree = runtime.watch_tree(root_id)
+    assert (await anext(tree)).actors[0].active
+    pending = asyncio.ensure_future(anext(tree))
+    await coordinator.emit(root, 1, owner_instance="owner", owner_valid=True)
+    async with asyncio.timeout(2):
+        while coordinator.observations.qsize() or reads[0] != 2:
+            await asyncio.sleep(0.01)
+    coordinator.live = False
+    await coordinator.emit(root, 1, owner_instance="owner", owner_valid=False)
+    change = await asyncio.wait_for(pending, 2)
+    assert not any(actor.active for actor in change.actors)
+    assert change == await expected(runtime, root_id)
+    count, generation = reads[0], runtime._trees[root].generation
+    pending = asyncio.ensure_future(anext(tree))
+    await coordinator.emit(root, 1, owner_instance="owner", owner_valid=False)
+    await asyncio.sleep(TREE_INTERVAL * 2)
+    assert coordinator.observations.qsize() == 0 and reads[0] == count
+    assert runtime._trees[root].generation == generation
+    assert not pending.done()
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    await tree.aclose()
+    await runtime.aclose()
+
+
+async def test_the_fallback_watch_re_reads_on_timeout_only_while_an_actor_is_active() -> None:
+    coordinator = Watched()
+    runtime, root_id = await coordinated(coordinator)
+    reads = counting(runtime)
+    tree = runtime.watch_tree(root_id)
+    assert (await anext(tree)).actors[0].active
+    coordinator.live = False
+    change = await asyncio.wait_for(anext(tree), 2)
+    assert not any(actor.active for actor in change.actors)
+    assert change == await expected(runtime, root_id)
+    count, generation = reads[0], runtime._trees[root_id.hex].generation
+    pending = asyncio.ensure_future(anext(tree))
+    await asyncio.sleep(TREE_INTERVAL * 2)
+    assert reads[0] == count
+    assert runtime._trees[root_id.hex].generation == generation
+    assert not pending.done()
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    await tree.aclose()
+    await runtime.aclose()
+
+
+async def test_no_snapshot_is_yielded_once_close_starts_mid_read() -> None:
+    runtime = Runtime(FakeProvider([]), MemoryStore(), [Bot], default_model="m")
+    root_id = await runtime.create(Bot)
+    tree_headers = runtime._tree_headers
+    entered, hold = asyncio.Event(), asyncio.Event()
+
+    async def held(root: str) -> Any:
+        headers = await tree_headers(root)
+        entered.set()
+        await hold.wait()
+        return headers
+
+    runtime._tree_headers = held
+    tree = runtime.watch_tree(root_id)
+    pending = asyncio.ensure_future(anext(tree))
+    await asyncio.wait_for(entered.wait(), 2)
+    closing = asyncio.create_task(runtime.aclose())
+    await asyncio.sleep(0.01)
+    hold.set()
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(pending, 2)
+    await asyncio.wait_for(closing, 2)
+    assert runtime._trees == {}

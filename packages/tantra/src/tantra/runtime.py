@@ -651,7 +651,15 @@ class Runtime:
             await self._notify_waiter(actor_id)
         tree = self._trees.get(root_id)
         if tree is not None and observation.error is None:
-            await self._observe_tree(root_id, tree, observation.change_id)
+            if previous is not None and (
+                previous.owner_instance != observation.owner_instance
+                or previous.owner_generation != observation.owner_generation
+                or previous.owner_valid != observation.owner_valid
+            ):
+                tree.change_id = max(tree.change_id or 0, observation.change_id)
+                self._tree_changed(root_id)
+            else:
+                await self._observe_tree(root_id, tree, observation.change_id)
 
     async def _observe_tree(self, root_id: str, tree: _Tree, change_id: int) -> None:
         if tree.change_id is not None and change_id <= tree.change_id:
@@ -720,6 +728,13 @@ class Runtime:
                     done, _ = await asyncio.wait({pending}, timeout=interval)
                     if not done:
                         await self._refresh_writers(root_id)
+                        tree = self._trees.get(root_id)
+                        if (
+                            tree is not None
+                            and tree.snapshot is not None
+                            and any(actor.active for actor in tree.snapshot[1].actors)
+                        ):
+                            self._tree_changed(root_id)
                         continue
                     notice = pending.result()
                     if notice.kind in ("header", "activity", "ownership", "deleted", "journal"):
@@ -1431,6 +1446,8 @@ class Runtime:
                     await asyncio.sleep(min(0.1 * 2**failures, interval))
                     failures = min(failures + 1, 16)
                     continue
+                if self._closing or self._closed:
+                    return
                 failures = 0
                 if snapshot != last:
                     last = snapshot

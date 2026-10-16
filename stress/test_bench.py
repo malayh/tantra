@@ -268,4 +268,4 @@ async def test_two_process_baseline_and_recovery(postgres_dsn: str, history_mode
     finally:
         for worker in workers:
             await asyncio.to_thread(worker.stop)
-        drop_schema(postgres_dsn, schema)
+        await asyncio.to_thread(drop_schema, postgres_dsn, schema)

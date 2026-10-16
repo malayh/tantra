@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -176,6 +177,7 @@ class TurnEngine:
         self.turn_span: Any = None
         self.terminal: TurnCompleted | TurnFailed | None = None
         self.tool_spans: dict[object, Any] = {}
+        self._call_ids: set[str] = set()
 
     def _trim_history(self) -> None:
         if self.history_mode == "compacted" and self.history is not None:
@@ -417,6 +419,20 @@ class TurnEngine:
             raise
         finally:
             self.tracer.end_sample(span, end=end, error=error, attempts=attempts)
+
+    def _unique_calls(self, end: StreamEnd, sample_number: int) -> StreamEnd:
+        assert self.turn is not None
+        calls = []
+        for index, call in enumerate(end.tool_calls):
+            call_id = call.id
+            attempt = 0
+            while call_id in self._call_ids:
+                key = f"{self.turn.turn_id}:{sample_number}:{index}:{attempt}"
+                call_id = "call_" + hashlib.blake2b(key.encode(), digest_size=12).hexdigest()
+                attempt += 1
+            self._call_ids.add(call_id)
+            calls.append(call if call_id == call.id else call.model_copy(update={"id": call_id}))
+        return end if calls == end.tool_calls else end.model_copy(update={"tool_calls": calls})
 
     def _parts(
         self,
@@ -782,6 +798,7 @@ class TurnEngine:
                 compacted,
                 lambda prompt=prompt, prepared=req: self._recover_overflow(prompt, prepared),
             )
+            end = self._unique_calls(end, sample_number)
             parts, calls, invalid = self._parts(sample_id, end)
             await self._append(parts)
             self.header.usage = accumulate(self.header.usage, end.usage)
@@ -826,6 +843,7 @@ class TurnEngine:
 
     async def run(self, queued: InputQueued) -> TurnCompleted | TurnFailed:
         await self._load_history()
+        self._call_ids.update(event.call_id for event in self.history if isinstance(event, ToolCallRequested))
         if self.terminal is not None:
             raise TantraError("TurnEngine instances run one turn")
         self.turn = TurnContext(

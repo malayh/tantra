@@ -22,7 +22,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useChat } from "../client";
-import { actorStatusLabel, attachmentsOf, isNearBottom, isReady, textOf } from "../state";
+import { actorStatusLabel, attachmentsOf, isLoading, isNearBottom, isReady, textOf } from "../state";
 
 type Opener = (actorId: string) => void;
 
@@ -324,6 +324,7 @@ export function Transcript({
   const requests = useStore(store, (state) => state.transcript.requests[sessionId]);
   const roster = useStore(store, (state) => state.transcript.roster);
   const ready = useStore(store, (state) => isReady(state, sessionId));
+  const loading = useStore(store, (state) => isLoading(state, sessionId));
   const writer = useStore(store, (state) => state.client.sessions[sessionId]?.writer ?? false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(true);
@@ -350,7 +351,7 @@ export function Transcript({
         {ready && entries.length === 0 && (
           <p className="text-muted-foreground py-16 text-center text-sm">{emptyText}</p>
         )}
-        {!ready && <Loader2 className="text-muted-foreground mx-auto my-16 size-4 animate-spin" />}
+        {loading && <Loader2 className="text-muted-foreground mx-auto my-16 size-4 animate-spin" />}
         {entries.map((entry, index) => (
           <div key={`${entry.kind}-${entry.id}`} className={cn(entry.kind === "user" && index > 0 && "mt-5")}>
             <EntryView entry={entry} live={live} sessionId={sessionId} roster={roster} onOpen={onOpen} />

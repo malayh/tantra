@@ -7,16 +7,26 @@ Added:
 - `Runtime.watch_tree(root_id)` yields `TreeChange` snapshots (the root's title and model plus every actor status) on each tree change, from local signals and coordinator notices, without reading journals. Reads are shared per root and at least 250 ms apart.
 - `Runtime.patch_header(agent_id, title=..., model=...)` changes a title or model from any Runtime and signals tree watchers. Route application title and model changes through it.
 - `InputQueued.sender_id` and `InputQueued.origin` record who queued an input. The text is unchanged.
+- `tantra.acp` serves a Runtime over ACP v2 (`protocolVersion: 2`, reference schema `2.0.0-alpha.8`) and the `tantra` profile v1: journal cursors, client command IDs, one fenced writer per root, lazy child transcripts, and a shared input queue. It classifies agent inputs by `origin`, falling back to text prefixes only for older journals, and its child mirror and title/model updates follow `watch_tree`, so they reach other connections without a coordinator. `AcpServer(runtime, *, agent, scope, policy, encode_prompt, decode_input, view, models, name)` offers `connect(transport, auth)`, `websocket(*, bind, allowed_origins, allow_missing_origin=False)` (an ASGI `AcpWebSocket`) and `serve_stdio(auth)`. `AcpAuth` is the connection identity; `AcpAccess` is the policy input. Limits: 8 open sessions per connection, 1 MiB inbound frames, 10 s per WebSocket send. No dependency beyond pydantic. See the [ACP server reference](https://malayh.github.io/tantra/docs/reference/acp/).
+- `submitted_by` on `InputQueued`, `AskAnswered` and `CancellationRequested`, a string of 1–256 characters. `Connection.send`, `prompt`, `answer` and `cancel` accept it, and turns expose it as `TurnContext.submitted_by` and tool `Context.submitted_by`.
+- `Runtime.lookup_ask(root_id, ask_id)` returns a `LocatedAsk` (exported from `tantra`) for the original `AskRaised` anywhere in a root tree. `PostgresStore.lookup_ask` serves it from an index; other stores fall back to reading history.
 
 Changed:
 
-- `tantra.acp` classifies agent inputs by `origin`, falling back to text prefixes only for older journals. Its child mirror and title/model updates follow `watch_tree`; the polling and the 500 ms debounce are gone, and title and model updates now reach other connections without a coordinator.
 - `CoordinatedStore` publishes a `header` change when an append changes an actor's status, current turn or last turn.
+- Tool approval asks carry the call's effective arguments in `extra["arguments"]`.
+- `bash` runs commands with stdin set to `/dev/null`.
+
+Fixed:
+
+- Tool call IDs are unique within a session. A provider ID already used in the turn or the loaded history, including the `OpenAICompatible` fallback `call_{index}`, is rewritten to a deterministic `call_<24 hex>` before it is journaled. Repeats used to alias spawn, send and finish commands and drop tool results from the assembled context. IDs without a collision are unchanged.
+- `watch_tree` reflects lease expiry within about one coordinator `catch_up_interval`, and yields no snapshot once Runtime shutdown starts.
 
 Compatibility and upgrade:
 
 - A retry compared with an event written before `origin` existed ignores `sender_id` and `origin`, so recovery and command retries over older journals stay duplicates. Drain older coordinated workers before rolling out: an older owner rejects retries of inputs that carry the new fields.
 - `tantra.testing.store_conformance` now requires a store to detect duplicate inputs by comparing events with `==`, so that a legacy `InputQueued` equals its structured retry. Custom stores that compare serialized events fail it.
+- Every worker must run this release before migration 12 is applied: an older worker on the migrated schema writes no `journal_index` row for `AskRaised`, and `PostgresStore.lookup_ask` has no fallback, so `tantra.acp` never issues those asks. Stop all PostgreSQL writers, run `PostgresStore.setup()`, and restart only upgraded workers. Migration 12 adds `journal_index.ask_id` and the partial index `journal_ask_idx`, then backfills ask entries by decoding every stored event in pages of 1,000. It runs in the setup transaction and holds an exclusive lock on `journal_index` until it commits, so its time grows with total journal size and every append and indexed read waits for it. Allow a maintenance window. Journal bodies and sequences are unchanged.
 
 ## 1.4.0
 

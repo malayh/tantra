@@ -71,8 +71,8 @@ Upstream threads in `agentclientprotocol/agent-client-protocol`, re-read 2026-10
 - **Tenancy is never on the wire.** It lives in three server hooks:
     - `bind`: identity, decided at the handshake.
     - `scope`: a metadata partition stamped on every new root and used as the `session/list` filter.
-    - `policy`: every operation on an existing session except `session/close`, checked against server-loaded session headers, never against client claims.
-- **Unauthorized equals unknown.** A policy denial answers `-32002 "Session not found"`, exactly like an unknown id.
+    - `policy`: every operation except `session/close`, checked against server-loaded session headers, never against client claims. `session/new` is checked against the header of the root it would create.
+- **Unauthorized equals unknown.** A policy denial answers `-32002 "Session not found"`, exactly like an unknown id. An existing id the caller may not use answers exactly like an unknown one on every method.
 
 | | Single tenant (local editor) | Multi tenant (Sarathi) |
 |---|---|---|
@@ -91,9 +91,9 @@ Upstream threads in `agentclientprotocol/agent-client-protocol`, re-read 2026-10
 |---|---|
 | `bind(asgi_scope) -> AcpAuth` | WebSocket only. Runs after the Origin check and before accept. `PermissionError`, a wrong return type, or an `expires_at` already past denies. |
 | `scope(auth, meta) -> {str: str}` | Stamped with `acp_cwd` on `session/new`; the subset filter for `session/list`. `PermissionError` denies. |
-| `policy(access) -> bool` | Operations `resume`, `prompt`, `cancel`, `claim_writer`, `answer`, `set_model`, `delete`. Only exactly `True` allows. `answer` is checked before a request is issued and again with the mapped response. |
+| `policy(access) -> bool` | Operations `new`, `resume`, `prompt`, `cancel`, `claim_writer`, `answer`, `set_model`, `delete`. Only exactly `True` allows. `new` sees a provisional root header (`id`, `root_id`, `agent`, `metadata`) before anything is created. `answer` is checked before a request is issued and again with the mapped response. |
 | `encode_prompt` / `decode_input` | Content blocks to stored input and back. `ValueError` → `-32602`. Default: text only. |
-| `view(event) -> event \| None` | Redaction before projection. `None` hides the event. |
+| `view(event) -> event \| None` | Redaction before projection. `None` hides the event. Dropping or retyping a `ChildCreated` hides that child: its subtree leaves the mirror and cannot be resumed, its inputs to the parent project nothing, and the parent's calls that target it are withheld. |
 | `AcpAuth(principal, submitted_by, expires_at)` | `submitted_by` is persisted with inputs, answers and cancels. The WebSocket closes at `expires_at`. |
 
 ```text
@@ -182,8 +182,8 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. "Agent" is
 
 | Method | Params used | Result | Behavior |
 |---|---|---|---|
-| `session/new` | `cwd` (absolute), `_meta.tantra.mode` | `{sessionId, configOptions?}` | Creates a root in the caller's scope, tagged with `cwd`. Profile: `mode` defaults to `write`; a denied claim deletes the new root and answers `-32002`. `mcpServers` is ignored. |
-| `session/list` | `cwd?`, `cursor?` | `{sessions: [{sessionId, cwd, title?, updatedAt}], nextCursor?}` | Roots in the caller's scope (and with that `cwd`, when given), newest created first, 50 per page. `nextCursor` is opaque. A cursor that is not a root → `-32602`. |
+| `session/new` | `cwd` (absolute), `_meta.tantra.mode` | `{sessionId, configOptions?}` | Creates a root in the caller's scope, tagged with `cwd`. A denied `new` answers `-32002` and creates nothing. Profile: `mode` defaults to `write`; a denied claim deletes the new root and answers `-32002`. `mcpServers` is ignored. |
+| `session/list` | `cwd?`, `cursor?` | `{sessions: [{sessionId, cwd, title?, updatedAt}], nextCursor?}` | Roots in the caller's scope (and with that `cwd`, when given), newest created first, 50 per page. `nextCursor` is opaque. A cursor that is not a root of this agent in the caller's scope → `-32602 "Invalid cursor"`. |
 | `session/resume` | `sessionId`, `cwd` (absolute, unused), `replayFrom?`, `_meta.tantra.mode` | `{configOptions?}` on a root, `{}` on a child | Opens the session on this connection. `replayFrom` omitted or `null`: no replay. `{"type": "start"}`: all history. `{"type": "_tantra_after"}`: profile only. Any other type → `-32602`. Resuming an open root replaces it. |
 | `session/prompt` | `sessionId`, `prompt`, `_meta.tantra.commandId` | `{messageId}` | Roots only, open on this connection. Needs the writer. Answers once the input is durably accepted. `messageId` is the `commandId`, or a fresh UUID without one. |
 | `session/cancel` | `sessionId`, `_meta.tantra.commandId` (notification) | — | Cancels the running turn and every queued input in the tree. A session not open on this connection is ignored. |
@@ -193,7 +193,7 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. "Agent" is
 | `_tantra/session/claim_writer` | `sessionId` | `{}` | Profile only. See Writer claim. |
 
 - `prompt` blocks MUST each carry a string `type`. Which types the agent accepts is server configuration (default: `text`); a rejected block → `-32602`.
-- `session/resume`, `session/prompt`, `session/cancel`, claims, answers, `session/set_config_option` and `session/delete` are checked by policy. A denied request answers `-32002`. A denied cancel is dropped without a notice, and a denied answer is not applied. `session/close` needs no check: it only affects this connection.
+- `session/new`, `session/resume`, `session/prompt`, `session/cancel`, claims, answers, `session/set_config_option` and `session/delete` are checked by policy. A denied request answers `-32002`. A denied cancel is dropped without a notice, and a denied answer is not applied. `session/close` needs no check: it only affects this connection.
 
 **Order of responses and updates:**
 
@@ -215,7 +215,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 |---|---|
 | `InputQueued` (root user input) | none; profile: `_tantra_queue_update` |
 | `TurnStarted`, user input | `user_message {messageId: commandId, content}`, then `state_update running` |
-| `TurnStarted`, input from a parent or child agent | incoming `session_message {messageId, senderSessionId, recipientSessionId, content}`, with `_meta.tantra.finished: true` for a child's `finish`; nothing for a child's status-only "turn ended" input. Then `state_update running` (agent-initiated work). |
+| `TurnStarted`, input from a parent or child agent | incoming `session_message {messageId, senderSessionId, recipientSessionId, content}`, with `_meta.tantra.finished: true` for a child's `finish`; nothing for a child's status-only "turn ended" input, and nothing for any input from a child that `view` hid. Then `state_update running` (agent-initiated work). |
 | `TextDelta` / `ReasoningDelta` | `agent_message_chunk` / `agent_thought_chunk`, `messageId` = sample id |
 | `TextPart` | `agent_message {content: [text]}`, an upsert that replaces the chunks |
 | `ReasoningPart` | `agent_thought {content: [every reasoning block of the sample so far]}` |
@@ -223,7 +223,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 | `ToolCallStarted` | `tool_call_update {toolCallId, status: "in_progress"}` |
 | `ToolProgress` | `tool_call_content_chunk` |
 | `ToolCallCompleted` | `tool_call_update {status: "completed" or "failed", rawOutput}`, then a `tool_call_content_chunk` with the result when it is not empty |
-| `spawn`, `send`, `finish` calls | Not tool calls. Outgoing `session_message`: `spawn` at `ChildCreated`, `send` and `finish` on success. A failed one is a failed `tool_call_update`. |
+| `spawn`, `send`, `finish` calls | Not tool calls. Outgoing `session_message`: `spawn` at `ChildCreated`, `send` and `finish` on success. A failed one is a failed `tool_call_update`. Every update of a `spawn`, `send` or `status` call that targets a child hidden by `view` is withheld; its index is kept. |
 | `ChildCreated` | `subagent_update {sessionId, title}` (the child's name, else its agent type), before any child traffic |
 | `AskRaised` | `state_update requires_action` with `_meta.tantra.ask {askId, state: "pending"}`; the writer also gets a request (see Writer and asks) |
 | `AskAnswered` | one `state_update` with `_meta.tantra.ask {askId, state: "answered"}`: `running`, or `requires_action` while other asks are pending |
@@ -245,8 +245,8 @@ Each journal event becomes zero or more updates on the session that owns the eve
 
 | Condition | `code` | `message` | `data.tantra.code` |
 |---|---|---|---|
-| Unknown, unauthorized, or not open on this connection; a denied claim | `-32002` | `Session not found` | — |
-| Invalid params; a mutation or `mode: "write"` on a child; rejected prompt content; a bad cursor or `replayFrom`; an invalid `commandId` or `mode`; too many open sessions | `-32602` | fixed per case | — |
+| Unknown, unauthorized, or not open on this connection; a child not open here; a denied claim or `new` | `-32002` | `Session not found` | — |
+| Invalid params; a mutation or `mode: "write"` on a child open on this connection (a child resume: under a root open here, once policy allows); rejected prompt content; a bad cursor or `replayFrom`; an invalid `commandId` or `mode`; too many open sessions | `-32602` | fixed per case | — |
 | `commandId` reused with different input or a different submitter | `-32602` | `Command conflict` | `command_conflict` |
 | A mutation from a connection that is not the writer | `-32603` | `Writer required` | `writer_required` |
 | Coordinator or lease unavailable. A prompt is first tried 4 times under the same command id. | `-32603` | `Service unavailable` | `unavailable` |
@@ -538,10 +538,28 @@ Each journal event becomes zero or more updates on the session that owns the eve
 }
 ```
 
-- `_tantra_notice {level: "warning", code, message}` reports a failed `session/cancel`, because a notification cannot return an error. Live-only, on the root. A cancel denied by policy, or for a session not open here, produces no notice.
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "6f1c2a8e-3b4d-4e5f-9a7b-1c2d3e4f5a6b",
+    "update": {
+      "sessionUpdate": "_tantra_notice",
+      "level": "warning",
+      "code": "session_deleted",
+      "message": "Session deleted"
+    }
+  }
+}
+```
+
+- `_tantra_notice {level: "warning", code, message}` is live-only, uncursored, and sent on the root.
+- A failed `session/cancel` is reported this way, because a notification cannot return an error. A cancel denied by policy, or for a session not open here, produces no notice.
     - `writer_required`: this connection is not the writer; nothing was cancelled.
     - `command_conflict`: the `commandId` was used for something else.
     - `unavailable`: still failing after 4 attempts.
+- `session_deleted`: the root was deleted, by any other connection on any worker or by the application (`Runtime.delete`, `Runtime.cleanup`). Sent once to every profile connection with the root open, once its `session/new` or `session/resume` has answered; the agent then closes the root and its open children there. A connection's own successful `session/delete` produces none; if that request errors or is cancelled after the deletion committed, the connection MAY still get it. Clients SHOULD drop the session and its descendants.
 
 ### Queue
 
@@ -591,10 +609,10 @@ Each journal event becomes zero or more updates on the session that owns the eve
 ```
 
 - Profile clients never receive a child transcript unasked.
-- `session/resume` on any descendant opens its transcript read-only:
-    - `mode: "write"` → `-32602`.
-    - Its root MUST be open on this connection, else `-32002`.
+- `session/resume` on any descendant opens its transcript read-only, checked in this order:
+    - Its root MUST be open on this connection, and neither it nor an ancestor may be hidden by `view`, else `-32002`.
     - Policy `resume` decides, seeing the root as the root and the child as the actor.
+    - `mode: "write"` → `-32602`.
     - `replayFrom` rules are those of a root; the child has its own cursors. The result is `{}`.
 - `session/close` on a child detaches its transcript; the child keeps running. Closing or re-resuming the root closes its children.
 - Open children count toward the session limit.
@@ -605,7 +623,12 @@ Each journal event becomes zero or more updates on the session that owns the eve
 - `session/resume` on a root already open on this connection replaces it.
     - Its open children close; `session/close` on one then answers `-32002`.
     - The writer follows the new `mode`: `write` claims again and sends `claimed`; `read` releases it without a `_tantra_writer` update.
-- A rejected `replayFrom` or a denied `write` claim leaves the open session untouched.
+- A rejected `replayFrom` leaves the open session untouched.
+- `write` claims before the open session is replaced:
+    - A claim that is denied, or fails or is cancelled before it takes effect, leaves the open session untouched, including its writer.
+    - A claim that takes effect but whose completion is lost (a timeout, or `$/cancel_request` mid-claim) fails the request, and the open session is fenced: it gets `_tantra_writer replaced`.
+    - Once the claim succeeds, the swap completes and answers even if `$/cancel_request` arrives. The replaced session never sends `replaced`. A prompt racing the swap on it MAY fail with `writer_required`; a retry with the same `commandId` is exactly-once.
+    - If the replay then fails (for example on store I/O), the request fails, the session is closed and no writer is left, as after a failed `read` re-resume.
 
 ### Child mirror
 
@@ -671,7 +694,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 
 ### Subagents
 
-- **Plain v2 clients:** every descendant transcript is pushed on the same connection, announced by `subagent_update` before its traffic. Child state is mirrored on the parent's `subagent_update.state`. Resuming a child answers `-32602`.
+- **Plain v2 clients:** every descendant transcript is pushed on the same connection, announced by `subagent_update` before its traffic. Child state is mirrored on the parent's `subagent_update.state`. Resuming a child pushed on this connection answers `-32602`; any other child id answers `-32002`.
 - **Profile clients:** lazy children plus the child mirror, as above.
 - **Messages:** `spawn`, `send` and `finish` appear as two-way `session_message`s on both sessions.
 - **Cancel** covers the whole tree. There is no per-child cancel, so `subagent_update` carries no `capabilities`.
@@ -714,6 +737,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 | Reconnect with jittered exponential backoff and a bounded number of dials. Reference: `min(30 s, 1 s × 2ⁿ) × U[0.5, 1]`, 10 dials. | SHOULD | Avoids reconnect storms |
 | After a reconnect, resume every open session in `read` mode, roots before children; reclaim the writer explicitly | SHOULD | A reconnect must not fence another device silently |
 | Drop a session whose resume answers `-32002` | SHOULD | It was deleted or access was revoked |
+| On `_tantra_notice` `session_deleted`, drop the session and its descendants | SHOULD | The root was deleted; the agent has closed them here |
 | Retry a prompt whose response was lost with the same `commandId` and content, only once this connection is the writer again | MUST | The agent then answers the original `messageId`; a new id could submit twice |
 | Treat `writer_required` on such a retry as still uncertain, and hold it | SHOULD | The original may have been accepted |
 | Do not retry `unavailable` | SHOULD | The agent already retried |
@@ -727,7 +751,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 | Writer | Explicit (`mode`, `claim_writer`), never implicit | The first prompt or cancel claims; after fencing, the next prompt fails once |
 | `session/new` | Writer by default | Reader until its first mutation |
 | Pending asks on resume | Issued after the response with `mode: "write"` | None until its first mutation claims |
-| Children | Resumed on demand, plus the mirror | Every descendant pushed; child resume → `-32602` |
+| Children | Resumed on demand, plus the mirror | Every descendant pushed; resuming a pushed child → `-32602`, any other child → `-32002` |
 | Replay | Uncoalesced, with cursors | Coalesced; latest `usage_update` only |
 | `commandId`, `mode` | Used | Ignored; each prompt gets a fresh `messageId` |
 | `_tantra_after`, `claim_writer` | Supported | `-32602`, `-32601` |
@@ -750,7 +774,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 - **`updatedAt` moves on every journal append and header patch**, including a model change through `session/set_config_option`. It does not meet #2394's proposed definition. Profile clients can resume with their last cursor instead: an empty replay means nothing changed.
 - **Fencing assumes the agent owns the session**, as a server-run harness does. A stdio CLI agent still needs a proxy to serve several clients. Few v2 clients exist today, and fencing may stay tantra-only.
 - **A plain v2 client that resumes a session with a pending ask** gets no request until its first mutation claims the writer.
-- **Deletion is silent to other connections.** Their views stop, and later calls answer `-32002`.
+- **Deletion is silent to plain v2 clients.** Their views stop, and later calls answer `-32002`. Profile clients get `session_deleted`.
 - **Read access is not revalidated after `session/resume`.** A reader keeps receiving updates until it closes the session or the WebSocket closes at `expires_at`.
 - **The child mirror is coalesced.** It follows the runtime's tree watch, which reads headers on each change and keeps only the latest tree, so a short-lived child state can be skipped.
 
@@ -773,20 +797,22 @@ Each journal event becomes zero or more updates on the session that owns the eve
 
 | Claim | Tests |
 |---|---|
-| Cursor resume at every cut equals the live stream, for a root and a child | `test_cursor_resume_at_every_cut_equals_the_uninterrupted_stream`, `test_hidden_events_leave_cursor_gaps_and_cuts_still_hold` |
+| Cursor resume at every cut equals the live stream, for a root and a child | `test_cursor_resume_at_every_cut_equals_the_uninterrupted_stream`, `test_hidden_events_leave_cursor_gaps_and_cuts_still_hold`, `test_a_hidden_child_leaks_no_lifecycle_input_and_cuts_still_hold` |
 | A cursor resume is served by another runtime | `test_profile_cursor_resume_is_served_by_the_other_runtime` (PostgreSQL) |
 | Command ids dedupe and conflict; a lost response is recovered | `test_duplicate_command_ids_are_one_turn_and_reuse_conflicts`, `test_a_lost_prompt_response_is_recovered_by_cursor_resume_and_retry` |
 | Writer: read mode never claims; claims move asks; loss is explicit | `test_a_read_connection_never_claims_and_claim_writer_moves_the_asks`, `test_resume_in_write_mode_claims_before_responding_and_issues_asks_after`, `test_a_lost_writer_is_released_at_once_and_reclaiming_is_explicit` |
+| A failed or cancelled write re-resume keeps the writer; a claimed one completes | `test_an_unavailable_write_resume_keeps_the_open_writer`, `test_a_cancelled_write_resume_keeps_the_open_writer`, `test_cancels_after_the_claim_still_complete_the_write_resume` |
 | Fencing across runtimes | `test_fencing_across_runtimes`, `test_profile_claim_writer_fences_a_writer_on_the_other_runtime` (PostgreSQL) |
 | Plain v2 behavior | `test_two_clients_fence_each_other_and_writer_required_fails_once`, `test_requests_reach_only_the_writer_and_move_on_takeover`, `test_a_plain_client_ignores_profile_inputs`, `test_a_fenced_plain_client_never_receives_profile_updates` |
 | Divergences | `test_a_queued_prompt_responds_on_acceptance_and_its_user_message_follows_turn_start`, `test_close_detaches_without_cancelling_work` |
 | Queue | `test_queue_updates_follow_the_runtime_queue`, `test_an_input_cancelled_while_queued_leaves_the_queue` |
 | Lazy children and the mirror | `test_children_are_mirrored_and_delivered_only_when_resumed`, `test_lazily_resumed_children_count_toward_the_session_limit`, `test_profile_mirror_follows_a_child_on_the_other_runtime` (PostgreSQL) |
-| Unauthorized equals unknown | `test_policy_denial_and_unknown_sessions_return_resource_not_found` |
+| Unauthorized equals unknown | `test_policy_denial_and_unknown_sessions_return_resource_not_found`, `test_a_child_not_open_here_answers_like_an_unknown_id`, `test_a_child_resume_checks_the_root_and_policy_before_the_mode`, `test_a_list_cursor_outside_the_callers_scope_is_invalid`, `test_a_read_only_policy_cannot_create_sessions`, `test_a_hidden_child_resumes_like_an_unknown_id` |
+| Deletion notice | `test_only_other_profile_connections_are_told_about_a_deletion`, `test_a_lost_session_is_reported_deleted_only_while_open_and_its_root_is_gone`, `test_a_deletion_while_a_resume_replays_fails_it_without_a_notice` |
 | Schema | `test_every_emitted_message_is_valid_against_the_alpha8_schema`, `test_profile_fixtures_are_valid_and_match_real_messages`, `test_the_proposal_examples_are_the_profile_fixtures` |
 | WebSocket handshake and limits | `test_origin_denials_close_before_accept_without_calling_bind`, `test_bind_denials_close_1008_before_accept`, `test_frame_limit_counts_utf8_bytes`, `test_a_stalled_send_closes_1013`, `test_expiry_closes_1008_after_accept` |
 | stdio | `test_stdio_carries_only_json_rpc_and_completes_a_turn`, `test_an_oversized_stdio_frame_ends_the_connection_and_restores_descriptors` |
-| Client obligations | `the cursor advances only after onUpdate resolves`, `a prompt lost with the connection is held until the writer is reclaimed`, `a retried prompt that gets writer_required is held again`, `reconnect resumes open sessions in order, read-only, from their cursors` |
+| Client obligations | `the cursor advances only after onUpdate resolves`, `a prompt lost with the connection is held until the writer is reclaimed`, `a retried prompt that gets writer_required is held again`, `reconnect resumes open sessions in order, read-only, from their cursors`, `a server that drops every connection right after open fails after 10 dials`, `the session_deleted fixture drops the tree, reports not_found, then reaches onUpdate` |
 | Client against two real endpoints | `test_typescript_client_against_two_real_endpoints` (PostgreSQL) |
 
 - Python tests are in [`packages/tantra/tests`](https://github.com/malayh/tantra/tree/main/packages/tantra/tests); client tests are in [`packages/tantra-acp-client/test`](https://github.com/malayh/tantra/tree/main/packages/tantra-acp-client/test).
@@ -806,7 +832,6 @@ Each journal event becomes zero or more updates on the session that owns the eve
 **Known gaps in the reference implementation**
 
 - Journals written before the runtime recorded input senders are classified by the text prefixes of their lifecycle inputs.
-- Two paths answer differently for an existing id than for an unknown one: a child id answers `-32602` before the policy check on some methods, and a `session/list` cursor is checked for existence, not scope. Both need the id already, so they confirm existence rather than reveal ids.
 
 ## Frequently asked questions
 
@@ -847,3 +872,4 @@ Each journal event becomes zero or more updates on the session that owns the eve
 ## Revision history
 
 - 2026-10-15: Initial draft, matching the reference implementation and the upstream threads as of this date.
+- 2026-10-16: Policy sees `new`; `session_deleted` notice; existing ids the caller may not use answer like unknown ones; a failed `write` re-resume keeps the open session; children hidden by `view` leak no inputs.

@@ -283,14 +283,36 @@ try {
       ),
     "cancel recorded",
   );
+  assert.ok(b.state().sessions[sessionId]);
   assert.deepEqual(await a.client.delete(sessionId), {});
   assert.equal(a.state().sessions[sessionId], undefined);
   const remaining = await b.client.listSessions();
   assert.ok(
     remaining.sessions.every((session) => session.sessionId !== sessionId),
   );
+  await waitFor(() => b.errors.length > 0, "deletion notice");
+  assert.deepEqual(
+    b.errors.map((error) => [error.code, error.sessionId]),
+    [["not_found", sessionId]],
+  );
+  assert.equal(b.state().sessions[sessionId], undefined);
+  assert.deepEqual(
+    b.of(sessionId, "_tantra_notice").map((update) => update.code),
+    ["session_deleted"],
+  );
+  assert.deepEqual(a.of(sessionId, "_tantra_notice"), []);
+  await sleep(100);
   assert.deepEqual(a.errors, []);
-  assert.deepEqual(b.errors, []);
+  assert.equal(b.errors.length, 1);
+  const closes = (await request("/control/frames"))
+    .flat()
+    .filter(
+      ({ from, frame }) =>
+        from === "client" &&
+        frame.method === "session/close" &&
+        frame.params.sessionId === sessionId,
+    );
+  assert.deepEqual(closes, []);
 } finally {
   await Promise.allSettled([a.client.disconnect(), b.client.disconnect()]);
 }

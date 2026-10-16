@@ -220,6 +220,21 @@ async def _check_enqueue(factory: StoreFactory) -> None:
     )
     assert await factory().read_page(header.id) == [Stamped(seq=1, event=queued)]
 
+    legacy = _header()
+    await store.create(legacy)
+    old = InputQueued(command_id=uuid.uuid4().hex, input="legacy")
+    await store.enqueue(legacy.id, old)
+    retry = await factory().enqueue(legacy.id, old.model_copy(update={"sender_id": legacy.id, "origin": "message"}))
+    assert (retry.seq, retry.duplicate) == (1, True)
+    structured = InputQueued(command_id=uuid.uuid4().hex, input="structured", origin="user")
+    await store.enqueue(legacy.id, structured)
+    await _expect(
+        InvalidCommandReuse,
+        factory().enqueue(legacy.id, structured.model_copy(update={"sender_id": legacy.id, "origin": "message"})),
+        "a conflicting input origin did not raise InvalidCommandReuse",
+    )
+    assert [item.event for item in await factory().read_page(legacy.id)] == [old, structured]
+
     concurrent = _header()
     await store.create(concurrent)
     same = InputQueued(command_id=uuid.uuid4().hex, input="once")

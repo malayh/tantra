@@ -6,9 +6,8 @@ import json
 import logging
 import re
 import types
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -20,7 +19,6 @@ from tantra.acp import AcpAccess, AcpAuth, AcpServer
 from tantra.acp import agent as acp_agent
 from tantra.acp.jsonrpc import RpcError
 from tantra.acp.transport import Transport
-from tantra.coordinator import ChangeNotice
 from tantra.errors import CoordinatorUnavailable, LeaseLost, WriterReplaced
 from tantra.events import (
     CancellationRequested,
@@ -147,20 +145,6 @@ class HeldTransport:
         await self.inner.close()
 
 
-class Coordinated:
-    def __init__(self, runtime: Runtime, watch: Callable[..., AsyncIterator[ChangeNotice]]) -> None:
-        self._runtime = runtime
-        self.coordinator = SimpleNamespace(watch=watch)
-        self.refreshes = 0
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._runtime, name)
-
-    async def tree_status(self, root_id: UUID) -> Any:
-        self.refreshes += 1
-        return await self._runtime.tree_status(root_id)
-
-
 class DropResponse:
     def __init__(self, inner: Transport) -> None:
         self.inner = inner
@@ -177,12 +161,6 @@ class DropResponse:
 
     async def close(self) -> None:
         await self.inner.close()
-
-
-@pytest.fixture(autouse=True)
-def fast_mirror(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(acp_agent, "MIRROR_POLL", 0.05)
-    monkeypatch.setattr(acp_agent, "MIRROR_DEBOUNCE", 0.01)
 
 
 async def scope(auth: AcpAuth, meta: Any) -> dict[str, str]:
@@ -866,23 +844,11 @@ async def test_the_mirror_redacts_names_and_errors_through_view() -> None:
         worker=[Sample(text="digging", tool_calls=calls("x1", "missing"))],
     )
     runtime, server = serve(provider, [Root], view=redact)
-    statuses = 0
-    tree_status = runtime.tree_status
-
-    async def counted(root_id: UUID) -> Any:
-        nonlocal statuses
-        statuses += 1
-        return await tree_status(root_id)
-
-    runtime.tree_status = counted
     async with Client(server, profile=True) as client:
         root = await client.new()
         await client.prompt(root, "go")
         [worker] = await client.until(lambda: list(mirror(client, root)))
         await client.until(lambda: mirror(client, root)[worker]["state"] == {"state": "running"})
-        before = statuses
-        await asyncio.sleep(0.3)
-        polled = statuses - before
         provider.gate.set()
         await client.until(lambda: mirror(client, root)[worker]["state"].get("stopReason") == "error")
         await client.idle(root, 2)
@@ -898,7 +864,6 @@ async def test_the_mirror_redacts_names_and_errors_through_view() -> None:
     assert failed.error and failed.error not in received
     synthetic = [item for item in viewed if isinstance(item.event, ChildCreated) and item.event.turn_id == ""]
     failures = [item for item in viewed if isinstance(item.event, TurnFailed)]
-    assert polled >= 4
     assert 1 <= len(synthetic) <= 3
     assert [(item.agent_id, item.event.turn_id) for item in failures] == [(UUID(worker), failed.turn_id)]
     await runtime.aclose()
@@ -972,13 +937,9 @@ async def test_fencing_before_go_live_sends_no_writer_update() -> None:
     await runtime.aclose()
 
 
-async def test_the_mirror_polls_when_the_coordinator_watch_dies() -> None:
-    died = asyncio.Event()
-
-    async def watch(root_id: str, *, after: int = 0) -> AsyncIterator[ChangeNotice]:
-        await died.wait()
-        raise CoordinatorUnavailable("watch lost")
-        yield
+async def test_the_mirror_follows_the_tree_watch_without_tree_status() -> None:
+    async def unused(root_id: UUID) -> Any:
+        raise AssertionError("tree_status was polled")
 
     provider = GatedScripted(
         "root",
@@ -987,20 +948,13 @@ async def test_the_mirror_polls_when_the_coordinator_watch_dies() -> None:
         worker=[Sample(text="dug in")],
     )
     runtime = Runtime(provider, MemoryStore(), [Root])
-    coordinated = Coordinated(runtime, watch)
-    server = AcpServer(coordinated, agent=Root, scope=scope, policy=allow, name="profile")
+    runtime.tree_status = unused
+    server = AcpServer(runtime, agent=Root, scope=scope, policy=allow, name="profile")
     async with Client(server, profile=True) as client:
         root = await client.new()
         await client.prompt(root, "go")
         [worker] = await client.until(lambda: list(mirror(client, root)))
         await client.until(lambda: mirror(client, root)[worker]["state"] == {"state": "running"})
-        session = client.connection.sessions[UUID(root)]
-        died.set()
-
-        async def watch_done() -> bool:
-            return session.watch is not None and session.watch.done()
-
-        await eventually(watch_done)
         provider.gates["worker"].set()
         await client.until(lambda: mirror(client, root)[worker]["state"] == {"state": "idle", "stopReason": "end_turn"})
         root_state = client.states(root)[-1]
@@ -1036,7 +990,7 @@ async def test_re_resuming_an_open_root_replaces_it_and_follows_the_new_mode() -
         written = client.connection.sessions[UUID(root)]
         assert written.writer is not None and list(runtime._connections) == [written.writer._connection_id]
         running = {task for task in client.connection.tasks if not task.done()}
-        assert running == {written.tails[UUID(root)].task, written.mirroring}
+        assert running == {written.tails[UUID(root)].task, written.tree}
         await client.prompt(root, "again")
         await client.idle(root, 3)
     assert dropped.value.code == -32002
@@ -1200,60 +1154,40 @@ async def test_a_fenced_plain_client_never_receives_profile_updates() -> None:
     await runtime.aclose()
 
 
-async def test_the_poll_stops_while_the_tree_is_idle() -> None:
+async def test_the_mirror_reads_the_tree_only_when_it_changes() -> None:
     provider = GatedScripted(
         "worker",
         root=[spawning(("worker", "scout")), Sample(text="spawned"), Sample(text="noted")],
         worker=[Sample(text="slow work")],
     )
     runtime, server = serve(provider, [Root])
-    statuses = 0
-    tree_status = runtime.tree_status
+    reads = 0
+    tree_headers = runtime._tree_headers
 
-    async def counted(root_id: UUID) -> Any:
-        nonlocal statuses
-        statuses += 1
-        return await tree_status(root_id)
+    async def counted(root_id: str) -> Any:
+        nonlocal reads
+        reads += 1
+        return await tree_headers(root_id)
 
-    runtime.tree_status = counted
+    runtime._tree_headers = counted
     async with Client(server, profile=True) as client:
         root = await client.new()
         await client.prompt(root, "go")
         [worker] = await client.until(lambda: list(mirror(client, root)))
-        start = statuses
+        await client.until(lambda: mirror(client, root)[worker]["state"] == {"state": "running"})
+        await client.idle(root)
+        await asyncio.sleep(0.5)
+        start = reads
         await asyncio.sleep(0.3)
-        busy = statuses - start
+        busy = reads - start
         provider.gate.set()
         await client.idle(root, 2)
         await client.until(lambda: mirror(client, root)[worker]["state"].get("stopReason") == "end_turn")
-        await asyncio.sleep(0.2)
-        start = statuses
         await asyncio.sleep(0.5)
-        idle = statuses - start
-    assert busy >= 4
-    assert idle == 0
-    await runtime.aclose()
-
-
-async def test_the_debounce_allows_about_one_refresh_per_half_second(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(acp_agent, "MIRROR_DEBOUNCE", 0.5)
-    child = uuid4().hex
-
-    async def burst(root_id: str, *, after: int = 0) -> AsyncIterator[ChangeNotice]:
-        for change in range(1, 121):
-            yield ChangeNotice(change_id=change, root_id=root_id, kind="journal", actor_id=child, seq=change)
-            await asyncio.sleep(0.01)
-        await asyncio.Future()
-
-    runtime = Runtime(Scripted(m=[]), MemoryStore(), [Bot], default_model="m")
-    coordinated = Coordinated(runtime, burst)
-    server = AcpServer(coordinated, agent=Bot, scope=scope, policy=allow, name="profile")
-    async with Client(server, profile=True) as client:
-        await client.new()
-        await client.until(lambda: client.updates)
-        await asyncio.sleep(1.2)
-        refreshes = coordinated.refreshes
-    assert 2 <= refreshes <= 4
+        start = reads
+        await asyncio.sleep(0.3)
+        idle = reads - start
+    assert busy == idle == 0
     await runtime.aclose()
 
 
@@ -1305,13 +1239,14 @@ async def test_go_live_never_announces_on_a_closed_session() -> None:
 
     runtime, server = serve(Scripted(m=[Sample(text="x")]), [Bot], policy=held_prompt)
     tree_gate = asyncio.Event()
-    tree_status = runtime.tree_status
+    watch_tree = runtime.watch_tree
 
     async def held_tree(root_id: UUID) -> Any:
         await tree_gate.wait()
-        return await tree_status(root_id)
+        async for change in watch_tree(root_id):
+            yield change
 
-    runtime.tree_status = held_tree
+    runtime.watch_tree = held_tree
     async with Client(server, profile=True) as owner:
         session_id = await owner.new(**tantra(mode="read"))
         async with Client(server, profile=True) as client:
@@ -1353,14 +1288,16 @@ async def test_a_failing_mirror_refresh_closes_the_connection(failure: str) -> N
     )
     runtime, server = serve(provider, [Root], view=broken_view)
     tree_status = runtime.tree_status
+    watch_tree = runtime.watch_tree
     broken = asyncio.Event()
 
     async def failing_tree(root_id: UUID) -> Any:
-        if broken.is_set():
-            raise RuntimeError("store failed")
-        return await tree_status(root_id)
+        async for change in watch_tree(root_id):
+            if broken.is_set():
+                raise RuntimeError("store failed")
+            yield change
 
-    runtime.tree_status = failing_tree
+    runtime.watch_tree = failing_tree
     async with Client(server, profile=True) as client:
         root = await client.new()
         broken.set()

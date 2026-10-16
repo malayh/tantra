@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from importlib.metadata import version
 from typing import Any
@@ -46,16 +46,13 @@ from tantra.errors import (
     WriterReplaced,
     WriterRequired,
 )
-from tantra.events import ActorStatus, ChildCreated, LoggedEvent, SessionHeader, TurnFailed
+from tantra.events import ActorStatus, ChildCreated, LoggedEvent, SessionHeader, TreeChange, TurnFailed
 from tantra.runtime import Connection, LocatedAsk
 
 MAX_SESSIONS = 8
 SEND_ATTEMPTS = 4
 LIST_PAGE = 50
 TAIL_RETRIES = 8
-MIRROR_DEBOUNCE = 0.5
-MIRROR_POLL = 1.0
-BUSY = frozenset({"queued", "running", "awaiting_input"})
 TRANSIENT = (CoordinatorUnavailable, CommandTimeout, LeaseLost)
 STOPPED = {"finished": "_tantra_finished", "cancelled": "cancelled", "interrupted": "_tantra_interrupted"}
 PERMISSION_OPTIONS = [
@@ -177,14 +174,13 @@ class _Session:
     lost: bool = False
     closed: bool = False
     live: asyncio.Event = field(default_factory=asyncio.Event)
-    stale: asyncio.Event = field(default_factory=asyncio.Event)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     asks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     exits: set[asyncio.Task[None]] = field(default_factory=set)
     mirror: dict[UUID, dict[str, Any]] = field(default_factory=dict)
     viewed: dict[UUID, tuple[tuple[Any, ...], tuple[str, str | None] | None]] = field(default_factory=dict)
-    watch: asyncio.Task[None] | None = None
-    mirroring: asyncio.Task[None] | None = None
+    tree: asyncio.Task[None] | None = None
+    changes: AsyncIterator[TreeChange] | None = None
     teardown: asyncio.Task[None] | None = None
 
 
@@ -639,7 +635,7 @@ class AcpConnection:
             raise RpcError(INVALID_PARAMS)
         header = await self._load(root_id)
         await self._authorize("set_model", header, request.meta or {})
-        patched = await self.runtime.store.patch_header(root_id.hex, model=request.value)
+        patched = await self.runtime.patch_header(root_id, model=request.value)
         session = self.sessions.get(root_id)
         if session is not None:
             session.model = patched.model
@@ -741,42 +737,42 @@ class AcpConnection:
     async def _go_live(self, session: _Session) -> None:
         if session.closed:
             return
-        header = await self.runtime.store.header(session.root_id.hex)
-        if header is None:
+        tree = self.runtime.watch_tree(session.root_id)
+        following = False
+        try:
+            change = await anext(tree, None)
+            if change is None:
+                return
+            session.title, session.model = change.title, change.model
+            await self._info(session, change)
+            root = session.tails[session.root_id]
+            for tail in [root] if self.profile else list(session.tails.values()):
+                if tail.parent_id is not None:
+                    await self._update(tail.parent_id, _subagent(tail.actor_id, tail.title, tail.projector.state))
+                await self._update(tail.actor_id, {"sessionUpdate": "state_update", **tail.projector.state})
+            if self.profile:
+                await self._update(session.root_id, wire.dump(wire.QueueUpdate(entries=root.projector.queue)))
+                await self._mirror(session, change)
+            async with session.lock:
+                if session.closed:
+                    return
+                if session.writer is not None:
+                    await self._announce(session)
+                session.live.set()
+            if not session.closed:
+                session.changes = tree
+                session.tree = self._spawn(self._follow(session, tree))
+                following = True
+        except SessionNotFound:
             await self._shutdown(session)
-            return
-        session.title, session.model = header.title, header.model
-        info = wire.SessionInfoUpdate(title=header.title, updated_at=header.updated_at.isoformat())
-        await self._update(session.root_id, wire.dump(info))
-        root = session.tails[session.root_id]
-        for tail in [root] if self.profile else list(session.tails.values()):
-            if tail.parent_id is not None:
-                await self._update(tail.parent_id, _subagent(tail.actor_id, tail.title, tail.projector.state))
-            await self._update(tail.actor_id, {"sessionUpdate": "state_update", **tail.projector.state})
-        poll = None
-        if self.profile:
-            await self._update(session.root_id, wire.dump(wire.QueueUpdate(entries=root.projector.queue)))
-            try:
-                poll = await self._refresh(session)
-            except SessionNotFound:
-                await self._shutdown(session)
-                return
-            except ConnectionError:
-                raise
-            except Exception:
-                logger.exception("ACP mirror for %s failed", session.root_id)
-                self._spawn(self.transport.close())
-                return
-        async with session.lock:
-            if session.closed:
-                return
-            if session.writer is not None:
-                await self._announce(session)
-            session.live.set()
-        if self.runtime.coordinator is not None and not session.closed:
-            session.watch = self._spawn(self._watch(session))
-        if self.profile and not session.closed:
-            session.mirroring = self._spawn(self._mirror(session, poll))
+        except ConnectionError:
+            raise
+        except Exception:
+            logger.exception("ACP mirror for %s failed", session.root_id)
+            self._spawn(self.transport.close())
+        finally:
+            if not following:
+                await tree.aclose()
 
     async def _child_live(self, session: _Session, tail: _Tail) -> None:
         if session.closed or session.tails.get(tail.actor_id) is not tail:
@@ -872,8 +868,6 @@ class AcpConnection:
         elif isinstance(output, ChildAnnounced):
             if not self.profile:
                 await self._child(session, tail, output, mode)
-            elif mode == "live":
-                session.stale.set()
         elif isinstance(output, UsageSample):
             if self.profile:
                 if mode != "discard":
@@ -886,9 +880,7 @@ class AcpConnection:
             if isinstance(output, QueueChanged):
                 await self._update(tail.actor_id, wire.dump(wire.QueueUpdate(entries=output.entries)))
             elif isinstance(output, TurnState):
-                if self.profile:
-                    session.stale.set()
-                elif tail.parent_id is not None:
+                if not self.profile and tail.parent_id is not None:
                     await self._update(tail.parent_id, _subagent(tail.actor_id, None, output.state))
             elif isinstance(output, AskPending) and session.writer is not None:
                 self._issue(session, output)
@@ -1010,11 +1002,13 @@ class AcpConnection:
     async def _teardown(self, session: _Session) -> None:
         tasks = [tail.task for tail in session.tails.values()]
         tasks.extend(session.asks.values())
-        tasks.extend((session.watch, session.mirroring))
+        tasks.append(session.tree)
         pending = [task for task in tasks if task is not None]
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
+        if session.changes is not None:
+            await session.changes.aclose()
         async with session.lock:
             await self._release(session, fenced=False)
         await asyncio.gather(*session.exits, return_exceptions=True)
@@ -1123,50 +1117,25 @@ class AcpConnection:
             if session.asks.get(pending.ask_id) is current:
                 del session.asks[pending.ask_id]
 
-    async def _watch(self, session: _Session) -> None:
-        coordinator = self.runtime.coordinator
-        assert coordinator is not None
-        root = session.root_id.hex
+    async def _info(self, session: _Session, change: TreeChange) -> None:
+        info = wire.SessionInfoUpdate(title=change.title, updated_at=change.actors[0].updated_at.isoformat())
+        await self._update(session.root_id, wire.dump(info))
+
+    async def _follow(self, session: _Session, tree: AsyncIterator[TreeChange]) -> None:
         try:
-            async for notice in coordinator.watch(root):
-                if notice.kind == "deleted":
+            async for change in tree:
+                if session.closed:
                     return
-                if notice.actor_id not in (None, root) and notice.kind in ("journal", "header", "activity"):
-                    session.stale.set()
-                if notice.kind != "header" or notice.actor_id != root:
-                    continue
-                header = await self.runtime.store.header(root)
-                if header is None:
-                    return
-                if header.title != session.title:
-                    session.title = header.title
-                    info = wire.SessionInfoUpdate(title=header.title, updated_at=header.updated_at.isoformat())
-                    await self._update(session.root_id, wire.dump(info))
-                if header.model != session.model:
-                    session.model = header.model
-                    config = self._config(header.model)
+                if change.title != session.title:
+                    session.title = change.title
+                    await self._info(session, change)
+                if change.model != session.model:
+                    session.model = change.model
+                    config = self._config(change.model)
                     if config is not None:
                         await self._update(session.root_id, wire.dump(wire.ConfigOptionUpdate(config_options=config)))
-        except CoordinatorUnavailable:
-            logger.warning("header watch for %s stopped", root)
-        finally:
-            session.stale.set()
-
-    async def _mirror(self, session: _Session, poll: float | None) -> None:
-        loop = asyncio.get_running_loop()
-        refreshed = loop.time()
-        try:
-            while not session.closed:
-                try:
-                    await asyncio.wait_for(session.stale.wait(), poll)
-                except TimeoutError:
-                    pass
-                delay = refreshed + MIRROR_DEBOUNCE - loop.time()
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                session.stale.clear()
-                poll = await self._refresh(session)
-                refreshed = loop.time()
+                if self.profile:
+                    await self._mirror(session, change)
         except SessionNotFound:
             session.lost = True
             if not session.closed:
@@ -1176,12 +1145,11 @@ class AcpConnection:
         except Exception:
             logger.exception("ACP mirror for %s failed", session.root_id)
             self._spawn(self.transport.close())
+        finally:
+            await tree.aclose()
 
-    async def _refresh(self, session: _Session) -> float | None:
-        try:
-            statuses = await self.runtime.tree_status(session.root_id)
-        except CoordinatorUnavailable:
-            return MIRROR_POLL
+    async def _mirror(self, session: _Session, change: TreeChange) -> None:
+        statuses = change.actors
         seqs = {status.agent_id: status.last_seq for status in statuses}
         hidden: set[UUID] = set()
         for status in statuses:
@@ -1203,9 +1171,6 @@ class AcpConnection:
             if session.mirror.get(status.agent_id) != update:
                 session.mirror[status.agent_id] = update
                 await self._update(status.parent_id, update)
-        busy = any(status.state in BUSY for status in statuses)
-        watched = self.runtime.coordinator is not None and not (session.watch is not None and session.watch.done())
-        return MIRROR_POLL if busy and not watched else None
 
     async def _viewed(self, status: ActorStatus, parent_seq: int) -> tuple[str, str | None] | None:
         error = _failure(status)

@@ -628,7 +628,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 ```
 
 - For profile clients, every descendant is mirrored as `subagent_update {sessionId, title, state}` on its parent's session id, parents first. A finished child adds `_meta.tantra.finished: true`.
-- A snapshot follows `session/new` and `session/resume`; after that, an update whenever a refresh sees a change. Refreshes are debounced and polled, so a short-lived state can be skipped. Live-only.
+- A snapshot follows `session/new` and `session/resume`; after that, an update whenever the runtime's tree watch reports a change. The watch keeps only the latest tree, so a short-lived state can be skipped, and a new child's state may arrive before the parent's cursored announcement. Live-only.
 - Child state maps to v2 state:
 
 | Child | `state` |
@@ -752,7 +752,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 - **A plain v2 client that resumes a session with a pending ask** gets no request until its first mutation claims the writer.
 - **Deletion is silent to other connections.** Their views stop, and later calls answer `-32002`.
 - **Read access is not revalidated after `session/resume`.** A reader keeps receiving updates until it closes the session or the WebSocket closes at `expires_at`.
-- **The child mirror polls** the runtime's tree status: debounced to one refresh per 500 ms on change notices, and once a second while the tree is busy when there is no coordinator.
+- **The child mirror is coalesced.** It follows the runtime's tree watch, which reads headers on each change and keeps only the latest tree, so a short-lived child state can be skipped.
 
 ## Implementation details and evidence
 
@@ -805,7 +805,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 
 **Known gaps in the reference implementation**
 
-- Children are recognized from the text prefixes the runtime gives their lifecycle inputs, until the runtime records the sender structurally.
+- Journals written before the runtime recorded input senders are classified by the text prefixes of their lifecycle inputs.
 - Two paths answer differently for an existing id than for an unknown one: a child id answers `-32602` before the policy check on some methods, and a `session/list` cursor is checked for existence, not scope. Both need the id already, so they confirm existence rather than reveal ids.
 
 ## Frequently asked questions

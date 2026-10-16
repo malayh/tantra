@@ -69,6 +69,7 @@ from tantra.events import (
     Stamped,
     SubmittedBy,
     TextPart,
+    TreeChange,
     TurnCancelled,
     TurnCompleted,
     TurnFailed,
@@ -82,7 +83,7 @@ from tantra.loop import DEFAULT_RETRY, FinishResult, RetryConfig, TurnEngine
 from tantra.permissions import check_permission, decide
 from tantra.providers.base import Provider
 from tantra.skills import SKILL_TOOL, SkillInfo, Skills
-from tantra.stores.base import HistorySnapshot, OperationalState, Store, reduce_journal
+from tantra.stores.base import UNSET, HistorySnapshot, OperationalState, Store, reduce_journal
 from tantra.stores.postgres import PostgresStore
 from tantra.tools import Context, Tool
 from tantra.tracing import NULL_TRACER, Tracer
@@ -95,6 +96,20 @@ if TYPE_CHECKING:
     from tantra.memory import Memory
 
 TYPED_KEYS = frozenset({"type", "anyOf", "allOf", "oneOf", "$ref", "enum", "const"})
+TREE_KINDS = frozenset({"header", "activity", "ownership", "deleted"})
+TREE_INTERVAL = 0.25
+STATUS_EVENTS = (
+    InputQueued,
+    TurnStarted,
+    AskRaised,
+    AskAnswered,
+    TurnCompleted,
+    TurnFailed,
+    TurnCancelled,
+    TurnInterrupted,
+    AgentFinished,
+)
+STATUS_FIELDS = frozenset({"status", "finished", "title", "model"})
 
 
 def _check_schema(label: str, entry: Tool) -> None:
@@ -179,6 +194,17 @@ class _Signal:
 
 
 @dataclass
+class _Tree:
+    users: int = 0
+    generation: int = 0
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    snapshot: tuple[int, TreeChange] | None = None
+    change_id: int | None = None
+    read_at: float | None = None
+
+
+@dataclass
 class _LiveAsk:
     root_id: str
     agent_id: str
@@ -228,6 +254,8 @@ def _lifecycle_input(child_id: str, turn: TurnSummary) -> InputQueued | None:
     return InputQueued(
         command_id=uuid5(child_uuid, turn.turn_id.hex).hex,
         input=f"[agent {child_uuid} turn ended] {encoded}",
+        sender_id=child_id,
+        origin="turn_ended",
     )
 
 
@@ -329,6 +357,7 @@ class Runtime:
         self._pages = CommittedPages(lambda sid, **kwargs: self.store.read_page(sid, **kwargs))
         self._observations: dict[str, Any] = {}
         self._observation_errors: dict[str, CoordinatorUnavailable] = {}
+        self._trees: dict[str, _Tree] = {}
         self._connections: dict[UUID, Connection] = {}
         self._maintenance_task: asyncio.Task[None] | None = None
         self._started = coordinator is None
@@ -496,6 +525,7 @@ class Runtime:
             self._connection_interests.get(root_id)
             or self._stream_interests.get(root_id)
             or self._wait_interests.get(root_id)
+            or root_id in self._trees
         )
 
     async def _stop_watcher_if_unused(self, root_id: str) -> None:
@@ -619,6 +649,54 @@ class Runtime:
             await self._notify(actor_id)
         for actor_id in wait_wakes - stream_wakes:
             await self._notify_waiter(actor_id)
+        tree = self._trees.get(root_id)
+        if tree is not None and observation.error is None:
+            await self._observe_tree(root_id, tree, observation.change_id)
+
+    async def _observe_tree(self, root_id: str, tree: _Tree, change_id: int) -> None:
+        if tree.change_id is not None and change_id <= tree.change_id:
+            return
+        after, tree.change_id = tree.change_id, change_id
+        changes = getattr(self.coordinator, "_changes", None)
+        if after is None or changes is None:
+            self._tree_changed(root_id)
+            return
+        try:
+            while True:
+                page = await changes(root_id, after)
+                if any(notice.kind in TREE_KINDS for notice in page):
+                    self._tree_changed(root_id)
+                    return
+                if len(page) < 1000:
+                    return
+                after = page[-1].change_id
+        except CoordinatorUnavailable:
+            self._tree_changed(root_id)
+
+    def _tree_changed(self, root_id: str) -> None:
+        tree = self._trees.get(root_id)
+        if tree is not None:
+            tree.generation += 1
+            tree.changed.set()
+            tree.changed = asyncio.Event()
+
+    def _retain_tree(self, root_id: str) -> _Tree:
+        tree = self._trees.get(root_id)
+        if tree is None:
+            tree = self._trees[root_id] = _Tree()
+            observation = self._observations.get(root_id)
+            if observation is not None and observation.error is None:
+                tree.change_id = observation.change_id
+            self._sync_actor_interests(root_id)
+            self._watch_root(root_id)
+        tree.users += 1
+        return tree
+
+    async def _release_tree(self, root_id: str, tree: _Tree) -> None:
+        tree.users -= 1
+        if tree.users == 0 and self._trees.get(root_id) is tree:
+            del self._trees[root_id]
+            await self._stop_watcher_if_unused(root_id)
 
     async def _notify_root_interests(self, root_id: str) -> None:
         streams = set(self._stream_interests.get(root_id, {}))
@@ -644,6 +722,8 @@ class Runtime:
                         await self._refresh_writers(root_id)
                         continue
                     notice = pending.result()
+                    if notice.kind in ("header", "activity", "ownership", "deleted", "journal"):
+                        self._tree_changed(root_id)
                     if notice.kind == "writer":
                         await self._refresh_writers(root_id)
                     if notice.actor_id is not None:
@@ -754,6 +834,8 @@ class Runtime:
                 last = await guarded.append(agent_id, events)
         else:
             last = await self.store.append(agent_id, events)
+        if self.coordinator is None and any(isinstance(event, STATUS_EVENTS) for event in events):
+            self._tree_changed(root_id)
         first = last - len(events) + 1
         stamped = [Stamped(seq=first + index, event=event) for index, event in enumerate(events)]
         if store is None:
@@ -766,7 +848,10 @@ class Runtime:
     async def _patch_header(self, agent_id: str, **fields: Any) -> SessionHeader:
         root_id = self._known_roots.get(agent_id, agent_id)
         if self.coordinator is None or root_id not in self._known_roots:
-            return await self.store.patch_header(agent_id, **fields)
+            header = await self.store.patch_header(agent_id, **fields)
+            if self.coordinator is None and STATUS_FIELDS & fields.keys():
+                self._tree_changed(header.root_id or header.id)
+            return header
         ownership = self._ownerships.get(root_id)
         if ownership is None:
             raise LeaseLost(root_id)
@@ -777,6 +862,7 @@ class Runtime:
         root_id = header.root_id or header.id
         if self.coordinator is None:
             await self.store.create(header)
+            self._tree_changed(root_id)
             return
         ownership = self._ownerships.get(root_id)
         if ownership is None:
@@ -787,7 +873,9 @@ class Runtime:
     async def _enqueue(self, agent_id: str, event: InputQueued) -> Any:
         root_id = self._known_roots.get(agent_id, agent_id)
         if self.coordinator is None:
-            return await self.store.enqueue(agent_id, event)
+            accepted = await self.store.enqueue(agent_id, event)
+            self._tree_changed(root_id)
+            return accepted
         ownership = self._ownerships.get(root_id)
         if ownership is None:
             raise LeaseLost(root_id)
@@ -1257,6 +1345,7 @@ class Runtime:
             connection._failure = SessionNotFound(root_id)
             connection._writer_token = None
             await self._release_connection(connection)
+        self._tree_changed(root_id)
         await self._notify_root_interests(root_id)
         for actor_id in ids:
             await self._notify(actor_id)
@@ -1312,12 +1401,68 @@ class Runtime:
     async def tree_status(self, root_id: UUID) -> list[ActorStatus]:
         self._ensure_started()
         _, sid = _id(root_id, "root_id")
-        headers = await self._tree_headers(sid)
+        return await self._tree_statuses(sid, await self._tree_headers(sid))
+
+    async def _tree_statuses(self, root_id: str, headers: list[SessionHeader]) -> list[ActorStatus]:
         if self.coordinator is None:
             return [self._status_from_header(header) for header in headers]
         self._ensure_started()
-        active = {header.id: await self.coordinator.active(sid, header.id) for header in headers}
+        active = {header.id: await self.coordinator.active(root_id, header.id) for header in headers}
         return [self._status_from_header(header, active[header.id]) for header in headers]
+
+    async def watch_tree(self, root_id: UUID) -> AsyncIterator[TreeChange]:
+        self._ensure_started()
+        _, sid = _id(root_id, "root_id")
+        await self._root_header(sid)
+        tree = self._retain_tree(sid)
+        try:
+            last: TreeChange | None = None
+            failures = 0
+            while not self._closing and not self._closed:
+                changed = tree.changed
+                try:
+                    snapshot = await self._tree_snapshot(sid, tree)
+                except Exception as exc:
+                    if self._closing or self._closed:
+                        return
+                    if not isinstance(exc, CoordinatorUnavailable):
+                        raise
+                    interval = float(getattr(self.coordinator, "catch_up_interval", 2.0))
+                    await asyncio.sleep(min(0.1 * 2**failures, interval))
+                    failures = min(failures + 1, 16)
+                    continue
+                failures = 0
+                if snapshot != last:
+                    last = snapshot
+                    yield snapshot
+                await changed.wait()
+        finally:
+            await self._release_tree(sid, tree)
+
+    async def _tree_snapshot(self, root_id: str, tree: _Tree) -> TreeChange:
+        async with tree.lock:
+            if tree.snapshot is not None and tree.snapshot[0] == tree.generation:
+                return tree.snapshot[1]
+            loop = asyncio.get_running_loop()
+            if tree.read_at is not None and loop.time() < tree.read_at + TREE_INTERVAL:
+                await asyncio.sleep(tree.read_at + TREE_INTERVAL - loop.time())
+            generation = tree.generation
+            tree.read_at = loop.time()
+            headers = await self._tree_headers(root_id)
+            actors = await self._tree_statuses(root_id, headers)
+            snapshot = TreeChange(title=headers[0].title, model=headers[0].model, actors=tuple(actors))
+            tree.snapshot = (generation, snapshot)
+            return snapshot
+
+    async def patch_header(
+        self, agent_id: UUID, *, title: str | None = UNSET, model: str | None = UNSET
+    ) -> SessionHeader:
+        self._ensure_open()
+        self._ensure_started()
+        _, sid = _id(agent_id, "agent_id")
+        header = await self.store.patch_header(sid, title=title, model=model)
+        self._tree_changed(header.root_id or header.id)
+        return header
 
     async def lookup_ask(self, root_id: UUID, ask_id: UUID) -> LocatedAsk | None:
         self._ensure_started()
@@ -1503,7 +1648,10 @@ class Runtime:
         if task is not None and not task.done():
             return
         generation = self._activations.get(agent_id, 0)
-        self.active[agent_id] = asyncio.create_task(self._drain(agent_id, root_id, generation))
+        task = self.active[agent_id] = asyncio.create_task(self._drain(agent_id, root_id, generation))
+        if self.coordinator is None:
+            self._tree_changed(root_id)
+            task.add_done_callback(lambda _: self._tree_changed(root_id))
 
     async def _interrupt_if_incomplete(
         self,
@@ -1695,7 +1843,7 @@ class Runtime:
                 await self._append(header.id, [event])
             elif existing != event:
                 raise InvalidCommandReuse(child_id)
-            queued = InputQueued(command_id=input_uuid.hex, input=input)
+            queued = InputQueued(command_id=input_uuid.hex, input=input, sender_id=header.id, origin="spawn")
             accepted = await self._enqueue(child_id, queued)
             if not accepted.duplicate:
                 await self._notify(child_id)
@@ -1714,7 +1862,7 @@ class Runtime:
         root_id = header.root_id or header.id
         command = self._internal_id(header, ctx, "send")
         message = f"[agent {UUID(hex=header.id)}] {input}"
-        queued = InputQueued(command_id=command.hex, input=message)
+        queued = InputQueued(command_id=command.hex, input=message, sender_id=header.id, origin="message")
         async with self._lock(root_id):
             self._ensure_open()
             sender = await self._header(header.id)
@@ -1796,6 +1944,8 @@ class Runtime:
             parent_input = InputQueued(
                 command_id=command.hex,
                 input=f"[agent {UUID(hex=header.id)} finished] {encoded}",
+                sender_id=header.id,
+                origin="finished",
             )
             lookup = getattr(self.store, "lookup_command", None)
             if lookup is not None:
@@ -2129,6 +2279,7 @@ class Runtime:
                                 command_id=payload.command_id.hex,
                                 input=payload.input,
                                 submitted_by=payload.submitted_by,
+                                origin="user",
                             )
                             existing = await find_command(payload.command_id.hex)
                             if existing is not None:
@@ -2450,7 +2601,7 @@ class Runtime:
                 connection._writer_token,
             )
             return CommandReceipt(public_id, bool(result["duplicate"]))
-        event = InputQueued(command_id=cid, input=input, submitted_by=submitted_by)
+        event = InputQueued(command_id=cid, input=input, submitted_by=submitted_by, origin="user")
         async with self._lock(connection._root):
             self._check_writer(connection)
             existing = await self._tree_command(connection._root, cid)
@@ -2879,6 +3030,8 @@ class Runtime:
             return
         if self.coordinator is not None:
             self._closing = True
+            for root_id in list(self._trees):
+                self._tree_changed(root_id)
             try:
                 await self._close_coordinated()
             finally:
@@ -2889,6 +3042,8 @@ class Runtime:
             return
         self._closing = True
         self._closed = True
+        for root_id in list(self._trees):
+            self._tree_changed(root_id)
         try:
             await self._close_local()
         finally:

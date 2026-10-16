@@ -180,6 +180,23 @@ test("profile fixtures set the queue, writer reason and roster", () => {
   });
 });
 
+test("a mirror state before the cursored announcement keeps its state", () => {
+  const mirror = profile("mirror_subagent_update");
+  const child = mirror.update.sessionId;
+  let t = apply(empty(), mirror.sessionId, mirror.update);
+  t = apply(t, mirror.sessionId, {
+    sessionUpdate: "subagent_update",
+    sessionId: child,
+    title: "scout",
+    _meta: { tantra: { cursor: "4.0" } },
+  });
+  assert.deepEqual(t.roster[child], {
+    parentId: mirror.sessionId,
+    title: "scout",
+    state: { state: "running" },
+  });
+});
+
 test("asks normalize all three kinds and answer in the server's shapes", () => {
   const [approval, text, choice] = golden.requests.map(requested);
   const asks = [approval, text, choice].map(({ request }) => askOf(request));

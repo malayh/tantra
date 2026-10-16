@@ -47,6 +47,14 @@ class InputQueued(EventBase):
     command_id: str
     input: str
     submitted_by: SubmittedBy | None = None
+    sender_id: str | None = None
+    origin: Literal["user", "spawn", "message", "finished", "turn_ended"] | None = None
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, InputQueued) and (self.origin is None) != (other.origin is None):
+            cleared = {"sender_id": None, "origin": None}
+            return self.model_copy(update=cleared) == other.model_copy(update=cleared)
+        return super().__eq__(other)
 
 
 class TurnStarted(EventBase):
@@ -260,6 +268,13 @@ class ActorStatus:
     last_turn: TurnSummary | None
     last_seq: int
     updated_at: datetime
+
+
+@dataclass(frozen=True)
+class TreeChange:
+    title: str | None
+    model: str | None
+    actors: tuple[ActorStatus, ...]
 
 
 class Stamped(BaseModel):

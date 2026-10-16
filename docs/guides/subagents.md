@@ -27,4 +27,4 @@ Ordinary child completion leaves the actor reusable. Every child terminal outcom
 
 The optional child `name` is trimmed, and a blank name is omitted. It is a durable display label only: `agent_name` remains the actor type and the child UUID is unchanged. A deterministic retry must reuse the same normalized name.
 
-Applications can poll `runtime.tree_status(root_id)` without activating actors or reading journals. Subscribe to child activity with `runtime.events(child_id, after=cursor)` only when detailed output is needed. Root and child sequence numbers are unrelated.
+Applications can poll `runtime.tree_status(root_id)` or follow `runtime.watch_tree(root_id)` without activating actors or reading journals. Subscribe to child activity with `runtime.events(child_id, after=cursor)` only when detailed output is needed. Root and child sequence numbers are unrelated.

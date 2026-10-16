@@ -1,6 +1,6 @@
 # 018 — ACP v2–inspired interface and the `tantra` profile
 
-**Status:** P1–P7 ✅ DONE. P8 not started.
+**Status:** P1–P8 ✅ DONE.
 
 ## Goal
 
@@ -74,20 +74,21 @@ No published implementation does fencing, durable cursor replay, or lazy child d
 
 **Surprises**
 - `SessionSocket`, `tantra-session-client` and 017 P0 all landed after release 1.4.0 (`b6778a0`), so deleting them breaks no release. The 017 P0 Runtime additions stay: `submitted_by`, `lookup_ask`, and migration 12.
-- Synthetic inputs can only be recognized by the prefixes the runtime formats until P8:
+- ~~Synthetic inputs can only be recognized by the prefixes the runtime formats until P8~~ (P8: `InputQueued.origin`; prefixes remain the fallback for legacy journals):
   - `[agent <uuid>] …` (`runtime.py:1716`)
   - `[agent <uuid> finished] …` (`runtime.py:1796`)
   - `[agent <uuid> turn ended] …` (`runtime.py:215`)
   - a child's first input (`runtime.py:1698`)
-- The root journal holds no child state other than lifecycle inputs. Until P8, the mirror comes from `runtime.tree_status`, polled or triggered by coordinator notices.
+- The root journal holds no child state other than lifecycle inputs. ~~Until P8, the mirror comes from `runtime.tree_status`, polled~~ Since P8, the mirror follows `Runtime.watch_tree`.
+- Status changes inside `reduce_header` publish only `journal` notices; P8 adds `header` hints on append. Usage patches publish `header` after every sample.
 - **Per-child cancel does not exist.** `Connection.cancel` cancels the whole tree (`runtime.py:2539`).
 - `finish` is permanent (`runtime.py:1758`). ACP subagent associations have no terminal state.
 - Writer loss is only detectable by iterating the writable `Connection`, which raises `WriterReplaced`. `acp/agent.py` catches it the same way.
 - `session/cancel` is a notification, so it can never return an error.
 - Children cannot ask humans (`loop.py:576`). A child that is not being observed therefore never strands a request.
 - A cursor is only stable for one fixed projection: the same profile flag and server configuration (`decode_input`, hidden tools, `view`). Client capabilities such as `elicitation.form` change no outputs or indices.
-- Without a coordinator, `patch_header` (title or model) gives no local signal.
-- **P8 risk:** retries compare whole `InputQueued` events (`runtime.py:1727`, `:1817`, `:2458`). New fields must not turn a legacy event plus its retry into `InvalidCommandReuse`.
+- Without a coordinator, a raw `store.patch_header` (title or model) gives no local signal. Use `Runtime.patch_header` (P8).
+- **P8 risk:** retries compare whole `InputQueued` events at 10 sites: 4 in `runtime.py`, `store.enqueue` in all 4 stores, and `CoordinatedStore.enqueue`. Lifecycle reconcile re-enqueues at startup. New fields must not turn a legacy event plus its retry into `InvalidCommandReuse`; `InputQueued.__eq__` handles it.
 - Extension method names must start with `_` on the wire. Assert the exact method names in tests.
 - In stdio mode, stdout must carry only JSON-RPC.
 
@@ -130,7 +131,7 @@ No published implementation does fencing, durable cursor replay, or lazy child d
 - `finish` maps to `idle` with `_tantra_finished`, plus `_meta.tantra.finished: true`.
 - `capabilities` stays empty, because there is no per-child cancel.
 - **Child state, P1:** derived from the child-journal tails, since every descendant transcript is pushed.
-- **Child state, P2 (profile clients):** every descendant is mirrored from `runtime.tree_status` as `subagent_update {sessionId, title, state}` on its parent's session id, BFS order so parents come first. Snapshot after resume, then on change; live-only. Refresh triggers: coordinator `journal`/`header`/`activity` notices for non-root actors (debounced 500 ms), a root `ChildCreated`, and without a coordinator a 1 s poll while the root or any descendant is `queued`/`running`/`awaiting_input`. One `coordinator.watch` per session feeds both this mirror and the header watch. Non-profile clients keep the P1 tail-derived mirror.
+- **Child state, P2 (profile clients):** every descendant is mirrored from `runtime.tree_status` as `subagent_update {sessionId, title, state}` on its parent's session id, BFS order so parents come first. Snapshot after resume, then on change; live-only. ~~Refresh triggers: debounced coordinator notices and a 1 s poll; one `coordinator.watch` per session~~ Since P8, one `Runtime.watch_tree` per open root feeds this mirror and the title/model watch. Non-profile clients keep the P1 tail-derived mirror.
 - **Pending asks** at resume and at claim come from `header.pending_ask` plus `runtime.lookup_ask`.
 
 **Other standard updates**
@@ -276,7 +277,7 @@ Child status is mirrored as the parent's `subagent_update.state`. In P1 it is de
 - `cancelled` → `idle` with `cancelled`
 - `interrupted` → `idle` with `_tantra_interrupted`
 
-The P2 `tree_status` mirror refreshes on coordinator notices for child actors, debounced to at most one refresh per 500 ms, and on a root `ChildCreated`. With no coordinator, it polls once a second while the root or any descendant is queued, running or awaiting input.
+The P2 mirror follows `Runtime.watch_tree` (P8): a snapshot per tree change, reads at least 250 ms apart, no polling.
 
 ## `tantra` profile
 
@@ -957,37 +958,69 @@ Deploy backend and UI together. Old pages need a refresh.
 - **Silent delete:** other connections get no update when a session is deleted (`agent.py:822-825`).
 - **Lost session on a failed re-resume:** a write-mode re-resume shuts down the old session (`agent.py:472-474`) before claiming (`:477-478`). A claim that fails after the policy pre-check therefore loses it.
 
-### Phase 8 — Runtime additions · deps: P1 · —
+### Phase 8 — Runtime additions · deps: P1 · ✅ DONE
 
 > ⚠ **This phase changes tantra's Runtime.** Before planning or starting it, the orchestrator must explicitly tell the user that this phase changes Runtime internals. It must also get confirmation before any Runtime code is written. Keep the changes additive.
 
 **Deliverables**
-- `InputQueued` gains optional `sender_id: str | None` and `origin: Literal["user", "spawn", "message", "finished", "turn_ended"] | None`.
-  - Set them in `_actor_spawn`, `_actor_send`, `_actor_finish` and `_lifecycle_input`. User inputs get `origin="user"`.
-  - The input text and its prefixes stay unchanged.
-  - When a legacy event (missing fields) is compared with its retry, treat the missing fields as matching, so legacy events plus retries never raise `InvalidCommandReuse`.
-- `Runtime.watch_tree(root_id) -> AsyncIterator[TreeChange]`: actor status and root header changes, from local signals and coordinator notices. It does not read the journal.
-  - Root header changes also cover `patch_header`, which must signal locally.
-- `tantra.acp`:
-  - The projector uses `origin` / `sender_id`, falling back to prefix parsing for legacy journals.
-  - The subagent mirror and title/model watch use `watch_tree`; the polling is removed.
+- **Structured sender** (`events.py`, `runtime.py`):
+  - `InputQueued` gains `sender_id: str | None` (journal hex) and `origin: Literal["user", "spawn", "message", "finished", "turn_ended"] | None`.
+  - Set at `_lifecycle_input` (child, `turn_ended`), spawn (`header.id`, `spawn`), send (`message`), finish (`finished`), and both user paths, `SendPayload` and `_accept_send` (`user`). The input text is unchanged.
+  - **Legacy-safe equality:** `InputQueued.__eq__` clears both fields when exactly one side has `origin is None`, otherwise uses pydantic equality. Why: duplicates are detected by whole-event equality at 10 sites (4 runtime retries, `store.enqueue` in 4 stores, `CoordinatedStore.enqueue`); one definition covers all of them and third-party stores, so the stores stay untouched.
+  - `tantra.testing` store conformance: a legacy event plus a structured retry is a duplicate.
+- **Header hints** (`coordinator.py`): `CoordinatedStore.append` (full path) publishes `header` when `(status, finished, current_turn_id, last_turn)` changes. Status changes otherwise publish only `journal`. `enqueue` needs no hint: it always publishes `activity` in the same transaction.
+- **`Runtime.watch_tree(root_id) -> AsyncIterator[TreeChange]`:**
+  - `TreeChange(title, model, actors)`: `actors` is the `tree_status` content and order. `last_seq` and `updated_at` are as of the last tree change.
+  - An immediate snapshot, then one per change. Latest wins; never two equal in a row; never reads journals.
+  - One hub per root per Runtime (`_trees`). Reads are shared by every consumer and at least 250 ms apart (`TREE_INTERVAL`); the first read is immediate.
+  - Wakes: local mutation points without a coordinator; the per-root runtime watcher with one (`_changes` pages for `header`/`activity`/`ownership`/`deleted`; the fallback path also `journal`).
+  - Unknown root or deletion → `SessionNotFound`; `aclose` → returns; `CoordinatorUnavailable` retried inside.
+- **`Runtime.patch_header(agent_id, *, title, model)`:** calls `store.patch_header` directly, then signals. Why: `_patch_header` raises `LeaseLost` on a non-owner, and a raw store patch never signals without a coordinator.
+- **`tantra.acp`:**
+  - The projector classifies by `origin`/`sender_id`, gated on a known sender, with the regex fallback for legacy journals. Output count and order per event are unchanged, so cursors and fixtures are unchanged.
+  - One `watch_tree` per open root drives title, model and, for profile clients, the subagent mirror. Polling, the 500 ms debounce and the per-session `coordinator.watch` are gone.
+  - `set_config_option` uses `runtime.patch_header`. Title and model now reach other connections without a coordinator.
+- **Sarathi:** title generation uses `runtime.patch_header`.
 
 **Verify**
-- Runtime tests:
-  - fields set on every path
-  - legacy events plus retry give no `InvalidCommandReuse`
-  - `watch_tree` covers local, PostgreSQL across two runtimes, deletion and shutdown
-  - no journal reads while idle
-- Projector tests:
-  - structured and legacy journals reduce to identical output
-  - no `tree_status` polling remains
-- Full package, stress, Sarathi and client suites pass unchanged.
+- Runtime: fields on every path; legacy events plus retries at every site, including lifecycle reconcile on a fresh Runtime and on PostgreSQL; `watch_tree` local, two runtimes on PostgreSQL, deletion, shutdown, coalescing, read spacing, cancellation mid-read, zero journal reads.
+- Projector: structured and legacy journals give identical output.
+- ACP: no polling; hubs released on every teardown path.
+- Full package, stress, Sarathi and client suites pass. ~~Unchanged~~: tests of removed internals were rewritten (see As built).
+- The ACP bench full run, compared with P7 on the same machine.
 
 **Checklist**
-- [ ] User reminded + confirmed before starting
-- [ ] Structured sender + legacy-safe comparison
-- [ ] `watch_tree`
-- [ ] ACP switched over, polling removed
+- [x] User reminded + confirmed before starting (plan approved 2026-10-16)
+- [x] Structured sender + legacy-safe comparison
+- [x] `watch_tree`
+- [x] ACP switched over, polling removed
+
+**Verified**
+- `ruff` clean. `pytest` 1159 passed, `pytest stress` 157 passed, both zero skips on owned PostgreSQL. Sarathi 115 passed. `tantra-acp-client` 62 passed, lint and typecheck clean. `mkdocs build --strict` clean.
+- `loop.py`, `stores/*.py` and the profile fixtures are untouched. No `MIRROR_`, `tree_status(` or polling sleeps in `acp/agent.py`.
+- **ACP bench full run:** `complete: true`, 100 journals verified, no errors, 0 reconnects. Same machine, per worker:
+
+  | | P7 | P8 |
+  |---|---|---|
+  | Delivery p50 / p95 | 3243 / 4480 ms | 3177 / 4359 ms |
+  | Idle: CPU, SQL calls | ~3.0 s, 349 | ~2.5 s, 349 |
+  | Idle journal or event-body SQL | 0 | 0 |
+  | Active: CPU, SQL calls | ~4.25 s, ~23.6k | ~4.38 s, ~26.4k |
+  | Active: journal queries, header queries | ~1476, ~2943 | ~1496, ~4312 |
+- One review: 2 low defects, 1 perf risk and nits, all fixed. The fixes added the 250 ms read spacing, dropped the redundant enqueue hint, closed the watch on every teardown path, and refused `patch_header` after close.
+
+**As built**
+- **Active SQL is ~12% higher than P7.** Header reads follow status changes now instead of a debounced poll. Accepted: latency and idle CPU improved, and active CPU is flat. ~~Idle and active SQL no worse than P6b~~.
+- **Rewritten tests:** the `MIRROR_*` monkeypatches; the poll, debounce and dying-watch tests; Sarathi's fake coordinator watch. Two more outside the plan:
+  - `test_concurrent_opens_never_orphan_a_session_or_exceed_the_cap`: every session now runs a tree task.
+  - `integration.mjs` child resume: the mirror now reports a new child before its `TurnStarted` commits, so its transcript arrives live, not replayed.
+- **The setter may see a transient model echo** when a tree read is in flight; the final value is always the set one. Documented.
+- **Prefix spoofing is gone for new journals:** a user typing `[agent <child>] …` stays a `user_message`. A spawn input that begins with `[agent <parent>] ` is no longer stripped.
+
+**Follow-up**
+- Active flags could come from the root observation instead of one `coordinator.active` per actor per read.
+- Lease expiry still changes `active` with no notice.
+- A `watch_tree` consumer inside the read wait when the runtime closes can get one more snapshot before returning.
 
 ### Conventions (all phases)
 - **Workflow:**
@@ -1055,11 +1088,12 @@ Deploy backend and UI together. Old pages need a refresh.
   - Generic v2 clients may assume close means cancel. With us, work keeps running after they close.
   - Generic clients may expect the response at insertion; they get it at acceptance instead.
 - **Few v2 clients exist today,** and fencing may stay tantra-only.
-- **Fragile prefix parsing:** until P8, classification breaks if the runtime's text formats change. Round-trip tests guard this.
+- **Prefix parsing:** since P8 only legacy journals use it. Round-trip tests guard it.
+- **Mixed-version clusters:** an old owner parses `sender_id`/`origin` as extras and rejects retries of new inputs. Drain old workers before rolling out P8.
 - **Cursors depend on projection config:** a cursor is only valid for the profile flag and server configuration it was issued under.
 - **Replay cost:** a full replay is proportional to history length.
 - **Security:**
   - Client-supplied MCP servers are ignored.
   - Read access isn't revalidated after the handshake.
 - **stdio:** writing to stdout corrupts the stream.
-- **P8 retries:** P8 changes event equality used by retries. The legacy-compatibility tests are mandatory.
+- **P8 retries:** `InputQueued.__eq__` is lenient only when one side is legacy. The legacy-compatibility tests are mandatory.

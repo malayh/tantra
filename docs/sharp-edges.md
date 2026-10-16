@@ -16,7 +16,7 @@ Takeover waits for the old lease to expire. PostgreSQL uncertainty is an availab
 
 ## Actor streams are separate and lazy
 
-A root cursor says nothing about a child cursor. Poll `tree_status()` for lightweight tree state. Subscribe to a child only when its detailed events are needed, and persist that actor's last sequence independently.
+A root cursor says nothing about a child cursor. Poll `tree_status()` or follow `watch_tree()` for lightweight tree state. Subscribe to a child only when its detailed events are needed, and persist that actor's last sequence independently.
 
 ## Sync tool effects may outlive cancellation
 

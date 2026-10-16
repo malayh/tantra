@@ -219,9 +219,11 @@ try {
   assert.equal(announced.title, "worker");
   assert.deepEqual(a.of(child), []);
   assert.deepEqual(await a.client.resume(child), {});
-  assert.ok(a.of(child).length > 0);
+  await waitFor(
+    () => a.of(child, "session_message").length > 0,
+    "child transcript",
+  );
   const inbound = a.of(child, "session_message");
-  assert.ok(inbound.length > 0);
   assert.ok(inbound.every((update) => cursorOf(update)));
   assert.ok(a.state().sessions[child].cursor);
   await waitFor(

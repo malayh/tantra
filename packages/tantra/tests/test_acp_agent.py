@@ -492,6 +492,35 @@ async def test_set_config_option_patches_the_model() -> None:
     await runtime.aclose()
 
 
+async def test_title_and_model_reach_other_connections_without_a_coordinator() -> None:
+    runtime, server = serve(FakeProvider([]), models=["m", "n"])
+    async with Client(server) as setter, Client(server, profile=True) as watcher:
+        session_id = await setter.new()
+        await watcher.resume(session_id)
+        await setter.until(lambda: setter.of(session_id, "state_update"))
+        await watcher.until(lambda: watcher.of(session_id, "state_update"))
+        await runtime.patch_header(UUID(session_id), title="Renamed")
+        for client in (setter, watcher):
+            await client.until(
+                lambda client=client: [
+                    update
+                    for update in client.of(session_id, "session_info_update")
+                    if update.get("title") == "Renamed"
+                ]
+            )
+        await setter.call(
+            "session/set_config_option", {"sessionId": session_id, "configId": "model", "type": "id", "value": "n"}
+        )
+        [update] = await watcher.until(lambda: watcher.of(session_id, "config_option_update"))
+        await runtime.patch_header(UUID(session_id), title="Again")
+        await setter.until(
+            lambda: [u for u in setter.of(session_id, "session_info_update") if u.get("title") == "Again"]
+        )
+    assert update["configOptions"][0]["currentValue"] == "n"
+    assert setter.of(session_id, "config_option_update") == []
+    await runtime.aclose()
+
+
 async def test_disconnect_leaves_the_turn_running(gated_provider: Any) -> None:
     provider = gated_provider([Sample(text="survives disconnect")])
     provider.gate.clear()
@@ -715,8 +744,13 @@ async def test_concurrent_opens_never_orphan_a_session_or_exceed_the_cap() -> No
     async with Client(server) as client:
         await asyncio.gather(client.resume(session_id), client.resume(session_id))
         session = client.connection.sessions[UUID(session_id)]
+
+        async def followed() -> bool:
+            return session.tree is not None
+
+        await eventually(followed)
         running = {task for task in client.connection.tasks if not task.done()}
-        assert running == {session.tails[UUID(session_id)].task}
+        assert running == {session.tails[UUID(session_id)].task, session.tree}
     await runtime.aclose()
 
     class YieldingStore(MemoryStore):
@@ -774,4 +808,55 @@ async def test_replay_reports_only_the_latest_usage() -> None:
             await replayed.until(lambda: replayed.of(session_id, "session_info_update"))
     assert [update["used"] for update in live.of(session_id, "usage_update")] == [10, 20]
     assert [update["used"] for update in replayed.of(session_id, "usage_update")] == [20]
+    await runtime.aclose()
+
+
+async def test_tree_watches_are_released_on_every_teardown_path() -> None:
+    runtime, server = serve(FakeProvider([]))
+
+    def watchers(session_id: str, count: int) -> Any:
+        async def check() -> bool:
+            tree = runtime._trees.get(UUID(session_id).hex)
+            return (tree.users if tree is not None else 0) == count
+
+        return check
+
+    async def released() -> bool:
+        return runtime._trees == {}
+
+    async with Client(server, profile=True) as client:
+        session_id = await client.new()
+        await eventually(watchers(session_id, 1))
+        await client.call("session/close", {"sessionId": session_id})
+        await eventually(released)
+        for _ in range(5):
+            await client.resume(session_id)
+        await eventually(watchers(session_id, 1))
+        await client.call("session/close", {"sessionId": session_id})
+        await eventually(released)
+        await client.resume(session_id)
+        await eventually(watchers(session_id, 1))
+        await client.call("session/delete", {"sessionId": session_id})
+        await eventually(released)
+        other = await client.new()
+        await eventually(watchers(other, 1))
+        spawn = client.connection._spawn
+
+        def cancel_follow(coroutine: Any, *, cleanup: bool = False) -> Any:
+            task = spawn(coroutine, cleanup=cleanup)
+            if getattr(coroutine, "__name__", None) == "_follow":
+                task.cancel()
+            return task
+
+        client.connection._spawn = cancel_follow
+        cancelled = await client.new()
+
+        async def cancelled_early() -> bool:
+            session = client.connection.sessions.get(UUID(cancelled))
+            return session is not None and session.tree is not None and session.tree.done()
+
+        await eventually(cancelled_early)
+        await client.call("session/close", {"sessionId": cancelled})
+        await eventually(watchers(cancelled, 0))
+    await eventually(released)
     await runtime.aclose()

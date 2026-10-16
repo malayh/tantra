@@ -108,7 +108,7 @@ class TitleHook(Hook):
         header = await self.store.header(session_id)
         if header is None or header.title is not None:
             return
-        await self.store.patch_header(session_id, title=title)
+        await self.runtime.patch_header(UUID(hex=session_id), title=title)
 
     async def aclose(self) -> None:
         tasks = list(self.tasks.values())

@@ -2217,3 +2217,70 @@ async def test_compaction_requests_are_isolated_per_actor_session() -> None:
         ]
     finally:
         await runtime.aclose()
+
+
+async def test_every_input_path_records_its_sender_and_origin_with_unchanged_text() -> None:
+    class Worker(Agent):
+        model = "worker"
+
+    class Root(Agent):
+        model = "root"
+        subagents = [Worker]
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.scripts: dict[str, list[StreamEnd]] = {
+                "root": [StreamEnd(tool_calls=[call("spawn", '{"agent_name":"worker","input":"start"}', "s1")])],
+                "worker": [StreamEnd(text="first pass")],
+            }
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            script = self.scripts[req.model]
+            yield script.pop(0) if script else StreamEnd(text="done")
+
+    provider = Provider()
+    store = MemoryStore()
+    runtime = Runtime(provider, store, [Root])
+    root_id = await runtime.create(Root)
+    async with runtime.connect(root_id, writable=True) as connection:
+        await connection.prompt("go", command_id=uuid4(), submitted_by="alice")
+    child = (await store.list(parent_id=root_id.hex))[0]
+    await wait_idle(runtime, child.id, root_id.hex)
+    provider.scripts["root"].append(
+        StreamEnd(tool_calls=[call("send", json.dumps({"agent_id": str(UUID(hex=child.id)), "input": "more"}), "m1")])
+    )
+    provider.scripts["worker"].extend(
+        [
+            StreamEnd(tool_calls=[call("send", json.dumps({"agent_id": str(root_id), "input": "ping"}), "w1")]),
+            StreamEnd(tool_calls=[call("finish", '{"result":"ok"}', "w2")]),
+        ]
+    )
+    async with runtime.connect(root_id, writable=True) as connection:
+        await connection.prompt("nudge", command_id=uuid4())
+
+    async def settled() -> None:
+        while not (await store.header(child.id)).finished or any(not t.done() for t in runtime.active.values()):
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(settled(), 5)
+    child_uuid, root_uuid = UUID(hex=child.id), str(root_id)
+    root_inputs = [
+        (event.input.split("] ")[0] + "]" if event.input.startswith("[agent ") else event.input, event)
+        for event in await journal(store, root_id.hex)
+        if isinstance(event, InputQueued)
+    ]
+    child_inputs = [event for event in await journal(store, child.id) if isinstance(event, InputQueued)]
+    assert [(label, event.sender_id, event.origin, event.submitted_by) for label, event in root_inputs] == [
+        ("go", None, "user", "alice"),
+        (f"[agent {child_uuid} turn ended]", child.id, "turn_ended", None),
+        ("nudge", None, "user", None),
+        (f"[agent {child_uuid}]", child.id, "message", None),
+        (f"[agent {child_uuid} finished]", child.id, "finished", None),
+    ]
+    assert root_inputs[3][1].input == f"[agent {child_uuid}] ping"
+    assert root_inputs[4][1].input == f'[agent {child_uuid} finished] "ok"'
+    assert [(event.input, event.sender_id, event.origin) for event in child_inputs] == [
+        ("start", root_id.hex, "spawn"),
+        (f"[agent {root_uuid}] more", root_id.hex, "message"),
+    ]
+    await runtime.aclose()

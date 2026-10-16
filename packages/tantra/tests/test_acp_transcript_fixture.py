@@ -8,12 +8,10 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
-import pytest
 from acp_support import Client, Scripted, cursor_of
 
 from tantra import Agent, Choice, FreeText, Runtime, tool
 from tantra.acp import AcpAccess, AcpAuth, AcpServer
-from tantra.acp import agent as acp_agent
 from tantra.providers.base import ProviderEvent, SampleRequest, TextDelta, ToolCall
 from tantra.providers.fake import Sample
 from tantra.stores.memory import MemoryStore
@@ -157,9 +155,7 @@ def normalize(value: Any, ids: dict[str, str]) -> Any:
     return value
 
 
-async def test_the_transcript_fixture_matches_a_scripted_session(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(acp_agent, "MIRROR_POLL", 0.05)
-    monkeypatch.setattr(acp_agent, "MIRROR_DEBOUNCE", 0.01)
+async def test_the_transcript_fixture_matches_a_scripted_session() -> None:
     provider = Choreographed(
         lead=[
             Sample(reasoning="Plan the checks first.", text="Checking the system.", tool_calls=calls("c1", "deploy")),

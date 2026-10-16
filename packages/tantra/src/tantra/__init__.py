@@ -51,6 +51,7 @@ from tantra.events import (
     SessionHeader,
     SessionStatus,
     Stamped,
+    TreeChange,
     TurnSummary,
     Usage,
 )
@@ -161,6 +162,7 @@ __all__ = [
     "TantraError",
     "Tool",
     "Tracer",
+    "TreeChange",
     "TurnContext",
     "TurnResult",
     "TurnSummary",

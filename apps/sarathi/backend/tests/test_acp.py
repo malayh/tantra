@@ -1,10 +1,8 @@
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import replace
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -14,10 +12,9 @@ import pytest
 from conftest import ORIGIN, Acp, SharedProvider, SharedStore, dial
 from fastapi import FastAPI
 from httpx_ws import WebSocketDisconnect
-from starlette.routing import WebSocketRoute
 
 from sarathi.agent import RuntimeResources, Sarathi
-from sarathi.api.acp import AcpPrincipal, bind, build_acp_endpoint, decode_input, encode_prompt, policy, scope
+from sarathi.api.acp import AcpPrincipal, bind, decode_input, encode_prompt, policy, scope
 from sarathi.auth import (
     ACP_TICKET_AUDIENCE,
     ACP_TICKET_PURPOSE,
@@ -35,12 +32,10 @@ from tantra import (
     FreeTextResponse,
     LocatedAsk,
     ModelChangeBusy,
-    Runtime,
     Sample,
     SessionHeader,
 )
 from tantra.acp import AcpAccess, AcpAuth
-from tantra.coordinator import ChangeNotice
 from tantra.events import AskRaised, InputQueued
 from tantra.providers.base import ToolCall
 
@@ -70,14 +65,6 @@ async def _uid(client: httpx.AsyncClient, token: str) -> str:
     response = await client.get("/api/auth/me", headers=_auth(token))
     assert response.status_code == 200
     return str(response.json()["id"])
-
-
-async def _eventually(condition: Callable[[], Any], timeout: float = 5.0) -> None:
-    async def poll() -> None:
-        while not condition():
-            await asyncio.sleep(0.01)
-
-    await asyncio.wait_for(poll(), timeout)
 
 
 async def _titled(resources: RuntimeResources, session_id: str) -> str:
@@ -127,43 +114,6 @@ def _access(
 ) -> AcpAccess:
     auth = AcpAuth(AcpPrincipal(user, capability), submitted_by=user)
     return AcpAccess(operation, auth, root, actor or root, {}, ask, response)
-
-
-class Coordinated:
-    def __init__(self, runtime: Runtime, watch: Callable[..., AsyncIterator[ChangeNotice]]) -> None:
-        self._runtime = runtime
-        self.coordinator = SimpleNamespace(watch=watch)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._runtime, name)
-
-
-@pytest.fixture
-def watched(
-    app: FastAPI, resources: RuntimeResources, store: SharedStore, monkeypatch: pytest.MonkeyPatch
-) -> SimpleNamespace:
-    watchers: set[asyncio.Queue[str]] = set()
-    patch_header = store.patch_header
-
-    async def notify(sid: str, **fields: Any) -> SessionHeader:
-        header = await patch_header(sid, **fields)
-        for queue in watchers:
-            queue.put_nowait(sid)
-        return header
-
-    async def watch(root_id: str, *, after: int = 0) -> AsyncIterator[ChangeNotice]:
-        queue: asyncio.Queue[str] = asyncio.Queue()
-        watchers.add(queue)
-        try:
-            while True:
-                yield ChangeNotice(change_id=0, root_id=root_id, kind="header", actor_id=await queue.get())
-        finally:
-            watchers.discard(queue)
-
-    monkeypatch.setattr(store, "patch_header", notify)
-    endpoint = build_acp_endpoint(replace(resources, runtime=Coordinated(resources.runtime, watch)))
-    app.router.routes.append(WebSocketRoute("/test/acp", endpoint))
-    return SimpleNamespace(path="/test/acp", watchers=watchers)
 
 
 async def test_ticket_defaults_to_write_is_not_cached_and_cannot_authenticate_http(
@@ -555,11 +505,11 @@ async def test_the_writer_answers_a_memory_approval(
 
 
 async def test_the_generated_title_arrives_as_a_session_info_update(
-    acp: Acp, watched: SimpleNamespace, provider: SharedProvider, signup: Signup
+    acp: Acp, provider: SharedProvider, signup: Signup
 ) -> None:
     provider.samples.extend([Sample(text="hello"), Sample(text="A title")])
 
-    async with acp(await signup(), path=watched.path) as rpc:
+    async with acp(await signup()) as rpc:
         session_id = await rpc.new()
         await rpc.prompt(session_id, _text("name this"))
         titled = await rpc.until(lambda: [u for u in rpc.of(session_id, "session_info_update") if u.get("title")])
@@ -569,14 +519,14 @@ async def test_the_generated_title_arrives_as_a_session_info_update(
 
 
 async def test_set_model_reaches_other_viewers_as_a_config_option_update(
-    acp: Acp, watched: SimpleNamespace, resources: RuntimeResources, signup: Signup
+    acp: Acp, resources: RuntimeResources, signup: Signup
 ) -> None:
     token = await signup()
 
-    async with acp(token, path=watched.path) as writer, acp(token, mode="read", path=watched.path) as reader:
+    async with acp(token) as writer, acp(token, mode="read") as reader:
         session_id = await writer.new()
         await reader.call("session/resume", {"sessionId": session_id, "cwd": "/work"})
-        await _eventually(lambda: len(watched.watchers) == 2)
+        await reader.until(lambda: reader.of(session_id, "state_update"))
         result = await writer.call("session/set_config_option", _model(session_id, "other-model"))
         [update] = await reader.until(lambda: reader.of(session_id, "config_option_update"))
         unknown = await writer.request("session/set_config_option", _model(session_id, "nope"))

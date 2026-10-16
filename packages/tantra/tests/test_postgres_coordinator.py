@@ -18,7 +18,7 @@ from tantra import (
     SessionHeader,
     WriterReplaced,
 )
-from tantra.events import InputQueued, TurnCompleted, TurnStarted, Usage
+from tantra.events import InputQueued, TextDelta, TextPart, TurnCompleted, TurnStarted, Usage
 
 psycopg = pytest.importorskip("psycopg")
 
@@ -703,5 +703,32 @@ async def test_blocked_store_connection_does_not_starve_renewal(postgres_dsn: st
         assert renewed.expires_at > ownership.expires_at
         assert elapsed < 0.15
         await blocked
+    finally:
+        await _close(pair)
+
+
+async def test_status_changes_publish_header_hints_and_delta_appends_do_not(postgres_dsn: str, pg_schema: str) -> None:
+    pair = await _coordinator(postgres_dsn, pg_schema)
+    root = uuid.uuid4().hex
+    command = uuid.uuid4().hex
+    await pair[0].create(SessionHeader(id=root, agent="build"))
+    ownership = await pair[1].acquire(root)
+    assert ownership is not None
+    try:
+        steps = [
+            ("enqueue", InputQueued(command_id=command, input="one")),
+            ("append", [TurnStarted(turn_id=command, input="one")]),
+            ("append", [TextDelta(text="a"), TextDelta(text="b")]),
+            ("append", [TextPart(sample_id="s1", text="ab")]),
+            ("append", [TurnCompleted(turn_id=command, stop_reason="completed")]),
+        ]
+        hints = []
+        for operation, payload in steps:
+            before = (await pair[1]._changes(root, 0))[-1].change_id
+            async with pair[1].transaction(ownership) as store:
+                await getattr(store, operation)(root, payload)
+            changes = await pair[1]._changes(root, before)
+            hints.append([notice.kind for notice in changes if notice.kind in ("header", "activity")])
+        assert hints == [["activity"], ["header"], [], [], ["header"]]
     finally:
         await _close(pair)

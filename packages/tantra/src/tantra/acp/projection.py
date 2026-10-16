@@ -142,6 +142,7 @@ class Projector:
         self._open: list[tuple[str, str]] = []
         self._deltas: dict[tuple[str, str], str] = {}
         self._queue: dict[str, dict[str, Any]] = {}
+        self._origins: dict[str, tuple[str, str | None]] = {}
 
     @property
     def pending_asks(self) -> list[AskPending]:
@@ -191,10 +192,17 @@ class Projector:
 
     def _project(self, seq: int, event: SessionEvent) -> list[Output]:
         if isinstance(event, InputQueued):
+            if event.origin is not None:
+                self._origins[event.command_id] = (event.origin, event.sender_id)
             return self._enqueue(event)
         if isinstance(event, TurnStarted):
             self._turn = event.turn_id
-            return [*self._input(event), *self._set_state(State(state="running")), *self._dequeue(event.turn_id)]
+            origin, sender = self._origins.pop(event.turn_id, (None, None))
+            return [
+                *self._input(event, origin, sender),
+                *self._set_state(State(state="running")),
+                *self._dequeue(event.turn_id),
+            ]
         if isinstance(event, SampleStarted):
             self._sample = event.sample_id
             self._model = event.model
@@ -269,6 +277,7 @@ class Projector:
                 )
             return outputs
         if isinstance(event, TurnCompleted | TurnCancelled | TurnFailed | TurnInterrupted):
+            self._origins.pop(event.turn_id, None)
             return [*self._terminal(event), *self._dequeue(event.turn_id)]
         return []
 
@@ -286,9 +295,26 @@ class Projector:
             return [self._message(message_id, str(self.parent_id), self._id, text)]
         return None
 
-    def _input(self, event: TurnStarted) -> list[Output]:
+    def _classify(self, text: str, message_id: str, origin: str | None, sender: str | None) -> list[Output] | None:
+        if origin == "user":
+            return None
+        sender_id = entity_id(sender) if sender is not None else None
+        parent = str(self.parent_id) if self.parent_id is not None else None
+        child = sender_id in self._children
+        if origin == "spawn" and sender_id is not None and sender_id == parent:
+            return [self._message(message_id, sender_id, self._id, text)]
+        if origin in ("message", "finished") and sender_id is not None and (child or sender_id == parent):
+            finished = origin == "finished"
+            prefix = f"[agent {sender_id} finished] " if finished else f"[agent {sender_id}] "
+            if text.startswith(prefix):
+                return [self._message(message_id, sender_id, self._id, text[len(prefix) :], finished=finished)]
+        if origin == "turn_ended" and child:
+            return []
+        return self._synthetic(text, message_id)
+
+    def _input(self, event: TurnStarted, origin: str | None, sender: str | None) -> list[Output]:
         message_id = entity_id(event.turn_id)
-        synthetic = self._synthetic(event.input, message_id)
+        synthetic = self._classify(event.input, message_id, origin, sender)
         if synthetic is not None:
             return synthetic
         update = MessageUpdate(
@@ -298,7 +324,7 @@ class Projector:
 
     def _enqueue(self, event: InputQueued) -> list[Output]:
         command_id = entity_id(event.command_id)
-        if not self.profile or self._synthetic(event.input, command_id) is not None:
+        if not self.profile or self._classify(event.input, command_id, event.origin, event.sender_id) is not None:
             return []
         entry = QueueEntry(
             command_id=command_id, content=self.decode_input(event.input), submitted_by=event.submitted_by

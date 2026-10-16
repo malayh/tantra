@@ -21,6 +21,7 @@ from tantra import (
     RemoteExecutionError,
     Runtime,
     Sample,
+    SessionHeader,
     SessionNotFound,
     WriterReplaced,
     tool,
@@ -29,6 +30,7 @@ from tantra.events import (
     AskRaised,
     CancellationRequested,
     InputQueued,
+    SessionCreated,
     TurnCancelled,
     TurnCompleted,
     TurnInterrupted,
@@ -36,6 +38,7 @@ from tantra.events import (
 )
 from tantra.providers.base import ModelLimits, ProviderEvent, SampleRequest, StreamEnd, ToolCall
 from tantra.providers.fake import FAKE_LIMITS, FakeProvider
+from tantra.runtime import _lifecycle_input
 from tantra.tools import Context
 
 psycopg = pytest.importorskip("psycopg")
@@ -1778,3 +1781,84 @@ async def test_result_wait_racing_coordinator_close_preserves_terminal_or_outage
         if waiter is not None:
             await asyncio.gather(waiter, return_exceptions=True)
         await store.close()
+
+
+class Worker(Agent):
+    pass
+
+
+class Lead(Agent):
+    subagents = [Worker]
+
+
+async def test_coordinated_inputs_are_user_origin_and_legacy_retries_are_duplicates(
+    postgres_dsn: str, pg_schema: str
+) -> None:
+    bare = PostgresStore(postgres_dsn, schema=pg_schema)
+    await bare.setup()
+    root_id = uuid4()
+    legacy = uuid4()
+    await bare.create(SessionHeader(id=root_id.hex, root_id=root_id.hex, agent="bot", model="m"))
+    await bare.enqueue(root_id.hex, InputQueued(command_id=legacy.hex, input="old", submitted_by="alice"))
+    store, runtime = await _runtime(postgres_dsn, pg_schema)
+    fresh = uuid4()
+    try:
+        async with runtime.connect(root_id, writable=True) as connection:
+            retried = await connection.send("old", command_id=legacy, submitted_by="alice")
+            accepted = await connection.send("new", command_id=fresh, submitted_by="alice")
+            for command in (legacy, fresh):
+                assert (await runtime._wait_result(root_id.hex, command)).outcome == "completed"
+        inputs = [item.event async for item in store.read(root_id.hex) if isinstance(item.event, InputQueued)]
+    finally:
+        await runtime.aclose()
+        await store.close()
+        await bare.close()
+    assert (retried.duplicate, accepted.duplicate) == (True, False)
+    assert [(event.input, event.origin, event.sender_id, event.submitted_by) for event in inputs] == [
+        ("old", None, None, "alice"),
+        ("new", "user", None, "alice"),
+    ]
+
+
+async def test_recovery_accepts_legacy_lifecycle_notices(postgres_dsn: str, pg_schema: str) -> None:
+    bare = PostgresStore(postgres_dsn, schema=pg_schema)
+    await bare.setup()
+    root, child, child_turn = uuid4().hex, uuid4().hex, uuid4().hex
+    await bare.create(SessionHeader(id=root, root_id=root, agent="lead", model="m"))
+    await bare.append(root, [SessionCreated(agent="lead", root_id=root, model="m")])
+    await bare.create(SessionHeader(id=child, root_id=root, parent_id=root, agent="worker", depth=1, model="m"))
+    await bare.append(
+        child,
+        [
+            SessionCreated(agent="worker", root_id=root, parent_id=root, depth=1, model="m"),
+            InputQueued(command_id=child_turn, input="dig"),
+            TurnStarted(turn_id=child_turn, input="dig"),
+            TurnCompleted(turn_id=child_turn, stop_reason="completed"),
+        ],
+    )
+    header = await bare.header(child)
+    assert header is not None and header.last_turn is not None
+    notice = _lifecycle_input(child, header.last_turn)
+    assert notice is not None and notice.origin == "turn_ended"
+    await bare.enqueue(root, notice.model_copy(update={"sender_id": None, "origin": None}))
+    await bare.append(
+        root,
+        [
+            TurnStarted(turn_id=notice.command_id, input=notice.input),
+            TurnCompleted(turn_id=notice.command_id, stop_reason="completed"),
+        ],
+    )
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    runtime = Runtime(EchoProvider(), store, [Lead], default_model="m", coordinator=_coordinator(store))
+    await runtime.start()
+    try:
+        async with runtime.connect(UUID(hex=root), writable=True) as connection:
+            result = await connection.prompt("again", command_id=uuid4())
+        inputs = [item.event async for item in store.read(root) if isinstance(item.event, InputQueued)]
+    finally:
+        await runtime.aclose()
+        await store.close()
+        await bare.close()
+    assert result.outcome == "completed"
+    assert [event.command_id for event in inputs if event.command_id == notice.command_id] == [notice.command_id]
+    assert [event.origin for event in inputs] == [None, "user"]

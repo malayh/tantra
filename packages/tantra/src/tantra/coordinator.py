@@ -1507,6 +1507,7 @@ class CoordinatedStore:
             await self.coordinator.store._index_events(
                 self.conn, [(sid, start_seq + offset, event) for offset, event in enumerate(events, start=1)]
             )
+        before = _tree_state(header)
         header = reduce_header(header, events)
         header.last_seq = seq
         await self.conn.execute(
@@ -1519,6 +1520,8 @@ class CoordinatedStore:
         )
         if rows:
             await self.change("journal", sid, seq)
+        if _tree_state(header) != before:
+            await self.change("header", sid)
         return seq
 
     async def enqueue(self, sid: str, event: InputQueued) -> EnqueueResult:
@@ -1761,6 +1764,10 @@ class CoordinatedStore:
         row = await cursor.fetchone()
         if row is None or not row[0]:
             raise LeaseLost(self.ownership.root_id)
+
+
+def _tree_state(header: SessionHeader) -> tuple[Any, ...]:
+    return header.status, header.finished, header.current_turn_id, header.last_turn
 
 
 def _ownership(row: Sequence[Any]) -> Ownership:

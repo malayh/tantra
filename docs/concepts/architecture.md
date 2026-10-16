@@ -18,7 +18,7 @@ A root or child actor runs at most one turn at a time. Different actors and inde
 
 Only a writable root connection accepts human commands. Opening a newer writer atomically invalidates the previous writer. Readers never own execution, and disconnecting does not cancel accepted work.
 
-Every actor has its own journal. `ChildCreated` reveals a child UUID. Applications can poll durable headers with `tree_status()` and subscribe to an actor journal only when its detailed events are needed. There is no merged tree stream or composite cursor.
+Every actor has its own journal. `ChildCreated` reveals a child UUID. Applications can read durable headers with `tree_status()` or follow them with `watch_tree()`, and subscribe to an actor journal only when its detailed events are needed. There is no merged tree stream or composite cursor.
 
 ## Model guidance layers
 

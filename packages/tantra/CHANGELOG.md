@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+Added:
+
+- `Runtime.watch_tree(root_id)` yields `TreeChange` snapshots (the root's title and model plus every actor status) on each tree change, from local signals and coordinator notices, without reading journals. Reads are shared per root and at least 250 ms apart.
+- `Runtime.patch_header(agent_id, title=..., model=...)` changes a title or model from any Runtime and signals tree watchers. Route application title and model changes through it.
+- `InputQueued.sender_id` and `InputQueued.origin` record who queued an input. The text is unchanged.
+
+Changed:
+
+- `tantra.acp` classifies agent inputs by `origin`, falling back to text prefixes only for older journals. Its child mirror and title/model updates follow `watch_tree`; the polling and the 500 ms debounce are gone, and title and model updates now reach other connections without a coordinator.
+- `CoordinatedStore` publishes a `header` change when an append changes an actor's status, current turn or last turn.
+
+Compatibility and upgrade:
+
+- A retry compared with an event written before `origin` existed ignores `sender_id` and `origin`, so recovery and command retries over older journals stay duplicates. Drain older coordinated workers before rolling out: an older owner rejects retries of inputs that carry the new fields.
+- `tantra.testing.store_conformance` now requires a store to detect duplicate inputs by comparing events with `==`, so that a legacy `InputQueued` equals its structured retry. Custom stores that compare serialized events fail it.
+
 ## 1.4.0
 
 Added:

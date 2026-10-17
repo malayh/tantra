@@ -384,6 +384,10 @@ website/
     - **`uv.lock`** regenerated: mkdocs removed (missed in P1), 2.0.0 recorded.
     - **Landing copy** on the P1 layout: eyebrow, static H1, sub, title, meta, and an "Any client, over ACP" card. No animation; that's P2.
     - **Docs home** gets a 2.0 paragraph. `tantra-acp-client/README.md` gets a dead-path fix.
+    - **`.github/workflows/publish-npm.yml`** is manual only (`workflow_dispatch`), like the PyPI releases, which are run by hand on `main`.
+      - **Check:** npm is ≥11.5.1 (needed for trusted publishing).
+      - **Then:** `npm ci`, lint, typecheck, test, and `npm publish --access public`.
+      - **Auth:** OIDC trusted publishing (`id-token: write`), with automatic provenance. `NODE_AUTH_TOKEN` comes from `secrets.NPM_TOKEN`, used only to bootstrap the first publish. npm 11 falls back to the token when the OIDC exchange fails.
     - **P1 regression fixed:** `test_acp_profile.py:43` read the moved `docs/acp/tantra-profile.md`.
 - **Verify:**
   - ~~Full `pytest` and `pytest stress`~~ Targeted checks instead: runtime code is unchanged since the last fully verified commit (`084db9d`). A grep found `test_acp_profile.py` to be the only code reading moved files.
@@ -405,7 +409,13 @@ website/
   - **P4:**
     - `reference/runtime.md:76` says `ModelChangeBusy` covers any patch. It is raised only for model changes.
     - Consider `engines: {node: ">=22"}` for the client, which needs native `WebSocket`.
-  - **Release order (user):** run `npm publish` before or with the `tantra-v2.0.0` tag, since the README's `npm install` line goes live on PyPI.
+  - **Release order (user):**
+    - **Every release:** run Actions → publish-npm on `main` right after the PyPI publish, because the README's `npm install` line goes live with it.
+    - **First release only** (npm trusted publishing is configured on an existing package):
+      1. Add a repo secret `NPM_TOKEN` (a granular publish token), or run `npm publish` locally instead.
+      2. Run publish-npm.
+      3. On npmjs.com, add a trusted publisher: `malayh/tantra`, workflow `publish-npm.yml`.
+      4. Delete `NPM_TOKEN`.
   - **P2 starts from** the P5 landing copy; the headline is already static on the page.
 
 ### Conventions (all phases)

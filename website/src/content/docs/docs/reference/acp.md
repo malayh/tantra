@@ -226,7 +226,7 @@ console.log(prompt.commandId, (await prompt).messageId);
 | `connect()` / `disconnect()` | Dial, `initialize`, resume every known session / close with `1000` |
 | `newSession()` | `session/new {cwd}`; the client becomes writer |
 | `listSessions(cursor?)` | `session/list`, without a `cwd` filter |
-| `resume(id, {mode})` | `session/resume`, `mode` defaults to `read`. A failed re-resume closes the session on both sides. |
+| `resume(id, {mode, after})` | `session/resume`, `mode` defaults to `read`. `after` seeds the cursor of a session this client does not know: it resumes with `_tantra_after` that cursor and drops updates at or before it. It is ignored for a known session, and a rejected seeded resume leaves nothing behind. A failed re-resume closes the session on both sides. |
 | `close(id)` | Always drops the session (and a root's known descendants) locally and rejects its prompts. Sends `session/close` only while `open`; otherwise resolves `{}`, and a reconnect resume already in flight is closed once it returns. While a `resume(id)` is pending it resolves `{}` at once and sends `session/close` after the last pending resume returns, unless a newer `resume(id)` reopened the session; a superseded `resume()` that succeeds rejects with `closed`. |
 | `delete(id)` | `session/delete` |
 | `prompt(id, blocks, {commandId?})` | `session/prompt`; returns a promise with a synchronous `.commandId` |
@@ -238,7 +238,7 @@ console.log(prompt.commandId, (await prompt).messageId);
 - **Ordering:** every inbound frame (responses, updates, requests) is handled in one ordered chain per connection. `onUpdate` is awaited, and a session's cursor advances only after it resolves. `resume()` resolves after its replayed updates were handled, because replay precedes the response.
 - **`onUpdate` must not await client calls.** The response would queue behind the running handler and never arrive. Start the call and let it finish later.
 - **A throwing `onUpdate`** reports `handler_failed`, closes the socket and moves to `failed`. Cursors are kept, so a later `connect()` resumes after the last applied update on a fresh chain.
-- **Replay:** an open session with a cursor resumes with `_tantra_after` that cursor; otherwise from `start`. Updates at or before the applied cursor are dropped.
+- **Replay:** an open session with a cursor, or an unknown one seeded with `after`, resumes with `_tantra_after` that cursor; otherwise from `start`. Updates at or before the applied cursor are dropped.
 - **Requests:** `onRequest({method, sessionId, params, respond, signal})` receives `session/request_permission` and `elicitation/create`. It is called in order but not awaited, so a dialog can stay open while updates keep flowing; answer later with `respond()`. `$/cancel_request` and disconnects abort `signal`, and `respond()` after that is a no-op. A throwing or rejecting `onRequest` reports `handler_failed` and answers `-32603`. Without `onRequest`, and for any other method, requests answer `-32601`.
 - **Frames over 1 MiB** are rejected locally with `too_large` and never sent.
 - **Deletion:** a `_tantra_notice` `session_deleted` on an open session drops it and its known descendants, rejects their prompts, and reports `not_found` through `onError` before the notice reaches `onUpdate`. No `session/close` is sent; the agent already closed them.

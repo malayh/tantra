@@ -31,7 +31,7 @@ import {
   type SessionUpdate,
 } from "./protocol.js";
 
-export const VERSION = "2.0.0";
+export const VERSION = "2.0.1";
 
 export type ErrorCode =
   | ServerErrorCode
@@ -214,10 +214,15 @@ export class TantraAcpClient {
 
   resume(
     sessionId: string,
-    options: { mode?: Mode } = {},
+    options: { mode?: Mode; after?: string } = {},
   ): Promise<ResumeSessionResult> {
     if (this.connection !== "open") return Promise.reject(closed());
     const existing = this.sessions.has(sessionId);
+    if (!existing && options.after !== undefined)
+      this.sessions.set(sessionId, {
+        ...session(false),
+        cursor: options.after,
+      });
     const opening = this.open(sessionId, options.mode ?? "read", true);
     const target = this.sessions.get(sessionId);
     const generation = this.generation;

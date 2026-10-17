@@ -1014,3 +1014,79 @@ test("a close during a pending resume is sent once the resume returns", async ()
   assert.equal(agent.sent("session/close").length, 1);
   assert.deepEqual(state().sessions, {});
 });
+
+test("a seeded resume replays after its cursor and drops updates at or before it", async () => {
+  const agent = new FakeAgent();
+  const { client, state, updates } = tracked(agent);
+  agent.handlers["session/resume"] = function (socket, frame) {
+    for (const cursor of ["1.0", "2.0", "2.1", "3.0"])
+      this.update(socket, frame.params.sessionId, cursored(cursor));
+    this.reply(socket, frame, {});
+  };
+  await client.connect();
+  await client.resume(CHILD, { after: "2.0" });
+  assert.deepEqual(agent.sent("session/resume")[0].params, {
+    sessionId: CHILD,
+    cwd: "/",
+    replayFrom: { type: "_tantra_after", cursor: "2.0" },
+  });
+  assert.deepEqual(
+    updates.map(({ update }) => update._meta.tantra.cursor),
+    ["2.1", "3.0"],
+  );
+  assert.equal(state().sessions[CHILD].cursor, "3.0");
+});
+
+test("reconnect resumes a seeded session from its advanced cursor", async () => {
+  const agent = new FakeAgent();
+  const fixture = { agent, ...tracked(agent) };
+  await fixture.client.connect();
+  await fixture.client.resume(CHILD, { after: "2.0" });
+  assert.equal(fixture.state().sessions[CHILD].cursor, "2.0");
+  agent.update(agent.socket, CHILD, cursored("2.1"));
+  await until(() => fixture.state().sessions[CHILD].cursor === "2.1");
+  agent.socket.drop(1011);
+  await reconnected(fixture, 2);
+  assert.deepEqual(agent.sockets[1].methods("session/resume")[0].params, {
+    sessionId: CHILD,
+    cwd: "/",
+    replayFrom: { type: "_tantra_after", cursor: "2.1" },
+  });
+});
+
+test("a rejected seeded resume leaves no session and the next resume replays from start", async () => {
+  const agent = new FakeAgent();
+  const { client, state } = tracked(agent);
+  await client.connect();
+  agent.handlers["session/resume"] = function (socket, frame) {
+    if (frame.params.replayFrom.type === "_tantra_after")
+      this.fail(socket, frame, -32602, "Invalid params");
+    else this.reply(socket, frame, {});
+  };
+  await assert.rejects(client.resume(CHILD, { after: "9.0" }), {
+    code: "invalid_params",
+    rpcCode: -32602,
+  });
+  assert.deepEqual(state().sessions, {});
+  await assert.rejects(client.prompt(CHILD, text("x")), { code: "closed" });
+  await client.resume(CHILD);
+  assert.deepEqual(
+    agent.sent("session/resume").map((frame) => frame.params.replayFrom),
+    [{ type: "_tantra_after", cursor: "9.0" }, { type: "start" }],
+  );
+  assert.equal(state().sessions[CHILD].cursor, null);
+  assert.deepEqual(agent.sent("session/close"), []);
+});
+
+test("after is ignored for a session the client already has", async () => {
+  const { agent, client, sessionId, state } = await opened();
+  await client.resume(sessionId, { after: "1.0" });
+  agent.update(agent.socket, sessionId, cursored("2.1"));
+  await until(() => state().sessions[sessionId].cursor === "2.1");
+  await client.resume(sessionId, { after: "1.0" });
+  assert.deepEqual(
+    agent.sent("session/resume").map((frame) => frame.params.replayFrom),
+    [{ type: "start" }, { type: "_tantra_after", cursor: "2.1" }],
+  );
+  assert.equal(state().sessions[sessionId].cursor, "2.1");
+});

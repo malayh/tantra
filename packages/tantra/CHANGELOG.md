@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.1
+
+Fixed:
+
+- Tool and `submit_output` schemas no longer use `$ref`/`$defs` except for recursive models. A shared branch `type` is set on `anyOf`/`oneOf` (past a `null` branch only when the field has a default), and `discriminator` is dropped. Some OpenAI-compatible hosts returned object arguments as JSON strings.
+- A recursive root `output_schema` now declares `type: object`.
+
 ## 2.0.0
 
 Added:

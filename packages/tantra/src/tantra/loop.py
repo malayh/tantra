@@ -50,7 +50,7 @@ from tantra.providers.base import (
 )
 from tantra.skills import SkillInfo
 from tantra.stores.base import Store
-from tantra.tools import Context, Tool
+from tantra.tools import Context, Tool, portable_schema
 from tantra.tracing import NULL_TRACER, Tracer, current_span
 
 if TYPE_CHECKING:
@@ -87,7 +87,7 @@ def submit_output_schema(output_schema: type[BaseModel]) -> ToolSchema:
     return ToolSchema(
         name=SUBMIT_OUTPUT,
         description="Submit the final structured result for this turn. Calling this ends the turn.",
-        parameters=output_schema.model_json_schema(),
+        parameters=portable_schema(output_schema),
     )
 
 

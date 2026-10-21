@@ -1,9 +1,126 @@
 from __future__ import annotations
 
-import pytest
-from pydantic import ValidationError
+import json
+from enum import Enum
+from typing import Annotated, Any, Literal
 
-from tantra.tools import Context, Tool, tool
+import pytest
+from pydantic import BaseModel, Field, ValidationError
+
+from tantra.loop import submit_output_schema
+from tantra.tools import Context, Tool, portable_schema, tool
+
+
+class Window(BaseModel):
+    """Query window."""
+
+    start: str
+    end: str
+
+
+class PromqlSource(BaseModel):
+    type: Literal["promql"]
+    query: str
+
+
+class LogSource(BaseModel):
+    type: Literal["logs"]
+    expr: str
+
+
+class Color(Enum):
+    RED = "red"
+    BLUE = "blue"
+
+
+class Report(BaseModel):
+    window: Window
+    source: Annotated[PromqlSource | LogSource, Field(discriminator="type")]
+
+
+class Windowed(BaseModel):
+    window: Window = Field(description="time window")
+
+
+class Outcome(BaseModel):
+    error: str | None
+    window: Window | None
+
+
+class Tagged(BaseModel):
+    discriminator: str
+
+
+class Node(BaseModel):
+    value: int
+    children: list[Node] = []
+
+
+class Step(BaseModel):
+    text: str
+    next: Step | None = None
+    detail: Step
+
+
+class Left(BaseModel):
+    right: Right | None = None
+
+
+class Right(BaseModel):
+    left: Left | None = None
+
+
+class CycleA(BaseModel):
+    b: CycleB | None = None
+    c: CycleC | None = None
+
+
+class CycleB(BaseModel):
+    b: CycleB | None = None
+    c: CycleC | None = None
+
+
+class CycleC(BaseModel):
+    a: CycleA | None = None
+
+
+class Mesh0(BaseModel):
+    children: list[Mesh0 | Mesh1 | Mesh2 | Mesh3 | Mesh4 | Mesh5] = []
+
+
+class Mesh1(BaseModel):
+    children: list[Mesh0 | Mesh1 | Mesh2 | Mesh3 | Mesh4 | Mesh5] = []
+
+
+class Mesh2(BaseModel):
+    children: list[Mesh0 | Mesh1 | Mesh2 | Mesh3 | Mesh4 | Mesh5] = []
+
+
+class Mesh3(BaseModel):
+    children: list[Mesh0 | Mesh1 | Mesh2 | Mesh3 | Mesh4 | Mesh5] = []
+
+
+class Mesh4(BaseModel):
+    children: list[Mesh0 | Mesh1 | Mesh2 | Mesh3 | Mesh4 | Mesh5] = []
+
+
+class Mesh5(BaseModel):
+    children: list[Mesh0 | Mesh1 | Mesh2 | Mesh3 | Mesh4 | Mesh5] = []
+
+
+def _refs(node: Any) -> list[str]:
+    if isinstance(node, dict):
+        own = [node["$ref"]] if "$ref" in node else []
+        return own + [ref for value in node.values() for ref in _refs(value)]
+    if isinstance(node, list):
+        return [ref for item in node for ref in _refs(item)]
+    return []
+
+
+def _assert_refs_resolve(schema: dict[str, Any]) -> None:
+    refs = _refs(schema)
+    assert all(ref.startswith("#/$defs/") for ref in refs)
+    assert {ref.removeprefix("#/$defs/") for ref in refs} == set(schema.get("$defs", {}))
 
 
 @tool
@@ -33,6 +150,7 @@ def test_schema_infers_types_defaults_and_docstring() -> None:
     assert props["e"]["items"] == {"type": "string"}
     assert props["f"]["type"] == "object"
     assert props["g"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    assert props["g"]["type"] == "string"
     assert props["h"]["default"] == 3
 
 
@@ -116,3 +234,140 @@ async def test_ctx_is_injected_by_annotation() -> None:
         emit=None,
     )
     assert await uses_ctx.invoke({"value": "x"}, ctx) == "s1:x"
+
+
+def test_nested_model_params_are_inlined_with_an_object_type() -> None:
+    @tool
+    def query(
+        window: Window,
+        source: PromqlSource | LogSource,
+        windows: list[Window],
+        fallback: Window | None = None,
+    ) -> None:
+        """Query."""
+
+    params = query.schema.parameters
+    props = params["properties"]
+
+    assert _refs(params) == []
+    assert "$defs" not in params
+    assert props["window"]["type"] == "object"
+    assert props["window"]["properties"]["start"] == {"title": "Start", "type": "string"}
+    assert props["source"]["type"] == "object"
+    assert [branch["title"] for branch in props["source"]["anyOf"]] == ["PromqlSource", "LogSource"]
+    assert props["windows"]["type"] == "array"
+    assert props["windows"]["items"]["type"] == "object"
+    assert props["fallback"]["type"] == "object"
+    assert props["fallback"]["anyOf"][1] == {"type": "null"}
+    assert props["fallback"]["default"] is None
+
+
+def test_enum_param_is_inlined() -> None:
+    @tool
+    def paint(color: Color) -> None:
+        """Paint."""
+
+    params = paint.schema.parameters
+
+    assert "$defs" not in params
+    assert params["properties"]["color"] == {"enum": ["red", "blue"], "title": "Color", "type": "string"}
+
+
+def test_output_schema_inlines_models_and_drops_the_discriminator() -> None:
+    params = submit_output_schema(Report).parameters
+    source = params["properties"]["source"]
+
+    assert _refs(params) == []
+    assert "$defs" not in params
+    assert params["properties"]["window"]["type"] == "object"
+    assert source["type"] == "object"
+    assert "discriminator" not in source
+    assert [branch["title"] for branch in source["oneOf"]] == ["PromqlSource", "LogSource"]
+
+
+def test_ref_sibling_keys_win_over_the_inlined_model() -> None:
+    window = submit_output_schema(Windowed).parameters["properties"]["window"]
+
+    assert window["description"] == "time window"
+    assert window["type"] == "object"
+
+
+def test_required_nullable_fields_get_no_hoisted_type() -> None:
+    params = submit_output_schema(Outcome).parameters
+    props = params["properties"]
+
+    assert "type" not in props["error"]
+    assert props["error"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+    assert "type" not in props["window"]
+    assert props["window"]["anyOf"][0]["type"] == "object"
+    assert props["window"]["anyOf"][1] == {"type": "null"}
+    assert set(params["required"]) == {"error", "window"}
+
+
+def test_a_field_named_discriminator_is_kept() -> None:
+    assert portable_schema(Tagged)["properties"]["discriminator"] == {"title": "Discriminator", "type": "string"}
+
+
+def test_self_referencing_model_param_keeps_a_ref_to_itself() -> None:
+    @tool
+    def plant(tree: Node) -> None:
+        """Plant."""
+
+    params = plant.schema.parameters
+    tree = params["properties"]["tree"]
+
+    assert tree["type"] == "object"
+    assert tree["properties"]["children"]["items"] == {"$ref": "#/$defs/Node"}
+    assert set(params["$defs"]) == {"Node"}
+    _assert_refs_resolve(params)
+
+
+def test_recursive_output_schema_root_is_an_object() -> None:
+    params = submit_output_schema(Node).parameters
+
+    assert params["type"] == "object"
+    assert "$ref" not in params
+    assert set(params["$defs"]) == {"Node"}
+    _assert_refs_resolve(params)
+
+
+def test_recursive_output_schema_inlines_its_direct_fields() -> None:
+    params = submit_output_schema(Step).parameters
+    props = params["properties"]
+
+    assert props["detail"]["type"] == "object"
+    assert props["next"]["type"] == "object"
+    assert set(params["$defs"]) == {"Step"}
+    _assert_refs_resolve(params)
+
+
+@pytest.mark.parametrize("model", [Left, Right, CycleA, CycleB, CycleC])
+def test_mutually_recursive_models_produce_resolvable_schemas(model: type[BaseModel]) -> None:
+    schema = portable_schema(model)
+
+    assert schema["type"] == "object"
+    _assert_refs_resolve(schema)
+
+
+def test_mutually_recursive_union_stays_compact() -> None:
+    @tool
+    def visit(node: Mesh0 | Mesh1 | Mesh2 | Mesh3 | Mesh4 | Mesh5) -> None:
+        """Visit."""
+
+    params = visit.schema.parameters
+
+    assert len(json.dumps(params)) <= 3 * len(json.dumps(visit.args_model.model_json_schema()))
+    assert params["properties"]["node"]["type"] == "object"
+    assert set(params["$defs"]) == {f"Mesh{index}" for index in range(6)}
+    _assert_refs_resolve(params)
+
+
+async def test_model_params_still_validate_dicts_and_reject_json_strings() -> None:
+    @tool
+    def query(window: Window) -> str:
+        """Query."""
+        return window.start
+
+    assert await query.invoke({"window": {"start": "now-1h", "end": "now"}}, None) == "now-1h"
+    with pytest.raises(ValidationError):
+        await query.invoke({"window": '{"start": "now-1h", "end": "now"}'}, None)

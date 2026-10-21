@@ -101,6 +101,85 @@ def _args_model(fn: Callable[..., Any], name: str) -> tuple[str | None, type[Bas
     return ctx_param, create_model(f"{name}_args", **fields)
 
 
+def portable_schema(model: type[BaseModel]) -> dict[str, Any]:
+    schema = model.model_json_schema()
+    defs = schema.pop("$defs", {})
+    root = schema.pop("$ref", None)
+    if root is not None:
+        schema = {**defs[root.removeprefix("#/$defs/")], **schema}
+    recursive = _recursive_defs(defs)
+    kept: list[str] = []
+
+    def walk(node: Any, nested: bool) -> Any:
+        if isinstance(node, list):
+            return [walk(item, nested) for item in node]
+        if not isinstance(node, dict):
+            return node
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            name = ref.removeprefix("#/$defs/")
+            if nested and name in recursive:
+                if name not in kept:
+                    kept.append(name)
+                return node
+            siblings = walk({key: value for key, value in node.items() if key != "$ref"}, nested)
+            return {**walk(defs[name], nested or name in recursive), **siblings}
+        return {
+            key: walk(value, nested) for key, value in node.items() if key != "discriminator" or "oneOf" not in node
+        }
+
+    result = walk(schema, False)
+    kept_defs: dict[str, Any] = {}
+    while missing := [name for name in kept if name not in kept_defs]:
+        for name in missing:
+            kept_defs[name] = walk(defs[name], True)
+    if kept_defs:
+        result["$defs"] = kept_defs
+    return _hoist_branch_type(result)
+
+
+def _def_refs(node: Any) -> set[str]:
+    if isinstance(node, list):
+        return set().union(*(_def_refs(item) for item in node))
+    if not isinstance(node, dict):
+        return set()
+    ref = node.get("$ref")
+    own = {ref.removeprefix("#/$defs/")} if isinstance(ref, str) and ref.startswith("#/$defs/") else set()
+    return own.union(*(_def_refs(value) for value in node.values()))
+
+
+def _recursive_defs(defs: dict[str, Any]) -> set[str]:
+    edges = {name: _def_refs(body) for name, body in defs.items()}
+
+    def reachable(start: str) -> set[str]:
+        seen: set[str] = set()
+        pending = list(edges[start])
+        while pending:
+            name = pending.pop()
+            if name not in seen:
+                seen.add(name)
+                pending.extend(edges[name])
+        return seen
+
+    return {name for name in edges if name in reachable(name)}
+
+
+def _hoist_branch_type(node: Any) -> Any:
+    if isinstance(node, list):
+        return [_hoist_branch_type(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    node = {key: _hoist_branch_type(value) for key, value in node.items()}
+    branches = node.get("anyOf", node.get("oneOf"))
+    if isinstance(branches, list) and "type" not in node:
+        types = [branch.get("type") for branch in branches if isinstance(branch, dict)]
+        kinds = [kind for kind in types if kind != "null"]
+        shared = kinds and None not in kinds and all(kind == kinds[0] for kind in kinds)
+        if shared and ("null" not in types or "default" in node):
+            node["type"] = kinds[0]
+    return node
+
+
 class Tool:
     def __init__(
         self,
@@ -119,7 +198,7 @@ class Tool:
         self.schema = ToolSchema(
             name=self.name,
             description=self.description,
-            parameters=self.args_model.model_json_schema(),
+            parameters=portable_schema(self.args_model),
         )
 
     async def invoke(self, args: dict[str, Any], ctx: Context) -> Any:

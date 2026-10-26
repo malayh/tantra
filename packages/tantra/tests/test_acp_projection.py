@@ -655,8 +655,12 @@ def test_tool_calls_naming_withheld_children_keep_their_indices_as_no_ops() -> N
         ToolCallStarted(call_id="q1"),
         ToolProgress(call_id="q1", message=str(CHILD)),
         ToolCallCompleted(call_id="q1", result={"agent_id": str(CHILD), "name": "secret"}),
+        ToolCallRequested(sample_id=SAMPLE, call_id="k1", name="cancel_agent", args={"agent_id": str(CHILD)}),
+        ToolCallCompleted(call_id="k1", result={"agent_id": str(CHILD), "cancelled": True}),
         ToolCallRequested(sample_id=SAMPLE, call_id="q2", name="status", args={"agent_id": str(other)}),
         ToolCallCompleted(call_id="q2", result={"agent_id": str(other)}),
+        ToolCallRequested(sample_id=SAMPLE, call_id="k2", name="cancel_agent", args={"agent_id": str(other)}),
+        ToolCallCompleted(call_id="k2", result={"agent_id": str(other), "cancelled": True}),
     )
     shown = Projector(ROOT, None, decode_text, hidden=("spawn", "send"), profile=True)
     hidden = Projector(ROOT, None, decode_text, hidden=("spawn", "send"), profile=True)
@@ -665,7 +669,7 @@ def test_tool_calls_naming_withheld_children_keep_their_indices_as_no_ops() -> N
         outputs.append((shown.feed(LoggedEvent(ROOT, seq, event)), hidden.feed(LoggedEvent(ROOT, seq, event))))
         if event == ToolCallStarted(call_id="s0"):
             hidden.withhold(spawned(CHILD, "s0"))
-    withheld = {"s0", "m1", "m2", "q1"}
+    withheld = {"s0", "m1", "m2", "q1", "k1"}
     for event, (visible, concealed) in zip(events, outputs, strict=True):
         if getattr(event, "call_id", None) in withheld:
             assert concealed == [Withheld()] * len(visible), event

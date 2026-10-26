@@ -178,6 +178,7 @@ class CancellationRequested(EventBase):
     command_id: str
     targets: dict[str, list[str]] = Field(default_factory=dict)
     submitted_by: SubmittedBy | None = None
+    descendants: bool = True
 
 
 class TurnCompleted(EventBase):

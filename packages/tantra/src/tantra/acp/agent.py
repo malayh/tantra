@@ -636,7 +636,10 @@ class AcpConnection:
                 await self._claim(session, meta)
                 assert session.writer is not None
                 cancel = functools.partial(
-                    session.writer.cancel, command_id=command_id, submitted_by=self.auth.submitted_by
+                    session.writer.cancel,
+                    command_id=command_id,
+                    submitted_by=self.auth.submitted_by,
+                    descendants=self.server.cancel_descendants,
                 )
                 try:
                     await self._retry(cancel, SEND_ATTEMPTS if self.profile else 1)

@@ -1862,3 +1862,194 @@ async def test_recovery_accepts_legacy_lifecycle_notices(postgres_dsn: str, pg_s
     assert result.outcome == "completed"
     assert [event.command_id for event in inputs if event.command_id == notice.command_id] == [notice.command_id]
     assert [event.origin for event in inputs] == [None, "user"]
+
+
+def _actor_context(store: PostgresStore, session_id: str, call_id: str) -> Context:
+    async def emit(_: str) -> None:
+        return None
+
+    return Context(session_id=session_id, turn_id="turn", call_id=call_id, depth=0, deps=None, store=store, emit=emit)
+
+
+async def _events(store: PostgresStore, sid: str) -> list[Any]:
+    return [item.event async for item in store.read(sid)]
+
+
+async def test_root_only_cancel_through_the_coordinator_spares_a_working_child(
+    postgres_dsn: str, pg_schema: str
+) -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.root_started = asyncio.Event()
+            self.child_started = asyncio.Event()
+            self.release_child = asyncio.Event()
+            self.root_calls = 0
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            if req.model == "child":
+                self.child_started.set()
+                await self.release_child.wait()
+                yield StreamEnd(text="child done")
+                return
+            self.root_calls += 1
+            if self.root_calls == 1:
+                self.root_started.set()
+                await asyncio.Event().wait()
+            yield StreamEnd(text="root done")
+
+    provider = Provider()
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    runtime = Runtime(provider, store, [Root], default_model="root", coordinator=_coordinator(store))
+    await runtime.start()
+    try:
+        root_id = await runtime.create(Root)
+        root = await store.header(root_id.hex)
+        assert root is not None
+        active = uuid4()
+        async with runtime._lock(root.id):
+            await runtime._ensure_owner_locked(root.id)
+        child_public = await runtime._actor_spawn(root, Root, _actor_context(store, root.id, "s1"), "child", "work")
+        await asyncio.wait_for(provider.child_started.wait(), 2)
+        async with runtime.connect(root_id, writable=True) as connection:
+            await connection.send("active", command_id=active)
+            await asyncio.wait_for(provider.root_started.wait(), 2)
+            await connection.cancel(command_id=uuid4(), descendants=False)
+            result = await asyncio.wait_for(runtime._wait_result(root.id, active), 2)
+            assert result.outcome == "cancelled"
+            assert (await runtime.status(UUID(child_public))).active
+            provider.release_child.set()
+
+            async def woken() -> None:
+                while provider.root_calls < 2 or not isinstance((await _events(store, root.id))[-1], TurnCompleted):
+                    await asyncio.sleep(0.02)
+
+            await asyncio.wait_for(woken(), 5)
+
+        cancellation = next(
+            event for event in await _events(store, root.id) if isinstance(event, CancellationRequested)
+        )
+        assert cancellation.targets == {root.id: [active.hex]}
+        assert cancellation.descendants is False
+        assert not any(isinstance(event, TurnCancelled) for event in await _events(store, UUID(child_public).hex))
+    finally:
+        provider.release_child.set()
+        await runtime.aclose()
+        await store.close()
+
+
+async def test_root_only_cancel_through_the_coordinator_drains_a_queued_child_input(
+    postgres_dsn: str, pg_schema: str
+) -> None:
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.inputs: list[str] = []
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            self.inputs.append(req.messages[-1].content)
+            if len(self.inputs) == 1:
+                self.started.set()
+                await asyncio.Event().wait()
+            yield StreamEnd(text="ok")
+
+    provider = Provider()
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    runtime = Runtime(provider, store, [Bot], default_model="m", coordinator=_coordinator(store))
+    await runtime.start()
+    try:
+        root_id = await runtime.create(Bot)
+        active, notice = uuid4(), uuid4()
+        message = f"[agent {uuid4()}] note"
+        async with runtime._lock(root_id.hex):
+            await runtime._ensure_owner_locked(root_id.hex)
+        await runtime._enqueue(root_id.hex, InputQueued(command_id=active.hex, input="active", origin="user"))
+        await runtime._enqueue(
+            root_id.hex, InputQueued(command_id=notice.hex, input=message, sender_id=uuid4().hex, origin="message")
+        )
+        runtime._activate(root_id.hex, root_id.hex)
+        await asyncio.wait_for(provider.started.wait(), 2)
+        async with runtime.connect(root_id, writable=True) as connection:
+            await connection.cancel(command_id=uuid4(), descendants=False)
+            active_result = await asyncio.wait_for(runtime._wait_result(root_id.hex, active), 2)
+            notice_result = await asyncio.wait_for(runtime._wait_result(root_id.hex, notice), 5)
+        assert active_result.outcome == "cancelled"
+        assert notice_result.outcome == "completed"
+        assert provider.inputs == ["active", message]
+    finally:
+        await runtime.aclose()
+        await store.close()
+
+
+async def test_cancel_agent_through_the_coordinator_leaves_no_notice_after_takeover(
+    postgres_dsn: str, pg_schema: str
+) -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            if req.model == "child":
+                self.started.set()
+                await asyncio.Event().wait()
+            yield StreamEnd(text="done")
+
+    provider = Provider()
+    old_store = PostgresStore(postgres_dsn, schema=pg_schema)
+    old_coordinator = _coordinator(old_store, lease_ttl=0.12)
+    old = Runtime(provider, old_store, [Root], default_model="root", coordinator=old_coordinator)
+    await old.start()
+    replacement_store: PostgresStore | None = None
+    replacement: Runtime | None = None
+    try:
+        root_id = await old.create(Root)
+        root = await old_store.header(root_id.hex)
+        assert root is not None
+        async with old._lock(root.id):
+            await old._ensure_owner_locked(root.id)
+        child_public = await old._actor_spawn(root, Root, _actor_context(old_store, root.id, "s1"), "child", "work")
+        child_id = UUID(child_public).hex
+        await asyncio.wait_for(provider.started.wait(), 2)
+        assert await old._actor_cancel(root, UUID(child_public)) == {"agent_id": child_public, "cancelled": True}
+        cancelled = [event for event in await _events(old_store, child_id) if isinstance(event, TurnCancelled)]
+        assert [event.reason for event in cancelled] == ["cancelled_by_parent"]
+
+        await old_coordinator.close()
+        await asyncio.sleep(0.15)
+        replacement_store = PostgresStore(postgres_dsn, schema=pg_schema)
+        replacement = Runtime(
+            EchoProvider(),
+            replacement_store,
+            [Root],
+            default_model="root",
+            coordinator=_coordinator(replacement_store, lease_ttl=0.12),
+        )
+        await replacement.start()
+        async with replacement.connect(root_id, writable=True):
+            pass
+        async with replacement._lock(root.id):
+            current = replacement._ownerships.get(root.id)
+            if current is not None:
+                await replacement._recover_locked(root.id, current)
+
+        root_events = await _events(replacement_store, root.id)
+        assert not any(isinstance(event, InputQueued) and " turn ended] " in event.input for event in root_events)
+        assert (await replacement.status(UUID(child_public))).state == "cancelled"
+    finally:
+        if replacement is not None:
+            await replacement.aclose()
+        if replacement_store is not None:
+            await replacement_store.close()
+        await old.aclose()
+        await old_store.close()

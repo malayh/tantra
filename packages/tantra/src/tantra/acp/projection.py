@@ -253,7 +253,10 @@ class Projector:
         if isinstance(event, ToolCallRequested):
             self._tools[event.call_id] = self._tool_id(event.sample_id, event.call_id)
             self._withheld_calls.discard(event.call_id)
-            if event.name in ("send", "status") and entity_id(str(event.args.get("agent_id"))) in self._withheld:
+            if (
+                event.name in ("send", "status", "cancel_agent")
+                and entity_id(str(event.args.get("agent_id"))) in self._withheld
+            ):
                 self._withheld_calls.add(event.call_id)
             if event.name in self.hidden:
                 self._calls[event.call_id] = event

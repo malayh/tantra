@@ -32,7 +32,7 @@ Start and close the Runtime in the application. Closing or losing a client never
 
 ## Hooks
 
-`AcpServer(runtime, *, agent, scope, policy, encode_prompt=encode_text, decode_input=decode_text, view=None, models=None, name)`
+`AcpServer(runtime, *, agent, scope, policy, encode_prompt=encode_text, decode_input=decode_text, view=None, models=None, name, cancel_descendants=True)`
 
 | Hook | Signature | Contract |
 |---|---|---|
@@ -40,8 +40,9 @@ Start and close the Runtime in the application. Closing or losing a client never
 | `policy` | `async (AcpAccess) -> bool` | Required; must return exactly `True`. Operations: `new`, `resume`, `prompt`, `cancel`, `claim_writer`, `answer`, `set_model`, `delete`. |
 | `encode_prompt` | `async (auth, blocks, meta) -> str` | Turns prompt `ContentBlock`s into Runtime input. `ValueError` becomes `-32602`. The default accepts text blocks only and joins them with newlines. |
 | `decode_input` | `(str) -> list[ContentBlock]` | The inverse, used for `user_message`. The default returns one text block. |
-| `view` | `async (LoggedEvent) -> LoggedEvent \| None` | Optional redaction before projection. It receives an independent copy; `None` hides the event. Dropping or retyping a `ChildCreated` hides that child: its subtree leaves the profile mirror and cannot be resumed, its messages, results and turn-ended inputs to the parent project nothing, and the parent's `spawn`, `send` and `status` calls that target it are withheld. |
+| `view` | `async (LoggedEvent) -> LoggedEvent \| None` | Optional redaction before projection. It receives an independent copy; `None` hides the event. Dropping or retyping a `ChildCreated` hides that child: its subtree leaves the profile mirror and cannot be resumed, its messages, results and turn-ended inputs to the parent project nothing, and the parent's `spawn`, `send`, `status` and `cancel_agent` calls that target it are withheld. |
 | `models` | `Sequence[str] \| None` | Enables the `model` select config option. |
+| `cancel_descendants` | `bool` | `False` makes `session/cancel` a root-only cancel (`Connection.cancel(descendants=False)`): children keep running. |
 
 `AcpAuth(principal, submitted_by=None, expires_at=None)` is the connection identity. `submitted_by` is persisted with prompts, answers, and cancels. stdio trusts the local process: pass the identity directly to `serve_stdio(auth)`, or serve any `Transport` with `await server.connect(transport, auth)`.
 
@@ -67,7 +68,7 @@ Fixed limits: 8 open sessions per connection (roots, plus children resumed throu
 | `session/list` | Roots of `agent` matching `scope` (and `acp_cwd == cwd` when given), newest created first, 50 per page. Pass the returned `nextCursor` as `cursor` for the next page. A cursor that is not a root of `agent` within the caller's `scope` answers `-32602`, like a malformed one. |
 | `session/resume` | Checks `resume`. `replayFrom` omitted or `null` replays nothing; `{"type": "start"}` replays the root before responding, and for plain v2 clients every descendant too; profile clients replay only the session they resume. Returns `{configOptions?}`, then a current snapshot, then the live tail. Resuming an open session replaces it. Without the profile, a child pushed on this connection is rejected with `-32602`; any other child ID answers `-32002`. |
 | `session/prompt` | Roots only, on an open session. Checks `prompt`, encodes the blocks, takes the writer if needed, and returns `{messageId}` once the input is durably accepted. |
-| `session/cancel` | Notification. Checks `cancel`, takes the writer if needed, and cancels the whole tree. The tail reports `idle` with `cancelled`. |
+| `session/cancel` | Notification. Checks `cancel`, takes the writer if needed, and cancels the whole tree, or only the root turn when `cancel_descendants=False`. The tail reports `idle` with `cancelled`. |
 | `session/close` | Detaches this connection's tails, cancels its outstanding requests, and releases its writer. It never cancels work. Returns `{}`. |
 | `session/delete` | Checks `delete` and deletes the tree with `allow_active=True`. Tails stop on every connection; other profile connections first get a `session_deleted` notice. |
 | `session/set_config_option` | `configId: "model"` with `type: "id"` only. Checks `set_model` and patches the root header. `ModelChangeBusy` maps to `model_busy`: only the PostgreSQL store and coordinator raise it, while coordinated work is active. |

@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4, uuid5
@@ -110,6 +110,7 @@ STATUS_EVENTS = (
     AgentFinished,
 )
 STATUS_FIELDS = frozenset({"status", "finished", "title", "model"})
+PARENT_CANCELLED = "cancelled_by_parent"
 
 
 def _check_schema(label: str, entry: Tool) -> None:
@@ -253,6 +254,8 @@ def _terminal_summary(event: TurnCompleted | TurnFailed | TurnCancelled | TurnIn
 def _lifecycle_input(child_id: str, turn: TurnSummary) -> InputQueued | None:
     if turn.outcome == "completed" and turn.stop_reason == "finished":
         return None
+    if turn.outcome == "cancelled" and turn.stop_reason == PARENT_CANCELLED:
+        return None
     child_uuid = UUID(hex=child_id)
     payload = {
         "child_id": str(child_uuid),
@@ -269,6 +272,11 @@ def _lifecycle_input(child_id: str, turn: TurnSummary) -> InputQueued | None:
         sender_id=child_id,
         origin="turn_ended",
     )
+
+
+def _root_only(states: Mapping[str, OperationalState], root_id: str) -> dict[str, OperationalState]:
+    state = states[root_id]
+    return {root_id: replace(state, pending=[item for item in state.pending if item.sender_id is None])}
 
 
 async def _shielded[T](awaitable: Awaitable[T]) -> T:
@@ -329,7 +337,7 @@ class Runtime:
         for name, agent in self.agents.items():
             reserved = set()
             if agent.subagents:
-                reserved.update(("spawn", "send", "status"))
+                reserved.update(("spawn", "send", "status", "cancel_agent"))
             if name in child_agents:
                 reserved.update(("send", "finish"))
             collision = sorted(reserved & self.tools[name].keys())
@@ -340,7 +348,7 @@ class Runtime:
             effective = {tool.name: tool.permission for tool in self.tools[name].values()}
             effective.update({"send": None, "finish": None})
             if agent.subagents:
-                effective.update({"spawn": None, "status": None})
+                effective.update({"spawn": None, "status": None, "cancel_agent": None})
             for tool_name, tool_permission in sorted(effective.items()):
                 if decide(tool_name, agent.permissions, tool_permission, self.default_permission) == "ask":
                     raise TantraError(f"agent {name!r}: child tool {tool_name!r} cannot use 'ask' permission")
@@ -1775,6 +1783,9 @@ class Runtime:
         async def finish(result: Any, ctx: Context) -> FinishResult:
             return await self._actor_finish(header, agent, ctx, result)
 
+        async def cancel_agent(agent_id: UUID) -> dict[str, Any]:
+            return await self._actor_cancel(header, agent_id)
+
         if agent.subagents:
             available = list(dict.fromkeys(agent_name(child) for child in agent.subagents))
             spawn_tool = Tool(
@@ -1790,6 +1801,13 @@ class Runtime:
             tools["status"] = Tool(
                 status,
                 description="Return durable status for one direct child agent. It returns no child output.",
+            )
+            tools["cancel_agent"] = Tool(
+                cancel_agent,
+                description=(
+                    "Cancel the active and queued work of one direct child agent and its descendants. No turn-ended "
+                    "message follows. The child stays reusable through send."
+                ),
             )
         if header.parent_id is not None or agent.subagents:
             send_description = "Queue a message for a direct parent or child agent."
@@ -1936,6 +1954,35 @@ class Runtime:
             self._activations[target_id] = self._activations.get(target_id, 0) + 1
             self._activate(target_id, root_id)
             return {"command_id": str(command), "duplicate": accepted.duplicate}
+
+    async def _actor_cancel(self, header: SessionHeader, child_uuid: UUID) -> dict[str, Any]:
+        root_id = header.root_id or header.id
+        async with self._lock(root_id):
+            self._ensure_open()
+            child = await self._header(child_uuid.hex)
+            if child.parent_id != header.id:
+                raise TantraError("cancel_agent is allowed only for direct child agents")
+            actors = [child.id, *(descendant.id for descendant in await self._descendants(child.id))]
+
+            async def apply(store: Any) -> dict[str, list[str]]:
+                targets = self._operational_targets(
+                    {actor_id: await self._operational(actor_id, store=store) for actor_id in actors}
+                )
+                for actor_id, turn_ids in targets.items():
+                    terminals = [TurnCancelled(turn_id=turn_id, reason=PARENT_CANCELLED) for turn_id in turn_ids]
+                    await self._append(actor_id, terminals, store)
+                return targets
+
+            if self.coordinator is None:
+                targets = await apply(None)
+            else:
+                ownership = self._ownerships.get(root_id)
+                if ownership is None:
+                    raise LeaseLost(root_id)
+                async with self.coordinator.transaction(ownership) as store:
+                    targets = await apply(store)
+            self._cancel_local(targets, PARENT_CANCELLED)
+        return {"agent_id": str(child_uuid), "cancelled": bool(targets)}
 
     async def _child_status(self, header: SessionHeader, child_uuid: UUID) -> ActorStatus:
         child = await self._header(child_uuid.hex)
@@ -2396,16 +2443,20 @@ class Runtime:
                                     existing[0] != request.root_id
                                     or not isinstance(existing[1], CancellationRequested)
                                     or existing[1].submitted_by != payload.submitted_by
+                                    or existing[1].descendants != payload.descendants
                                 ):
                                     raise InvalidCommandReuse(payload.command_id.hex)
                                 cancellation = existing[1]
                                 duplicate = True
                             else:
-                                targets = self._operational_targets(states)
+                                targets = self._operational_targets(
+                                    states if payload.descendants else _root_only(states, request.root_id)
+                                )
                                 cancellation = CancellationRequested(
                                     command_id=payload.command_id.hex,
                                     targets=targets,
                                     submitted_by=payload.submitted_by,
+                                    descendants=payload.descendants,
                                 )
                                 await store.append(request.root_id, [cancellation])
                                 duplicate = False
@@ -2421,7 +2472,17 @@ class Runtime:
                                 ]
                                 if terminals:
                                     await store.append(actor_id, terminals)
-                            after.append(lambda cancellation=cancellation: self._cancel_local(cancellation))
+                            root_turns = set(cancellation.targets.get(request.root_id, []))
+                            if not cancellation.descendants and any(
+                                item.command_id not in root_turns for item in states[request.root_id].pending
+                            ):
+                                after.append(
+                                    lambda cancellation=cancellation: self._cancel_and_drain(
+                                        cancellation.targets, request.root_id
+                                    )
+                                )
+                            else:
+                                after.append(lambda cancellation=cancellation: self._cancel_local(cancellation.targets))
                             result = {"command_id": str(payload.command_id), "duplicate": duplicate}
                         else:
                             raise TantraError(f"unsupported coordinator operation {request.operation!r}")
@@ -2517,8 +2578,8 @@ class Runtime:
         self._activate(root_id, root_id)
         asyncio.create_task(self._notify(root_id))
 
-    def _cancel_local(self, cancellation: CancellationRequested) -> None:
-        for actor_id, turn_ids in cancellation.targets.items():
+    def _cancel_local(self, targets: Mapping[str, Sequence[str]], reason: str = "cancelled") -> None:
+        for actor_id, turn_ids in targets.items():
             task = self.active.get(actor_id)
             if task is None or task.done():
                 continue
@@ -2526,10 +2587,18 @@ class Runtime:
             if task_turn is not None and task_turn not in turn_ids:
                 continue
             self._turn_generations[actor_id] = self._turn_generations.get(actor_id, 0) + 1
-            self._task_reasons[task] = ("cancelled", "cancelled")
+            self._task_reasons[task] = ("cancelled", reason)
             if self.active.get(actor_id) is task:
                 del self.active[actor_id]
             task.cancel()
+
+    def _cancel_and_drain(self, targets: Mapping[str, Sequence[str]], root_id: str) -> None:
+        task = self.active.get(root_id)
+        self._cancel_local(targets)
+        if task is not None and self.active.get(root_id) is not task:
+            self._activations[root_id] = self._activations.get(root_id, 0) + 1
+        else:
+            self._accepted_input(root_id)
 
     async def _claim(self, connection: Connection) -> None:
         self._ensure_open()
@@ -2733,13 +2802,25 @@ class Runtime:
             return CommandReceipt(command_id=public_command, duplicate=False)
 
     async def _cancel(
-        self, connection: Connection, command_id: UUID, *, submitted_by: str | None = None
+        self,
+        connection: Connection,
+        command_id: UUID,
+        *,
+        submitted_by: str | None = None,
+        descendants: bool = True,
     ) -> CommandReceipt:
         submitted_by = SUBMITTED_BY_ADAPTER.validate_python(submitted_by)
-        return await _shielded(self._accept_cancel(connection, command_id, submitted_by=submitted_by))
+        return await _shielded(
+            self._accept_cancel(connection, command_id, submitted_by=submitted_by, descendants=descendants)
+        )
 
     async def _accept_cancel(
-        self, connection: Connection, command_id: UUID, *, submitted_by: str | None = None
+        self,
+        connection: Connection,
+        command_id: UUID,
+        *,
+        submitted_by: str | None = None,
+        descendants: bool = True,
     ) -> CommandReceipt:
         public_id, cid = _id(command_id, "command_id")
         if self.coordinator is not None:
@@ -2747,7 +2828,7 @@ class Runtime:
             result = await self._request_command(
                 connection._root,
                 "cancel",
-                CancelPayload(command_id=public_id, submitted_by=submitted_by),
+                CancelPayload(command_id=public_id, submitted_by=submitted_by, descendants=descendants),
                 connection._writer_token,
             )
             return CommandReceipt(public_id, bool(result["duplicate"]))
@@ -2759,30 +2840,34 @@ class Runtime:
                     existing[0] != connection._root
                     or not isinstance(existing[1], CancellationRequested)
                     or existing[1].submitted_by != submitted_by
+                    or existing[1].descendants != descendants
                 ):
                     raise InvalidCommandReuse(cid)
                 event = existing[1]
                 duplicate = True
             else:
                 actor_ids = [connection._root]
-                actor_ids.extend(
-                    agent_id
-                    for agent_id, task in self.active.items()
-                    if agent_id != connection._root
-                    and not task.done()
-                    and self._known_roots.get(agent_id) == connection._root
-                )
+                if descendants:
+                    actor_ids.extend(
+                        agent_id
+                        for agent_id, task in self.active.items()
+                        if agent_id != connection._root
+                        and not task.done()
+                        and self._known_roots.get(agent_id) == connection._root
+                    )
                 targets: dict[str, list[str]] = {}
                 for agent_id in actor_ids:
                     state = await self._operational(agent_id)
                     if state.finished is not None:
                         continue
-                    turn_ids = [item.command_id for item in state.pending]
+                    turn_ids = [item.command_id for item in state.pending if descendants or item.sender_id is None]
                     if state.incomplete is not None and state.incomplete.turn_id not in turn_ids:
                         turn_ids.append(state.incomplete.turn_id)
                     if turn_ids:
                         targets[agent_id] = turn_ids
-                event = CancellationRequested(command_id=cid, targets=targets, submitted_by=submitted_by)
+                event = CancellationRequested(
+                    command_id=cid, targets=targets, submitted_by=submitted_by, descendants=descendants
+                )
                 await self._append(connection._root, [event])
                 duplicate = False
             for agent_id, target_turns in event.targets.items():
@@ -2827,6 +2912,8 @@ class Runtime:
                     if self.active.get(agent_id) is task:
                         del self.active[agent_id]
                     task.cancel()
+            if not event.descendants and (await self._operational(connection._root)).pending:
+                self._accepted_input(connection._root)
             return CommandReceipt(command_id=public_id, duplicate=duplicate)
 
     async def _wait_result(self, agent_id: str, command_id: UUID) -> TurnResult:
@@ -3236,8 +3323,10 @@ class Connection:
     ) -> CommandReceipt:
         return await self.runtime._answer(self, ask_id, response, command_id, submitted_by=submitted_by)
 
-    async def cancel(self, *, command_id: UUID, submitted_by: str | None = None) -> CommandReceipt:
-        return await self.runtime._cancel(self, command_id, submitted_by=submitted_by)
+    async def cancel(
+        self, *, command_id: UUID, submitted_by: str | None = None, descendants: bool = True
+    ) -> CommandReceipt:
+        return await self.runtime._cancel(self, command_id, submitted_by=submitted_by, descendants=descendants)
 
 
 def _turn_result(

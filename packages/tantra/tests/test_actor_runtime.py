@@ -11,7 +11,7 @@ import pytest
 from pydantic import BaseModel
 
 from tantra import Agent, FreeText, InvalidCommandReuse, MaxDepthExceeded, Runtime, TantraError, tool
-from tantra.context import TurnContext
+from tantra.context import ROOT_CANCELLATION_CONTEXT, TurnContext
 from tantra.errors import ProviderError
 from tantra.events import (
     AgentFinished,
@@ -1398,9 +1398,11 @@ class ObservedCancellationRuntime(Runtime):
         super().__init__(*args, **kwargs)
         self.cancellation_started = asyncio.Event()
 
-    async def _accept_cancel(self, connection: Any, command_id: UUID, *, submitted_by: str | None = None) -> Any:
+    async def _accept_cancel(
+        self, connection: Any, command_id: UUID, *, submitted_by: str | None = None, descendants: bool = True
+    ) -> Any:
         self.cancellation_started.set()
-        return await super()._accept_cancel(connection, command_id, submitted_by=submitted_by)
+        return await super()._accept_cancel(connection, command_id, submitted_by=submitted_by, descendants=descendants)
 
 
 async def test_cancel_racing_durable_finish_preserves_finished_terminal() -> None:
@@ -2331,4 +2333,223 @@ async def test_spawns_repeating_one_call_id_across_samples_create_two_children()
     assert len(children) == 2 and sorted(inputs) == ["a", "b"]
     assert len({event.call_id for event in created}) == 2
     assert sorted(event.call_id for event in completed) == sorted(event.call_id for event in created)
+    await runtime.aclose()
+
+
+async def test_root_only_cancel_spares_working_children_and_their_results_wake_the_root() -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.root_started = asyncio.Event()
+            self.child_started = asyncio.Event()
+            self.release_child = asyncio.Event()
+            self.root_requests: list[SampleRequest] = []
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            if req.model == "child":
+                self.child_started.set()
+                await self.release_child.wait()
+                yield StreamEnd(tool_calls=[call("finish", '{"result":"found"}', "finish")])
+                return
+            self.root_requests.append(req)
+            if len(self.root_requests) == 1:
+                self.root_started.set()
+                await asyncio.Event().wait()
+            yield StreamEnd(text="root")
+
+    provider = Provider()
+    store = MemoryStore()
+    runtime = Runtime(provider, store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "work")
+    child_id = UUID(child_public).hex
+    await asyncio.wait_for(provider.child_started.wait(), timeout=2)
+    active, queued = uuid4(), uuid4()
+    async with runtime.connect(root_id, writable=True) as connection:
+        await connection.send("active", command_id=active)
+        await asyncio.wait_for(provider.root_started.wait(), timeout=2)
+        await connection.send("queued", command_id=queued)
+        await connection.cancel(command_id=uuid4(), descendants=False)
+        active_result = await runtime._wait_result(root.id, active)
+        queued_result = await runtime._wait_result(root.id, queued)
+        assert child_id in runtime.active
+        provider.release_child.set()
+        await wait_idle(runtime, child_id)
+        await wait_idle(runtime, root.id)
+
+    root_events = await journal(store, root.id)
+    cancellation = next(event for event in root_events if isinstance(event, CancellationRequested))
+    assert (active_result.outcome, queued_result.outcome) == ("cancelled", "cancelled")
+    assert cancellation.targets.keys() == {root.id}
+    assert sorted(cancellation.targets[root.id]) == sorted([active.hex, queued.hex])
+    assert cancellation.descendants is False
+    assert not any(isinstance(event, TurnCancelled) for event in await journal(store, child_id))
+    assert len(provider.root_requests) == 2
+    woken = provider.root_requests[-1].messages
+    assert any(getattr(message, "content", None) == ROOT_CANCELLATION_CONTEXT for message in woken)
+    assert f"[agent {UUID(child_public)} finished]" in woken[-1].content
+    assert isinstance(root_events[-1], TurnCompleted)
+    await runtime.aclose()
+
+
+async def test_root_only_cancel_keeps_a_queued_child_input_and_drains_it() -> None:
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.inputs: list[str] = []
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            self.inputs.append(req.messages[-1].content)
+            if len(self.inputs) == 1:
+                self.started.set()
+                await asyncio.Event().wait()
+            yield StreamEnd(text="ok")
+
+    class Bot(Agent):
+        pass
+
+    provider = Provider()
+    store = MemoryStore()
+    runtime = Runtime(provider, store, [Bot], default_model="m")
+    root_id = await runtime.create(Bot)
+    active, notice = uuid4(), uuid4()
+    message = f"[agent {uuid4()}] note"
+    await store.enqueue(root_id.hex, InputQueued(command_id=active.hex, input="active", origin="user"))
+    await store.enqueue(
+        root_id.hex, InputQueued(command_id=notice.hex, input=message, sender_id=uuid4().hex, origin="message")
+    )
+    async with runtime.connect(root_id, writable=True) as connection:
+        runtime._activate(root_id.hex, root_id.hex)
+        await asyncio.wait_for(provider.started.wait(), timeout=2)
+        await connection.cancel(command_id=uuid4(), descendants=False)
+        active_result = await runtime._wait_result(root_id.hex, active)
+        notice_result = await asyncio.wait_for(runtime._wait_result(root_id.hex, notice), timeout=2)
+
+    assert active_result.outcome == "cancelled"
+    assert notice_result.outcome == "completed"
+    assert provider.inputs == ["active", message]
+    await runtime.aclose()
+
+
+async def test_a_cancel_retry_with_another_scope_conflicts() -> None:
+    class Bot(Agent):
+        pass
+
+    store = MemoryStore()
+    runtime = Runtime(EchoProvider(), store, [Bot], default_model="m")
+    root_id = await runtime.create(Bot)
+    command = uuid4()
+    async with runtime.connect(root_id, writable=True) as connection:
+        assert not (await connection.cancel(command_id=command, descendants=False)).duplicate
+        assert (await connection.cancel(command_id=command, descendants=False)).duplicate
+        with pytest.raises(InvalidCommandReuse):
+            await connection.cancel(command_id=command)
+    await runtime.aclose()
+
+
+async def test_cancel_agent_stops_a_child_subtree_without_waking_anyone() -> None:
+    class Grandchild(Agent):
+        model = "grandchild"
+
+    class Child(Agent):
+        model = "child"
+        subagents = [Grandchild]
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.started = {"child": asyncio.Event(), "grandchild": asyncio.Event()}
+            self.calls = {"root": 0, "child": 0, "grandchild": 0}
+            self.target = ""
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            self.calls[req.model] += 1
+            if req.model in self.started and self.calls[req.model] == 1:
+                self.started[req.model].set()
+                await asyncio.Event().wait()
+            if req.model == "root" and self.calls["root"] == 1:
+                yield StreamEnd(tool_calls=[call("cancel_agent", json.dumps({"agent_id": self.target}), "k1")])
+                return
+            yield StreamEnd(text=f"{req.model} done")
+
+    provider = Provider()
+    store = MemoryStore()
+    runtime = Runtime(provider, store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "work")
+    child_id = UUID(child_public).hex
+    await asyncio.wait_for(provider.started["child"].wait(), timeout=2)
+    child = await store.header(child_id)
+    assert child is not None
+    grandchild_public = await runtime._actor_spawn(
+        child, Child, context(store, child.id, depth=1), "grandchild", "work"
+    )
+    grandchild_id = UUID(grandchild_public).hex
+    await asyncio.wait_for(provider.started["grandchild"].wait(), timeout=2)
+    provider.target = child_public
+    async with runtime.connect(root_id, writable=True) as connection:
+        result = await asyncio.wait_for(connection.prompt("stop it", command_id=uuid4()), timeout=2)
+    await wait_idle(runtime, root.id, child_id, grandchild_id)
+
+    root_events = await journal(store, root.id)
+    completed = next(event for event in root_events if isinstance(event, ToolCallCompleted) and event.call_id == "k1")
+    assert result.text == "root done"
+    assert not completed.is_error
+    assert completed.result == {"agent_id": child_public, "cancelled": True}
+    for actor_id in (child_id, grandchild_id):
+        cancelled = [event for event in await journal(store, actor_id) if isinstance(event, TurnCancelled)]
+        assert [event.reason for event in cancelled] == ["cancelled_by_parent"]
+    assert lifecycle_inputs(root_events) == []
+    assert lifecycle_inputs(await journal(store, child_id)) == []
+    assert provider.calls["root"] == 2
+    assert (await runtime.status(UUID(child_public))).state == "cancelled"
+
+    await runtime._actor_send(root, context(store, root.id, cid="again"), UUID(child_public), "again")
+    await wait_idle(runtime, child_id)
+    await wait_idle(runtime, root.id)
+    assert isinstance((await journal(store, child_id))[-1], TurnCompleted)
+    assert len(lifecycle_inputs(await journal(store, root.id))) == 1
+    await runtime.aclose()
+
+
+async def test_cancel_agent_accepts_only_direct_children_and_reports_idle_ones() -> None:
+    class Grandchild(Agent):
+        model = "grandchild"
+
+    class Child(Agent):
+        model = "child"
+        subagents = [Grandchild]
+
+    class Root(Agent):
+        subagents = [Child]
+
+    store = MemoryStore()
+    runtime = Runtime(EchoProvider(), store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "work")
+    child = await store.header(UUID(child_public).hex)
+    assert child is not None
+    grandchild_public = await runtime._actor_spawn(
+        child, Child, context(store, child.id, depth=1), "grandchild", "work"
+    )
+    await wait_idle(runtime, root.id, child.id, UUID(grandchild_public).hex)
+
+    with pytest.raises(TantraError, match="direct child"):
+        await runtime._actor_cancel(root, UUID(grandchild_public))
+    with pytest.raises(TantraError):
+        await runtime._actor_cancel(root, uuid4())
+    assert await runtime._actor_cancel(root, UUID(child_public)) == {"agent_id": child_public, "cancelled": False}
     await runtime.aclose()

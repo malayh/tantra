@@ -44,6 +44,7 @@ CHILD_LIFECYCLE_GUIDANCE = (
     "and delivers its result to the parent."
 )
 CANCELLATION_CONTEXT = "[runtime] The user cancelled the live root and descendant work."
+ROOT_CANCELLATION_CONTEXT = "[runtime] The user cancelled the live root turn. Descendant agents keep running."
 
 
 @dataclass
@@ -119,7 +120,8 @@ def assemble_messages(summary: str, events: Sequence[SessionEvent]) -> list[Mess
             message = sample_message(event.sample_id)
             message.text = (message.text or "") + event.text
         elif isinstance(event, CancellationRequested):
-            messages.append(UserMessage(content=CANCELLATION_CONTEXT))
+            context = CANCELLATION_CONTEXT if event.descendants else ROOT_CANCELLATION_CONTEXT
+            messages.append(UserMessage(content=context))
         elif isinstance(event, ReasoningPart):
             sample_message(event.sample_id).reasoning.append(ReasoningBlock(text=event.text, signature=event.signature))
         elif isinstance(event, ToolCallRequested):

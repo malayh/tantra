@@ -90,6 +90,7 @@ class CancelPayload(FrozenModel):
     type: Literal["cancel"] = "cancel"
     command_id: UUID
     submitted_by: SubmittedBy | None = None
+    descendants: bool = True
 
 
 class DeletePayload(FrozenModel):

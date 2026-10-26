@@ -75,6 +75,7 @@ class AcpServer:
         view: View | None = None,
         models: Sequence[str] | None = None,
         name: str,
+        cancel_descendants: bool = True,
     ) -> None:
         if not all(callable(value) for value in (scope, policy, encode_prompt, decode_input)):
             raise TypeError("scope, policy, encode_prompt, and decode_input must be callable")
@@ -91,6 +92,7 @@ class AcpServer:
         self.view = view
         self.models = list(models) if models is not None else None
         self.name = name
+        self.cancel_descendants = cancel_descendants
         self._windows: dict[str, int] = {}
 
     async def connect(self, transport: Transport, auth: AcpAuth) -> None:

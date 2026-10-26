@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.1.0
+
+Added:
+
+- `Connection.cancel(..., descendants=False)` cancels only the root's active turn and its queued user inputs. Descendants keep running, and queued agent inputs stay queued and run next, so a finished child's result still wakes the root. `CancelPayload` and `CancellationRequested` carry `descendants`, and a retry with a different value raises `InvalidCommandReuse`. The root's history says that descendant agents keep running.
+- `AcpServer(..., cancel_descendants=True)`. `False` makes `session/cancel` root-only.
+- `cancel_agent(agent_id)`, a framework tool for agents with `subagents`. It cancels the active and queued work of one direct child and its descendants, with `TurnCancelled.reason` `cancelled_by_parent`, and returns `{"agent_id", "cancelled"}`. No turn-ended input wakes a parent, during the call or on recovery. The child stays reusable through `send`. Over ACP it projects as an ordinary tool call, withheld when `view` hides the child.
+
+Compatibility and upgrade:
+
+- `cancel_agent` is a reserved tool name for agents with `subagents`.
+- Drain older coordinated workers before relying on root-only cancel: an older owner ignores `descendants` and cancels the whole tree.
+
 ## 2.0.1
 
 Fixed:

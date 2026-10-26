@@ -90,7 +90,7 @@ Enter a connection with `async with`. Read-only connections iterate events. A wr
 - `send(input, *, command_id, submitted_by=None) -> CommandReceipt` accepts a durable root input.
 - `prompt(input, *, command_id, submitted_by=None) -> TurnResult` accepts the same input and waits for its terminal event.
 - `answer(ask_id, response, *, command_id, submitted_by=None) -> CommandReceipt` resolves a live root ask.
-- `cancel(*, command_id, submitted_by=None) -> CommandReceipt` cancels active and queued work in the live tree.
+- `cancel(*, command_id, submitted_by=None, descendants=True) -> CommandReceipt` cancels active and queued work in the live tree. With `descendants=False` it cancels only the root's active turn and its queued user inputs: descendants keep running, and inputs from agents stay queued and run next. The flag is recorded on `CancellationRequested`, and a retry with a different value raises `InvalidCommandReuse`.
 
 `submitted_by` is optional application-supplied audit context: an exact nonempty string of at most 256 characters. Runtime persists it with the command and exposes input attribution to hooks and tools, without automatically adding it to model prompts. It grants no access. Obtain it from trusted authentication and authorize tool execution independently; accepted work can outlive the connection. Internal agent commands remain unattributed. `AskAnswered.answered_by` remains the Runtime root actor.
 

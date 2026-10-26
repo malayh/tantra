@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -10,7 +12,7 @@ from acp_support import Client, Scripted, reduce
 from tantra import Agent, Runtime
 from tantra.acp import AcpAccess, AcpAuth, AcpServer
 from tantra.acp.jsonrpc import RpcError
-from tantra.providers.base import ToolCall
+from tantra.providers.base import ProviderEvent, SampleRequest, ToolCall
 from tantra.providers.fake import Sample
 from tantra.stores.memory import MemoryStore
 
@@ -281,4 +283,80 @@ async def test_a_child_not_open_here_answers_like_an_unknown_id() -> None:
     assert {answers[key] for key in answers} == {(-32002, "Session not found", None)}
     assert open_here.value.code == -32602
     assert await runtime.store.header(UUID(worker).hex) is not None
+    await runtime.aclose()
+
+
+class HeldWorker(Scripted):
+    def __init__(self, *, hold_root: int | None = None, **scripts: list[Sample]) -> None:
+        super().__init__(**scripts)
+        self.hold_root = hold_root
+        self.root_calls = 0
+        self.root_held = asyncio.Event()
+        self.worker_held = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+        if req.model == "root":
+            self.root_calls += 1
+            if self.root_calls == self.hold_root:
+                self.root_held.set()
+                await asyncio.Event().wait()
+        if req.model == "worker" and not self.release.is_set():
+            self.worker_held.set()
+            await self.release.wait()
+        async for event in super().stream(req):
+            yield event
+
+
+async def test_a_root_only_cancel_leaves_working_children_running() -> None:
+    provider = HeldWorker(
+        hold_root=2,
+        root=[tool_call("spawn", "s1", agent_name="worker", input="dig"), text("ack")],
+        worker=[text("found")],
+    )
+    runtime = Runtime(provider, MemoryStore(), [Root])
+    server = AcpServer(runtime, agent=Root, scope=scope, policy=allow, name="tree", cancel_descendants=False)
+    async with Client(server) as client:
+        root = await client.new()
+        await client.prompt(root, "go")
+        await asyncio.wait_for(provider.root_held.wait(), 5)
+        await asyncio.wait_for(provider.worker_held.wait(), 5)
+        [worker] = children(client, root)
+        await client.until(lambda: mirrored(client, root, worker)[-1:] == [{"state": "running"}])
+        await client.notify("session/cancel", {"sessionId": root})
+        await client.idle(root)
+        assert client.states(root)[-1] == {"state": "idle", "stopReason": "cancelled"}
+        assert mirrored(client, root, worker)[-1] == {"state": "running"}
+        provider.release.set()
+        await client.idle(root, 2)
+        await client.until(lambda: mirrored(client, root, worker)[-1:] == [{"state": "idle", "stopReason": "end_turn"}])
+    assert {"state": "idle", "stopReason": "cancelled"} not in mirrored(client, root, worker)
+    assert client.states(root)[-1] == {"state": "idle", "stopReason": "end_turn"}
+    await runtime.aclose()
+
+
+async def test_cancel_agent_shows_as_a_tool_call_and_stops_the_child_without_a_wake_up() -> None:
+    provider = HeldWorker(root=[tool_call("spawn", "s1", agent_name="worker", input="dig"), text("spawned")], worker=[])
+    runtime, server = serve(provider)
+    async with Client(server) as client:
+        root = await client.new()
+        await client.prompt(root, "go")
+        await client.idle(root)
+        await asyncio.wait_for(provider.worker_held.wait(), 5)
+        [worker] = children(client, root)
+        provider.add("root", tool_call("cancel_agent", "k1", agent_id=worker), text("stopped"))
+        await client.prompt(root, "stop it")
+        await client.idle(root, 2)
+        await client.until(
+            lambda: mirrored(client, root, worker)[-1:] == [{"state": "idle", "stopReason": "cancelled"}]
+        )
+    calls = client.of(root, "tool_call_update")
+    assert any(
+        update.get("name") == "cancel_agent" and update.get("rawInput") == {"agent_id": worker} for update in calls
+    )
+    assert {"agent_id": worker, "cancelled": True} in [
+        update.get("rawOutput") for update in calls if update.get("status") == "completed"
+    ]
+    assert provider.root_calls == 4
+    assert len([state for state in client.states(root) if "stopReason" in state]) == 2
     await runtime.aclose()

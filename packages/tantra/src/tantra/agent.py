@@ -25,6 +25,7 @@ class Agent:
     name: str | None = None
     model: str | None = None
     prompt: str | Callable[[TurnContext], str | Awaitable[str]] = ""
+    model_params: dict[str, Any] | Callable[[TurnContext], dict[str, Any] | Awaitable[dict[str, Any]]] = {}
     tools: list[Tool] = []
     skills: list[str] | None = None
     subagents: list[type[Agent]] = []

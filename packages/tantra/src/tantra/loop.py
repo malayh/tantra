@@ -14,7 +14,13 @@ from pydantic import BaseModel, ValidationError
 
 from tantra.agent import Agent
 from tantra.ask import Approval, ApprovalResponse, AskRequest, AskResponse
-from tantra.context import TurnContext, build_sample_request, compacted_history, resolve_prompt
+from tantra.context import (
+    TurnContext,
+    build_sample_request,
+    compacted_history,
+    resolve_model_params,
+    resolve_prompt,
+)
 from tantra.errors import ProviderError, TantraError
 from tantra.events import (
     AskRaised,
@@ -757,6 +763,7 @@ class TurnEngine:
             prompt=prompt,
             events=self.history,
             tools=self.schemas,
+            params=prepared.params,
             skills=self.skills_index,
             child_lifecycle=self.terminal_tool == "finish",
         )
@@ -770,11 +777,13 @@ class TurnEngine:
             for hook in self.hooks:
                 await hook.before_sample(self.turn)
             prompt = await resolve_prompt(self.agent.prompt, self.turn)
+            params = await resolve_model_params(self.agent.model_params, self.turn)
             req = build_sample_request(
                 model=self.model,
                 prompt=prompt,
                 events=self.history,
                 tools=self.schemas,
+                params=params,
                 skills=self.skills_index,
                 child_lifecycle=self.terminal_tool == "finish",
             )
@@ -786,6 +795,7 @@ class TurnEngine:
                     prompt=prompt,
                     events=self.history,
                     tools=self.schemas,
+                    params=params,
                     skills=self.skills_index,
                     child_lifecycle=self.terminal_tool == "finish",
                 )

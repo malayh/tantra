@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -200,6 +200,15 @@ async def resolve_prompt(prompt: Any, turn: TurnContext) -> str:
             value = await value
         return str(value)
     return str(prompt)
+
+
+async def resolve_model_params(model_params: Any, turn: TurnContext) -> dict[str, Any]:
+    value = model_params(turn) if callable(model_params) else model_params
+    if inspect.isawaitable(value):
+        value = await value
+    if not isinstance(value, Mapping):
+        raise TantraError(f"model_params must be a mapping, got {type(value).__name__}")
+    return dict(value)
 
 
 def resolve_model(agent: type[Agent], default_model: str | None) -> str:

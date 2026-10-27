@@ -9,6 +9,7 @@ title: Agent
 | `name` | derived class name | Durable registry name |
 | `model` | `None` | Model override |
 | `prompt` | empty | System prompt string or callable |
+| `model_params` | `{}` | Provider request parameters for each model call: a mapping, or a callable taking `TurnContext` that returns one, sync or async |
 | `tools` | `[]` | `Tool` objects |
 | `subagents` | `[]` | Child declarations available to `spawn` |
 | `permissions` | `{}` | Name or glob rules |

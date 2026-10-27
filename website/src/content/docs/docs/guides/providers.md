@@ -21,6 +21,21 @@ Retryable provider failures include explicit retryable errors, HTTP 429, and ser
 
 `OpenAICompatible` is the production adapter and `FakeProvider` is the deterministic test adapter.
 
+## Model parameters
+
+`Agent.model_params` sets provider request parameters for every model call of that agent. It is a mapping, or a callable taking `TurnContext` that returns one, sync or async, and it is resolved before each sample, like `prompt`. Each agent uses its own value; children do not inherit their parent's. `OpenAICompatible` sends the parameters as extra request body fields and ignores `model`, `messages`, `stream`, `stream_options` and `tools`.
+
+```python
+def effort(turn: TurnContext) -> dict:
+    return {"reasoning": {"effort": "high" if turn.submitted_by else "low"}}
+
+
+class Lead(Agent):
+    model_params = effort
+```
+
+`reasoning.effort` is OpenRouter's field; other OpenAI-compatible APIs name it differently. Compaction summaries keep their own parameters. A callable that returns anything but a mapping raises `TantraError` before the sample, like a failing `prompt`.
+
 ## Model limits
 
 `limits(model)` may return `ModelLimits` directly or an awaitable. The turn engine resolves either form before preparing the request.

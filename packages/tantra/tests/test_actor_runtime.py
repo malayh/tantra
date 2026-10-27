@@ -2553,3 +2553,36 @@ async def test_cancel_agent_accepts_only_direct_children_and_reports_idle_ones()
         await runtime._actor_cancel(root, uuid4())
     assert await runtime._actor_cancel(root, UUID(child_public)) == {"agent_id": child_public, "cancelled": False}
     await runtime.aclose()
+
+
+async def test_each_agent_sends_its_own_model_params() -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+        model_params = {"reasoning": {"effort": "high"}}
+
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.params: dict[str, list[dict[str, Any]]] = {}
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            self.params.setdefault(req.model, []).append(req.params)
+            yield StreamEnd(text="done")
+
+    provider = Provider()
+    store = MemoryStore()
+    runtime = Runtime(provider, store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "work")
+    await wait_idle(runtime, UUID(child_public).hex)
+    await wait_idle(runtime, root.id)
+
+    assert provider.params["child"] == [{}]
+    assert provider.params["root"] and all(
+        params == {"reasoning": {"effort": "high"}} for params in provider.params["root"]
+    )
+    await runtime.aclose()

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.0
+
+Added:
+
+- `Agent.model_params` sets provider request parameters for each model call, for example `{"reasoning": {"effort": "high"}}` on OpenRouter. It is a mapping, or a callable taking `TurnContext` that returns one, sync or async, resolved before each sample like `prompt`. Each agent uses its own value, and the overflow retry keeps it. `OpenAICompatible` sends it as extra body fields. Compaction summaries keep their own parameters.
+
 ## 2.1.0
 
 Added:

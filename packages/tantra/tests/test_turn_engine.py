@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from tantra.agent import Agent
 from tantra.compaction import PruneThenSummarize
 from tantra.context import TurnContext
-from tantra.errors import ProviderError
+from tantra.errors import ProviderError, TantraError
 from tantra.events import (
     CompactionApplied,
     InputQueued,
@@ -954,3 +954,63 @@ async def test_rewritten_call_ids_are_deterministic_for_one_turn() -> None:
 
     assert left == right
     assert left[0] == "call_0" and len(set(left)) == 3
+
+
+async def test_model_params_reach_every_sample_request() -> None:
+    @tool
+    def ping() -> str:
+        return "pong"
+
+    class Bot(Agent):
+        tools = [ping]
+        model_params = {"reasoning": {"effort": "high"}}
+
+    provider = FakeProvider([Sample(tool_calls=[call("ping", "{}", "p1")]), Sample(text="done")])
+    engine, _, queued = await build([], Bot, provider=provider)
+
+    terminal = await engine.run(queued)
+
+    assert isinstance(terminal, TurnCompleted)
+    assert [req.params for req in provider.requests] == [{"reasoning": {"effort": "high"}}] * 2
+    provider.requests[0].params["reasoning"] = "changed"
+    assert Bot.model_params == {"reasoning": {"effort": "high"}}
+
+
+async def test_callable_model_params_are_resolved_per_turn() -> None:
+    async def effort(turn: TurnContext) -> dict[str, Any]:
+        return {"reasoning": {"effort": "high" if turn.input == "go" else "low"}}
+
+    class Bot(Agent):
+        model_params = effort
+
+    provider = FakeProvider([Sample(text="done")])
+    engine, _, queued = await build([], Bot, provider=provider)
+
+    await engine.run(queued)
+
+    assert provider.requests[0].params == {"reasoning": {"effort": "high"}}
+
+
+async def test_model_params_that_are_not_a_mapping_raise_before_sampling() -> None:
+    class Bot(Agent):
+        model_params = staticmethod(lambda turn: ["high"])
+
+    provider = FakeProvider([Sample(text="done")])
+    engine, _, queued = await build([], Bot, provider=provider)
+
+    with pytest.raises(TantraError, match="model_params must be a mapping, got list"):
+        await engine.run(queued)
+    assert provider.requests == []
+
+
+async def test_overflow_recovery_keeps_model_params() -> None:
+    class Bot(Agent):
+        model_params = {"temperature": 0.1}
+
+    provider = OverflowProvider()
+    engine, _, queued = await build([], Bot, provider=provider, compactor=RecoveryCompactor())
+
+    terminal = await engine.run(queued)
+
+    assert isinstance(terminal, TurnCompleted)
+    assert [req.params for req in provider.requests] == [{"temperature": 0.1}] * 2

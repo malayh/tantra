@@ -20,10 +20,10 @@ from tantra.events import (
     ChildCreated,
     CompactionApplied,
     InputQueued,
-    LoggedEvent,
     SessionCreated,
     SessionEvent,
     SessionHeader,
+    TextPart,
     ToolCallCompleted,
     ToolCallRequested,
     TurnCancelled,
@@ -34,6 +34,7 @@ from tantra.events import (
 from tantra.hooks import Escalation, Hook
 from tantra.providers.base import ModelLimits, ProviderEvent, SampleRequest, StreamEnd, ToolCall, ToolResultMessage
 from tantra.providers.fake import FAKE_LIMITS
+from tantra.runtime import REPLY_LIMIT, REPLY_TRUNCATED, _lifecycle_input
 from tantra.stores.memory import MemoryStore
 from tantra.tools import Context
 
@@ -253,16 +254,17 @@ async def test_spawn_tool_description_lists_registered_actor_types() -> None:
     )
 
     spawn = runtime._framework_tools(root, Root)["spawn"]
-    finish = runtime._framework_tools(child, ResearchWorker)["finish"]
+    child_tools = runtime._framework_tools(child, ResearchWorker)
 
     assert spawn.schema.description.endswith("Available agent types: research_worker, fact_checker.")
-    assert "finished child's result is delivered later as a new parent input" in spawn.schema.description
+    assert "[agent <id> replied] with its final message" in spawn.schema.description
+    assert "[agent <id> turn ended] with its status" in spawn.schema.description
     assert spawn.schema.parameters["properties"]["agent_name"] == {
         "title": "Agent Name",
         "type": "string",
         "enum": ["research_worker", "fact_checker"],
     }
-    assert finish.schema.description == "Permanently close this child agent and deliver its result to its parent."
+    assert "finish" not in child_tools
     await runtime.aclose()
 
 
@@ -325,21 +327,17 @@ async def test_child_lifecycle_guidance_reaches_only_the_child_provider() -> Non
     runtime._activate(child_id.hex, root_id.hex)
     await wait_idle(runtime, child_id.hex, root_id.hex)
 
-    child_request = next(
-        request for request in provider.requests if any(tool.name == "finish" for tool in request.tools)
-    )
-    root_request = next(
-        request
-        for request in provider.requests
-        if any(tool.name == "spawn" for tool in request.tools) and all(tool.name != "finish" for tool in request.tools)
-    )
+    def parent_aware(request: SampleRequest) -> bool:
+        return any(tool.name == "send" and "direct parent agent ID" in tool.description for tool in request.tools)
+
+    child_request = next(request for request in provider.requests if parent_aware(request))
+    root_request = next(request for request in provider.requests if not parent_aware(request))
     lifecycle = (
         "Child lifecycle\n\n"
-        "Ordinary turn completion leaves the child reusable and sends a status-only notification to the parent. "
-        "When the assignment is complete and a final result is ready, use the finish tool. Finishing permanently "
-        "closes the child and delivers its result to the parent."
+        "When your turn ends, your parent receives your final message as your reply, or your submitted output if you "
+        "submit one. Put the complete result there. Use send only for messages during a turn. Your parent may send "
+        "you more work."
     )
-    finish = next(tool for tool in child_request.tools if tool.name == "finish")
     child_send = next(tool for tool in child_request.tools if tool.name == "send")
     spawn = next(tool for tool in root_request.tools if tool.name == "spawn")
     root_send = next(tool for tool in root_request.tools if tool.name == "send")
@@ -351,7 +349,7 @@ async def test_child_lifecycle_guidance_reaches_only_the_child_provider() -> Non
     )
     assert root_send.description == "Queue a message for a direct parent or child agent."
     assert spawn.parameters["properties"]["agent_name"]["enum"] == ["child"]
-    assert finish.description == "Permanently close this child agent and deliver its result to its parent."
+    assert all(tool.name != "finish" for tool in child_request.tools)
     await runtime.aclose()
 
 
@@ -666,7 +664,7 @@ def test_runtime_rejects_static_child_ask_permissions() -> None:
     class DefaultRoot(Agent):
         subagents = [DefaultChild]
 
-    with pytest.raises(TantraError, match="child tool 'finish' cannot use 'ask' permission"):
+    with pytest.raises(TantraError, match="child tool 'send' cannot use 'ask' permission"):
         Runtime(EchoProvider(), MemoryStore(), [DefaultRoot], default_model="m", default_permission="ask")
 
 
@@ -729,26 +727,9 @@ class Result(BaseModel):
     a: str
 
 
-async def test_finish_boundary_closes_child_cancels_queue_and_delivers_once() -> None:
-    ran: list[str] = []
-    slow_started = asyncio.Event()
-    release = asyncio.Event()
-
-    @tool
-    async def slow() -> str:
-        slow_started.set()
-        await release.wait()
-        ran.append("slow")
-        return "slow"
-
-    @tool
-    async def late() -> str:
-        ran.append("late")
-        return "late"
-
+async def test_structured_child_replies_with_its_canonical_output() -> None:
     class Child(Agent):
         model = "child"
-        tools = [slow, late]
         output_schema = Result
 
     class Root(Agent):
@@ -757,13 +738,7 @@ async def test_finish_boundary_closes_child_cancels_queue_and_delivers_once() ->
     class Provider(EchoProvider):
         async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
             if req.model == "child":
-                yield StreamEnd(
-                    tool_calls=[
-                        call("slow", "{}", "slow"),
-                        call("finish", '{"result":{"z":2,"a":"x"}}', "finish"),
-                        call("late", "{}", "late"),
-                    ]
-                )
+                yield StreamEnd(text="here it is", tool_calls=[call("submit_output", '{"z":2,"a":"x"}', "out")])
                 return
             yield StreamEnd(text="root")
 
@@ -773,101 +748,42 @@ async def test_finish_boundary_closes_child_cancels_queue_and_delivers_once() ->
     root = await store.header(root_id.hex)
     assert root is not None
     child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "work")
-    child_id = UUID(child_public).hex
-    await asyncio.wait_for(slow_started.wait(), timeout=2)
-    await store.enqueue(child_id, InputQueued(command_id=uuid4().hex, input="queued"))
-    release.set()
-    await wait_idle(runtime, child_id, root.id)
+    await wait_idle(runtime, UUID(child_public).hex, root.id)
 
-    child = await store.header(child_id)
-    child_events = await journal(store, child_id)
-    parent_inputs = [event for event in await journal(store, root.id) if isinstance(event, InputQueued)]
-    assert child is not None and child.finished
-    assert ran == ["slow"]
-    assert sum(isinstance(event, AgentFinished) for event in child_events) == 1
-    assert any(isinstance(event, TurnCompleted) and event.stop_reason == "finished" for event in child_events)
-    assert isinstance(child_events[-2], TurnCompleted)
-    assert isinstance(child_events[-1], AgentFinished)
-    assert child.last_seq == len(child_events)
-    assert any(isinstance(event, TurnCancelled) and event.reason == "agent_finished" for event in child_events)
-    late_result = next(
-        event for event in child_events if isinstance(event, ToolCallCompleted) and event.call_id == "late"
-    )
-    assert late_result.is_error and late_result.result == "not executed: turn completed"
-    assert sum(' finished] {"a":"x","z":2}' in event.input for event in parent_inputs) == 1
-    assert not any(" turn ended] " in event.input for event in parent_inputs)
-
-    child_turn = next(event.turn_id for event in child_events if isinstance(event, TurnStarted))
-    before_duplicate = list(child_events)
-    duplicate = await runtime._actor_finish(
-        child,
-        Child,
-        context(store, child_id, turn=child_turn, cid="finish", depth=1),
-        {"z": 2, "a": "x"},
-    )
-    await wait_idle(runtime, root.id)
-    assert duplicate.output == {"z": 2, "a": "x"}
-    assert await journal(store, child_id) == before_duplicate
-    assert (
-        sum(
-            isinstance(event, InputQueued) and ' finished] {"a":"x","z":2}' in event.input
-            for event in await journal(store, root.id)
-        )
-        == 1
-    )
-
-    with pytest.raises(TantraError, match="finished"):
-        await runtime._actor_send(
-            root,
-            context(store, root.id, turn="later", cid="send"),
-            UUID(child_public),
-            "new",
-        )
+    assert [event.input for event in lifecycle_inputs(await journal(store, root.id))] == [
+        f'[agent {UUID(child_public)} replied] {{"a":"x","z":2}}'
+    ]
     await runtime.aclose()
 
 
-async def test_finish_rejects_unfinished_descendant_and_reserved_collisions() -> None:
-    class Grandchild(Agent):
+async def test_framework_tool_names_are_reserved_for_children_including_legacy_finish() -> None:
+    @tool(name="finish")
+    async def own_finish() -> str:
+        return "mine"
+
+    class FinishChild(Agent):
+        tools = [own_finish]
+
+    class FinishRoot(Agent):
+        subagents = [FinishChild]
+
+    with pytest.raises(TantraError, match="duplicate tool name 'finish'"):
+        Runtime(EchoProvider(), MemoryStore(), [FinishRoot], default_model="m")
+
+    class FreeChild(Agent):
         pass
 
-    class Child(Agent):
-        subagents = [Grandchild]
-
-    class Root(Agent):
-        subagents = [Child]
-
-    store = MemoryStore()
-    runtime = Runtime(EchoProvider(), store, [Root], default_model="m")
-    root_id = await runtime.create(Root)
-    root = await store.header(root_id.hex)
-    assert root is not None
-    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "go")
-    child = await store.header(UUID(child_public).hex)
-    assert child is not None
-    await wait_idle(runtime, child.id)
-    grandchild_public = await runtime._actor_spawn(
-        child,
-        Child,
-        context(store, child.id, turn="grand", cid="spawn", depth=1),
-        "grandchild",
-        "go",
-    )
-    await wait_idle(runtime, UUID(grandchild_public).hex)
-    with pytest.raises(TantraError, match=grandchild_public):
-        await runtime._actor_finish(child, Child, context(store, child.id, turn="finish", cid="f", depth=1), "x")
-    await runtime.aclose()
-
-    @tool(name="finish")
-    async def collision() -> str:
+    @tool(name="send")
+    async def send_collision() -> str:
         return "no"
 
     class BadChild(Agent):
-        tools = [collision]
+        tools = [send_collision]
 
     class BadRoot(Agent):
         subagents = [BadChild]
 
-    with pytest.raises(TantraError, match="duplicate tool name 'finish'"):
+    with pytest.raises(TantraError, match="duplicate tool name 'send'"):
         Runtime(EchoProvider(), MemoryStore(), [BadRoot], default_model="m")
 
     @tool(name="status")
@@ -876,7 +792,7 @@ async def test_finish_rejects_unfinished_descendant_and_reserved_collisions() ->
 
     class BadStatusRoot(Agent):
         tools = [status_collision]
-        subagents = [BadChild]
+        subagents = [FreeChild]
 
     with pytest.raises(TantraError, match="duplicate tool name 'status'"):
         Runtime(EchoProvider(), MemoryStore(), [BadStatusRoot], default_model="m")
@@ -935,51 +851,6 @@ async def test_tree_cancel_fences_child_late_writes_and_leaves_other_root_runnin
     assert sum(isinstance(event, TurnCancelled) for event in child_events) == 1
     assert not any(isinstance(event, TurnCompleted) for event in child_events)
     assert not any(getattr(event, "text", None) == "late" for event in child_events)
-    await runtime.aclose()
-
-
-async def test_finish_validation_failure_is_a_tool_error_and_provider_continues() -> None:
-    class Child(Agent):
-        model = "child"
-        output_schema = Result
-
-    class Root(Agent):
-        subagents = [Child]
-
-    class Provider(EchoProvider):
-        def __init__(self) -> None:
-            self.child_calls = 0
-
-        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
-            if req.model != "child":
-                yield StreamEnd(text="root")
-                return
-            self.child_calls += 1
-            if self.child_calls == 1:
-                yield StreamEnd(tool_calls=[call("finish", '{"result":{"z":"bad","a":"x"}}', "finish")])
-            else:
-                yield StreamEnd(text="recovered")
-
-    provider = Provider()
-    store = MemoryStore()
-    runtime = Runtime(provider, store, [Root], default_model="root")
-    root_id = await runtime.create(Root)
-    root = await store.header(root_id.hex)
-    assert root is not None
-    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "work")
-    child_id = UUID(child_public).hex
-    await wait_idle(runtime, child_id)
-
-    child = await store.header(child_id)
-    child_events = await journal(store, child_id)
-    failed_finish = next(
-        event for event in child_events if isinstance(event, ToolCallCompleted) and event.call_id == "finish"
-    )
-    assert child is not None and child.finished is False
-    assert provider.child_calls == 2
-    assert failed_finish.is_error
-    assert not any(isinstance(event, AgentFinished) for event in child_events)
-    assert any(isinstance(event, TurnCompleted) and event.stop_reason == "completed" for event in child_events)
     await runtime.aclose()
 
 
@@ -1373,273 +1244,6 @@ async def test_cancel_retry_fences_a_target_after_terminal_commit_raises() -> No
     await runtime.aclose()
 
 
-class GatedFinishedStore(MemoryStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.finished_committed = asyncio.Event()
-        self.release_finished = asyncio.Event()
-        self.finished_batch: list[SessionEvent] = []
-
-    async def append(
-        self,
-        sid: str,
-        events: Sequence[SessionEvent],
-    ) -> int:
-        result = await super().append(sid, events)
-        if any(isinstance(event, AgentFinished) for event in events):
-            self.finished_batch = list(events)
-            self.finished_committed.set()
-            await self.release_finished.wait()
-        return result
-
-
-class ObservedCancellationRuntime(Runtime):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.cancellation_started = asyncio.Event()
-
-    async def _accept_cancel(
-        self, connection: Any, command_id: UUID, *, submitted_by: str | None = None, descendants: bool = True
-    ) -> Any:
-        self.cancellation_started.set()
-        return await super()._accept_cancel(connection, command_id, submitted_by=submitted_by, descendants=descendants)
-
-
-async def test_cancel_racing_durable_finish_preserves_finished_terminal() -> None:
-    class Child(Agent):
-        model = "child"
-
-    class Root(Agent):
-        subagents = [Child]
-
-    class Provider(EchoProvider):
-        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
-            if req.model == "child":
-                yield StreamEnd(tool_calls=[call("finish", '{"result":"done"}', "finish")])
-                return
-            yield StreamEnd(text="root")
-
-    store = GatedFinishedStore()
-    runtime = ObservedCancellationRuntime(Provider(), store, [Root], default_model="root")
-    root_id = await runtime.create(Root)
-    root = await store.header(root_id.hex)
-    assert root is not None
-    connection = runtime.connect(root_id, writable=True)
-    await connection.__aenter__()
-    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "work")
-    child_id = UUID(child_public).hex
-    await asyncio.wait_for(store.finished_committed.wait(), timeout=2)
-    cancellation = asyncio.create_task(connection.cancel(command_id=uuid4()))
-    await runtime.cancellation_started.wait()
-    store.release_finished.set()
-    await cancellation
-    await wait_idle(runtime, child_id)
-
-    child_events = await journal(store, child_id)
-    turn_id = next(event.turn_id for event in child_events if event.type == "turn_started")
-    terminals = [
-        event
-        for event in child_events
-        if isinstance(event, TurnCompleted | TurnCancelled | TurnInterrupted) and event.turn_id == turn_id
-    ]
-    assert terminals == [TurnCompleted(turn_id=turn_id, stop_reason="finished", output="done")]
-    assert sum(isinstance(event, AgentFinished) for event in child_events) == 1
-    assert isinstance(store.finished_batch[-2], TurnCompleted)
-    assert isinstance(store.finished_batch[-1], AgentFinished)
-    assert any(
-        isinstance(event, InputQueued) and f"[agent {UUID(child_public)} finished]" in event.input
-        for event in await journal(store, root.id)
-    )
-    await connection.__aexit__(None, None, None)
-    await runtime.aclose()
-
-
-class FailingFinishCleanupStore(MemoryStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.fail_sid: str | None = None
-        self.failed = False
-
-    async def append(
-        self,
-        sid: str,
-        events: Sequence[SessionEvent],
-    ) -> int:
-        if (
-            sid == self.fail_sid
-            and not self.failed
-            and any(isinstance(event, TurnCancelled) and event.reason == "agent_finished" for event in events)
-        ):
-            self.failed = True
-            raise RuntimeError("finish cleanup append failed")
-        return await super().append(sid, events)
-
-
-async def test_failed_atomic_finish_retains_parent_delivery_without_partial_close() -> None:
-    class Child(Agent):
-        model = "child"
-
-    class Root(Agent):
-        subagents = [Child]
-
-    class Provider(EchoProvider):
-        def __init__(self) -> None:
-            self.child_started = asyncio.Event()
-            self.release_child = asyncio.Event()
-            self.root_calls = 0
-
-        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
-            if req.model == "child":
-                self.child_started.set()
-                await self.release_child.wait()
-                yield StreamEnd(tool_calls=[call("finish", '{"result":"done"}', "finish")])
-                return
-            self.root_calls += 1
-            yield StreamEnd(text="done")
-
-    provider = Provider()
-    store = FailingFinishCleanupStore()
-    runtime = Runtime(provider, store, [Root], default_model="root")
-    root_id = await runtime.create(Root)
-    root = await store.header(root_id.hex)
-    assert root is not None
-    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "initial")
-    child_id = UUID(child_public).hex
-    await asyncio.wait_for(provider.child_started.wait(), timeout=2)
-    await store.enqueue(child_id, InputQueued(command_id=uuid4().hex, input="pending"))
-    store.fail_sid = child_id
-    provider.release_child.set()
-    await wait_idle(runtime, child_id)
-
-    child_events = await journal(store, child_id)
-    parent_deliveries = [
-        event
-        for event in await journal(store, root.id)
-        if isinstance(event, InputQueued) and ' finished] "done"' in event.input
-    ]
-    assert not any(isinstance(event, AgentFinished) for event in child_events)
-    assert not any(
-        isinstance(event, TurnCompleted | TurnCancelled) and event.turn_id == child_events[1].command_id
-        for event in child_events
-    )
-    assert len(parent_deliveries) == 1
-    assert root.id not in runtime.active
-
-    async with runtime.connect(root_id, writable=True) as connection:
-        result = await connection.prompt("continue", command_id=uuid4())
-    assert result.outcome == "completed"
-    assert provider.root_calls == 2
-    await runtime.aclose()
-
-
-async def test_finished_header_is_reduced_atomically_and_parent_is_not_stranded() -> None:
-    class Child(Agent):
-        model = "child"
-
-    class Root(Agent):
-        subagents = [Child]
-
-    class Provider(EchoProvider):
-        def __init__(self) -> None:
-            self.root_calls = 0
-
-        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
-            if req.model == "child":
-                yield StreamEnd(tool_calls=[call("finish", '{"result":"done"}', "finish")])
-                return
-            self.root_calls += 1
-            yield StreamEnd(text="done")
-
-    provider = Provider()
-    store = MemoryStore()
-    runtime = Runtime(provider, store, [Root], default_model="root")
-    root_id = await runtime.create(Root)
-    root = await store.header(root_id.hex)
-    assert root is not None
-    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "initial")
-    child_id = UUID(child_public).hex
-    await wait_idle(runtime, child_id, root.id)
-
-    child_events = await journal(store, child_id)
-    child = await store.header(child_id)
-    parent_deliveries = [
-        event
-        for event in await journal(store, root.id)
-        if isinstance(event, InputQueued) and ' finished] "done"' in event.input
-    ]
-    assert child is not None and child.finished is True
-    assert child.status == "finished"
-    assert isinstance(child_events[-2], TurnCompleted)
-    assert isinstance(child_events[-1], AgentFinished)
-    assert len(parent_deliveries) == 1
-    assert provider.root_calls == 1
-    with pytest.raises(TantraError, match="finished"):
-        await runtime._actor_send(
-            root,
-            context(store, root.id, turn="later", cid="send"),
-            UUID(child_public),
-            "new",
-        )
-    await runtime.aclose()
-
-
-async def test_post_append_hook_failure_reconciles_durable_finish() -> None:
-    class Child(Agent):
-        model = "child"
-
-    class Root(Agent):
-        subagents = [Child]
-
-    class Provider(EchoProvider):
-        def __init__(self) -> None:
-            self.root_calls = 0
-
-        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
-            if req.model == "child":
-                yield StreamEnd(tool_calls=[call("finish", '{"result":"done"}', "finish")])
-                return
-            self.root_calls += 1
-            yield StreamEnd(text="done")
-
-    class RaiseAfterDurableFinish(Hook):
-        def __init__(self, store: MemoryStore) -> None:
-            self.raised = False
-            self.store = store
-
-        async def on_event(self, emitted: LoggedEvent) -> None:
-            if not self.raised and isinstance(emitted.event, TurnCompleted) and emitted.event.stop_reason == "finished":
-                self.raised = True
-                await self.store.patch_header(emitted.agent_id.hex, status="idle", pending_ask=None, finished=True)
-                raise RuntimeError("post-append hook failed")
-
-    provider = Provider()
-    store = MemoryStore()
-    hook = RaiseAfterDurableFinish(store)
-    runtime = Runtime(provider, store, [Root], default_model="root", hooks=[hook])
-    root_id = await runtime.create(Root)
-    root = await store.header(root_id.hex)
-    assert root is not None
-    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "initial")
-    child_id = UUID(child_public).hex
-    await wait_idle(runtime, child_id, root.id)
-
-    child_events = await journal(store, child_id)
-    child = await store.header(child_id)
-    parent_deliveries = [
-        event
-        for event in await journal(store, root.id)
-        if isinstance(event, InputQueued) and ' finished] "done"' in event.input
-    ]
-    assert hook.raised
-    assert child is not None and child.finished is True
-    assert isinstance(child_events[-2], TurnCompleted)
-    assert isinstance(child_events[-1], AgentFinished)
-    assert len(parent_deliveries) == 1
-    assert provider.root_calls == 1
-    assert not runtime._errors.get(child_id)
-    await runtime.aclose()
-
-
 async def test_finished_header_without_event_is_not_authoritative() -> None:
     class Child(Agent):
         pass
@@ -1688,30 +1292,31 @@ async def test_finished_header_without_event_is_not_authoritative() -> None:
 
 
 def lifecycle_inputs(events: list[Any]) -> list[InputQueued]:
-    return [
-        event
-        for event in events
-        if isinstance(event, InputQueued) and event.input.startswith("[agent ") and " turn ended] " in event.input
-    ]
+    return [event for event in events if isinstance(event, InputQueued) and event.origin == "turn_ended"]
 
 
-async def test_child_lifecycle_notice_is_exact_status_only_and_reusable() -> None:
+async def test_child_reply_carries_the_final_message_and_the_child_stays_reusable() -> None:
+    @tool
+    async def ping() -> str:
+        return "pong"
+
     class Child(Agent):
         model = "child"
+        tools = [ping]
 
     class Root(Agent):
         subagents = [Child]
 
     class Provider(EchoProvider):
         def __init__(self) -> None:
-            self.child_calls = 0
+            self.child: list[StreamEnd] = [
+                StreamEnd(text="checking first", tool_calls=[call("ping", "{}", "p1")]),
+                StreamEnd(text="the answer is 42"),
+                StreamEnd(text="   "),
+            ]
 
         async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
-            if req.model == "child":
-                self.child_calls += 1
-                yield StreamEnd(text=f"secret-output-{self.child_calls}")
-                return
-            yield StreamEnd(text="parent")
+            yield self.child.pop(0) if req.model == "child" else StreamEnd(text="parent")
 
     provider = Provider()
     store = MemoryStore()
@@ -1724,17 +1329,10 @@ async def test_child_lifecycle_notice_is_exact_status_only_and_reusable() -> Non
     await wait_idle(runtime, child_id, root.id)
 
     first_turn = next(event.command_id for event in await journal(store, child_id) if isinstance(event, InputQueued))
-    first = lifecycle_inputs(await journal(store, root.id))[0]
-    expected_payload = {
-        "child_id": str(UUID(hex=child_id)),
-        "outcome": "completed",
-        "stop_reason": "completed",
-        "turn_id": str(UUID(hex=first_turn)),
-    }
-    expected_json = json.dumps(expected_payload, sort_keys=True, separators=(",", ":"))
+    [first] = lifecycle_inputs(await journal(store, root.id))
     assert first.command_id == uuid5(UUID(hex=child_id), first_turn).hex
-    assert first.input == f"[agent {UUID(hex=child_id)} turn ended] {expected_json}"
-    assert "secret-output" not in first.input
+    assert first.input == f"[agent {UUID(hex=child_id)} replied] the answer is 42"
+    assert (first.sender_id, first.origin) == (child_id, "turn_ended")
 
     receipt = await runtime._actor_send(
         root,
@@ -1746,11 +1344,128 @@ async def test_child_lifecycle_notice_is_exact_status_only_and_reusable() -> Non
     notices = lifecycle_inputs(await journal(store, root.id))
     assert len(notices) == 2
     assert notices[-1].command_id == uuid5(UUID(hex=child_id), UUID(receipt["command_id"]).hex).hex
-    assert provider.child_calls == 2
+    assert notices[-1].input == f"[agent {UUID(hex=child_id)} replied] (no text reply)"
+    assert provider.child == []
     tools = runtime._framework_tools(root, Root)
-    assert "status only" in tools["spawn"].description
-    assert "delivered later as a new parent input" in tools["spawn"].description
-    assert "returns no child output" in tools["status"].description
+    assert "[agent <id> replied]" in tools["spawn"].description
+    assert "Do not poll" in tools["spawn"].description
+    assert "Replies arrive as new input" in tools["status"].description
+    assert "No reply follows" in tools["cancel_agent"].description
+    await runtime.aclose()
+
+
+async def test_long_replies_are_cut_on_a_character_boundary_and_redelivered_identically() -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        subagents = [Child]
+
+    class Provider(EchoProvider):
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            yield StreamEnd(text="\u20ac" * 15000 if req.model == "child" else "root")
+
+    store = MemoryStore()
+    runtime = Runtime(Provider(), store, [Root], default_model="root")
+    root_id = await runtime.create(Root)
+    root = await store.header(root_id.hex)
+    assert root is not None
+    child_public = await runtime._actor_spawn(root, Root, context(store, root.id), "child", "work")
+    child_id = UUID(child_public).hex
+    await wait_idle(runtime, child_id, root.id)
+
+    [reply] = lifecycle_inputs(await journal(store, root.id))
+    assert reply.input == f"[agent {UUID(child_public)} replied] " + "\u20ac" * (REPLY_LIMIT // 3) + REPLY_TRUNCATED
+    child = await store.header(child_id)
+    assert child is not None and child.last_turn is not None
+    runtime._delivered.clear()
+    await runtime._deliver_lifecycle(child, child.last_turn)
+    await wait_idle(runtime, root.id)
+    assert lifecycle_inputs(await journal(store, root.id)) == [reply]
+    await runtime.aclose()
+
+
+async def test_a_2_2_journal_stays_closed_finished_and_is_not_redelivered() -> None:
+    class Child(Agent):
+        model = "child"
+
+    class Root(Agent):
+        model = "root"
+        subagents = [Child]
+
+    store = MemoryStore()
+    root_id, child_id, turn = uuid4(), uuid4(), uuid4().hex
+    await store.create(SessionHeader(id=root_id.hex, root_id=root_id.hex, agent="root", model="root"))
+    await store.append(root_id.hex, [SessionCreated(agent="root", root_id=root_id.hex, model="root")])
+    await store.create(
+        SessionHeader(
+            id=child_id.hex, root_id=root_id.hex, parent_id=root_id.hex, agent="child", depth=1, model="child"
+        )
+    )
+    await store.append(
+        child_id.hex,
+        [
+            SessionCreated(agent="child", root_id=root_id.hex, parent_id=root_id.hex, depth=1, model="child"),
+            InputQueued(command_id=turn, input="work", sender_id=root_id.hex, origin="spawn"),
+            TurnStarted(turn_id=turn, input="work"),
+            TurnCompleted(turn_id=turn, stop_reason="finished", output="done"),
+            AgentFinished(result="done"),
+        ],
+    )
+    finished = InputQueued(
+        command_id=uuid4().hex,
+        input=f'[agent {child_id} finished] "done"',
+        sender_id=child_id.hex,
+        origin="finished",
+    )
+    await store.enqueue(root_id.hex, finished)
+    await store.append(
+        root_id.hex,
+        [
+            TurnStarted(turn_id=finished.command_id, input=finished.input),
+            TurnCompleted(turn_id=finished.command_id, stop_reason="completed"),
+        ],
+    )
+    idle_id, idle_turn = uuid4(), uuid4().hex
+    await store.create(
+        SessionHeader(id=idle_id.hex, root_id=root_id.hex, parent_id=root_id.hex, agent="child", depth=1, model="child")
+    )
+    await store.append(
+        idle_id.hex,
+        [
+            SessionCreated(agent="child", root_id=root_id.hex, parent_id=root_id.hex, depth=1, model="child"),
+            InputQueued(command_id=idle_turn, input="look", sender_id=root_id.hex, origin="spawn"),
+            TurnStarted(turn_id=idle_turn, input="look"),
+            TextPart(sample_id="s", text="found nothing"),
+            TurnCompleted(turn_id=idle_turn, stop_reason="completed"),
+        ],
+    )
+    idle = await store.header(idle_id.hex)
+    assert idle is not None and idle.last_turn is not None
+    notice = _lifecycle_input(idle_id.hex, idle.last_turn, None)
+    await store.enqueue(root_id.hex, notice)
+    await store.append(
+        root_id.hex,
+        [
+            TurnStarted(turn_id=notice.command_id, input=notice.input),
+            TurnCompleted(turn_id=notice.command_id, stop_reason="completed"),
+        ],
+    )
+    runtime = Runtime(EchoProvider(), store, [Root])
+    async with runtime.connect(root_id, writable=True) as connection:
+        result = await connection.prompt("again", command_id=uuid4())
+    root = await store.header(root_id.hex)
+    child = await store.header(child_id.hex)
+    assert root is not None and child is not None
+    assert result.outcome == "completed"
+    assert child.finished and child.status == "finished"
+    assert [event.input for event in await journal(store, root_id.hex) if isinstance(event, InputQueued)] == [
+        finished.input,
+        notice.input,
+        "again",
+    ]
+    with pytest.raises(TantraError, match="finished"):
+        await runtime._actor_send(root, context(store, root.id, turn="later", cid="send"), child_id, "more")
     await runtime.aclose()
 
 
@@ -1869,7 +1584,7 @@ class LifecycleFailureStore(MemoryStore):
         self.failed = False
 
     async def enqueue(self, sid: str, event: InputQueued) -> Any:
-        lifecycle = " turn ended] " in event.input
+        lifecycle = event.origin == "turn_ended"
         if lifecycle:
             self.lifecycle_enqueues += 1
         fail = lifecycle and not self.failed and self.lifecycle_enqueues == self.fail_at
@@ -1892,7 +1607,7 @@ class GatedLifecycleFailureStore(MemoryStore):
         self.release_first = asyncio.Event()
 
     async def enqueue(self, sid: str, event: InputQueued) -> Any:
-        if " turn ended] " not in event.input:
+        if event.origin != "turn_ended":
             return await super().enqueue(sid, event)
         self.attempts += 1
         if self.attempts == 1:
@@ -2161,12 +1876,8 @@ async def test_grandchild_lifecycle_notifies_only_its_direct_parent() -> None:
 
     middle_notices = lifecycle_inputs(await journal(store, middle.id))
     root_notices = lifecycle_inputs(await journal(store, root.id))
-    assert any(
-        json.loads(event.input.split("] ", 1)[1])["child_id"] == str(UUID(leaf_public)) for event in middle_notices
-    )
-    assert not any(
-        json.loads(event.input.split("] ", 1)[1])["child_id"] == str(UUID(leaf_public)) for event in root_notices
-    )
+    assert any(event.sender_id == leaf_id for event in middle_notices)
+    assert not any(event.sender_id == leaf_id for event in root_notices)
     await runtime.aclose()
 
 
@@ -2254,14 +1965,16 @@ async def test_every_input_path_records_its_sender_and_origin_with_unchanged_tex
     provider.scripts["worker"].extend(
         [
             StreamEnd(tool_calls=[call("send", json.dumps({"agent_id": str(root_id), "input": "ping"}), "w1")]),
-            StreamEnd(tool_calls=[call("finish", '{"result":"ok"}', "w2")]),
+            StreamEnd(text="ok"),
         ]
     )
     async with runtime.connect(root_id, writable=True) as connection:
         await connection.prompt("nudge", command_id=uuid4())
 
     async def settled() -> None:
-        while not (await store.header(child.id)).finished or any(not t.done() for t in runtime.active.values()):
+        while len(lifecycle_inputs(await journal(store, root_id.hex))) < 2 or any(
+            not t.done() for t in runtime.active.values()
+        ):
             await asyncio.sleep(0.01)
 
     await asyncio.wait_for(settled(), 5)
@@ -2274,13 +1987,14 @@ async def test_every_input_path_records_its_sender_and_origin_with_unchanged_tex
     child_inputs = [event for event in await journal(store, child.id) if isinstance(event, InputQueued)]
     assert [(label, event.sender_id, event.origin, event.submitted_by) for label, event in root_inputs] == [
         ("go", None, "user", "alice"),
-        (f"[agent {child_uuid} turn ended]", child.id, "turn_ended", None),
+        (f"[agent {child_uuid} replied]", child.id, "turn_ended", None),
         ("nudge", None, "user", None),
         (f"[agent {child_uuid}]", child.id, "message", None),
-        (f"[agent {child_uuid} finished]", child.id, "finished", None),
+        (f"[agent {child_uuid} replied]", child.id, "turn_ended", None),
     ]
+    assert root_inputs[1][1].input == f"[agent {child_uuid} replied] first pass"
     assert root_inputs[3][1].input == f"[agent {child_uuid}] ping"
-    assert root_inputs[4][1].input == f'[agent {child_uuid} finished] "ok"'
+    assert root_inputs[4][1].input == f"[agent {child_uuid} replied] ok"
     assert [(event.input, event.sender_id, event.origin) for event in child_inputs] == [
         ("start", root_id.hex, "spawn"),
         (f"[agent {root_uuid}] more", root_id.hex, "message"),
@@ -2354,7 +2068,7 @@ async def test_root_only_cancel_spares_working_children_and_their_results_wake_t
             if req.model == "child":
                 self.child_started.set()
                 await self.release_child.wait()
-                yield StreamEnd(tool_calls=[call("finish", '{"result":"found"}', "finish")])
+                yield StreamEnd(text="found")
                 return
             self.root_requests.append(req)
             if len(self.root_requests) == 1:
@@ -2394,7 +2108,7 @@ async def test_root_only_cancel_spares_working_children_and_their_results_wake_t
     assert len(provider.root_requests) == 2
     woken = provider.root_requests[-1].messages
     assert any(getattr(message, "content", None) == ROOT_CANCELLATION_CONTEXT for message in woken)
-    assert f"[agent {UUID(child_public)} finished]" in woken[-1].content
+    assert woken[-1].content == f"[agent {UUID(child_public)} replied] found"
     assert isinstance(root_events[-1], TurnCompleted)
     await runtime.aclose()
 

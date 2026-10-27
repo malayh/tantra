@@ -642,11 +642,32 @@
     {
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
+        "_meta": {
+          "tantra": {
+            "reply": true,
+            "cursor": "50.0"
+          }
+        },
+        "sessionUpdate": "session_message",
+        "messageId": "00000000-0000-4000-8000-000000000012",
+        "senderSessionId": "00000000-0000-4000-8000-000000000009",
+        "recipientSessionId": "00000000-0000-4000-8000-000000000001",
+        "content": [
+          {
+            "type": "text",
+            "text": "First pass done."
+          }
+        ]
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
         "sessionUpdate": "state_update",
         "state": "running",
         "_meta": {
           "tantra": {
-            "cursor": "50.0"
+            "cursor": "50.1"
           }
         }
       }
@@ -668,7 +689,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "session_message",
-        "messageId": "00000000-0000-4000-8000-000000000012",
+        "messageId": "00000000-0000-4000-8000-000000000013",
         "senderSessionId": "00000000-0000-4000-8000-000000000001",
         "recipientSessionId": "00000000-0000-4000-8000-000000000009",
         "content": [
@@ -688,7 +709,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message_chunk",
-        "messageId": "00000000-0000-4000-8000-000000000013",
+        "messageId": "00000000-0000-4000-8000-000000000014",
         "content": {
           "type": "text",
           "text": "Sent "
@@ -704,7 +725,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message_chunk",
-        "messageId": "00000000-0000-4000-8000-000000000013",
+        "messageId": "00000000-0000-4000-8000-000000000014",
         "content": {
           "type": "text",
           "text": "it."
@@ -720,7 +741,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message",
-        "messageId": "00000000-0000-4000-8000-000000000013",
+        "messageId": "00000000-0000-4000-8000-000000000014",
         "content": [
           {
             "type": "text",
@@ -765,18 +786,18 @@
       "update": {
         "_meta": {
           "tantra": {
-            "finished": true,
+            "reply": true,
             "cursor": "65.0"
           }
         },
         "sessionUpdate": "session_message",
-        "messageId": "00000000-0000-4000-8000-000000000014",
+        "messageId": "00000000-0000-4000-8000-000000000015",
         "senderSessionId": "00000000-0000-4000-8000-000000000009",
         "recipientSessionId": "00000000-0000-4000-8000-000000000001",
         "content": [
           {
             "type": "text",
-            "text": "{\"answer\":42}"
+            "text": "The answer is 42."
           }
         ]
       }
@@ -797,7 +818,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message_chunk",
-        "messageId": "00000000-0000-4000-8000-000000000015",
+        "messageId": "00000000-0000-4000-8000-000000000016",
         "content": {
           "type": "text",
           "text": "The "
@@ -813,7 +834,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message_chunk",
-        "messageId": "00000000-0000-4000-8000-000000000015",
+        "messageId": "00000000-0000-4000-8000-000000000016",
         "content": {
           "type": "text",
           "text": "scout "
@@ -829,10 +850,10 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message_chunk",
-        "messageId": "00000000-0000-4000-8000-000000000015",
+        "messageId": "00000000-0000-4000-8000-000000000016",
         "content": {
           "type": "text",
-          "text": "finished."
+          "text": "replied."
         },
         "_meta": {
           "tantra": {
@@ -845,11 +866,11 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message",
-        "messageId": "00000000-0000-4000-8000-000000000015",
+        "messageId": "00000000-0000-4000-8000-000000000016",
         "content": [
           {
             "type": "text",
-            "text": "The scout finished."
+            "text": "The scout replied."
           }
         ],
         "_meta": {
@@ -891,7 +912,7 @@
         "sessionUpdate": "_tantra_queue_update",
         "entries": [
           {
-            "commandId": "00000000-0000-4000-8000-000000000016",
+            "commandId": "00000000-0000-4000-8000-000000000017",
             "content": [
               {
                 "type": "text",
@@ -907,7 +928,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "user_message",
-        "messageId": "00000000-0000-4000-8000-000000000016",
+        "messageId": "00000000-0000-4000-8000-000000000017",
         "content": [
           {
             "type": "text",
@@ -944,7 +965,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message_chunk",
-        "messageId": "00000000-0000-4000-8000-000000000017",
+        "messageId": "00000000-0000-4000-8000-000000000018",
         "content": {
           "type": "text",
           "text": "Working "
@@ -984,7 +1005,7 @@
       }
     },
     {
-      "at": 44,
+      "at": 45,
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "subagent_update",
@@ -997,7 +1018,7 @@
       }
     },
     {
-      "at": 51,
+      "at": 52,
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "subagent_update",
@@ -1009,20 +1030,15 @@
       }
     },
     {
-      "at": 59,
+      "at": 60,
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
-        "_meta": {
-          "tantra": {
-            "finished": true
-          }
-        },
         "sessionUpdate": "subagent_update",
         "sessionId": "00000000-0000-4000-8000-000000000009",
         "title": "scout",
         "state": {
           "state": "idle",
-          "stopReason": "_tantra_finished"
+          "stopReason": "end_turn"
         }
       }
     }
@@ -1616,11 +1632,32 @@
     {
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
+        "_meta": {
+          "tantra": {
+            "reply": true,
+            "cursor": "50.0"
+          }
+        },
+        "sessionUpdate": "session_message",
+        "messageId": "00000000-0000-4000-8000-000000000012",
+        "senderSessionId": "00000000-0000-4000-8000-000000000009",
+        "recipientSessionId": "00000000-0000-4000-8000-000000000001",
+        "content": [
+          {
+            "type": "text",
+            "text": "First pass done."
+          }
+        ]
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
         "sessionUpdate": "state_update",
         "state": "running",
         "_meta": {
           "tantra": {
-            "cursor": "50.0"
+            "cursor": "50.1"
           }
         }
       }
@@ -1642,7 +1679,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "session_message",
-        "messageId": "00000000-0000-4000-8000-000000000012",
+        "messageId": "00000000-0000-4000-8000-000000000013",
         "senderSessionId": "00000000-0000-4000-8000-000000000001",
         "recipientSessionId": "00000000-0000-4000-8000-000000000009",
         "content": [
@@ -1662,7 +1699,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message_chunk",
-        "messageId": "00000000-0000-4000-8000-000000000013",
+        "messageId": "00000000-0000-4000-8000-000000000014",
         "content": {
           "type": "text",
           "text": "Sent "
@@ -1678,7 +1715,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message_chunk",
-        "messageId": "00000000-0000-4000-8000-000000000013",
+        "messageId": "00000000-0000-4000-8000-000000000014",
         "content": {
           "type": "text",
           "text": "it."
@@ -1694,7 +1731,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message",
-        "messageId": "00000000-0000-4000-8000-000000000013",
+        "messageId": "00000000-0000-4000-8000-000000000014",
         "content": [
           {
             "type": "text",
@@ -1739,18 +1776,18 @@
       "update": {
         "_meta": {
           "tantra": {
-            "finished": true,
+            "reply": true,
             "cursor": "65.0"
           }
         },
         "sessionUpdate": "session_message",
-        "messageId": "00000000-0000-4000-8000-000000000014",
+        "messageId": "00000000-0000-4000-8000-000000000015",
         "senderSessionId": "00000000-0000-4000-8000-000000000009",
         "recipientSessionId": "00000000-0000-4000-8000-000000000001",
         "content": [
           {
             "type": "text",
-            "text": "{\"answer\":42}"
+            "text": "The answer is 42."
           }
         ]
       }
@@ -1771,7 +1808,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message_chunk",
-        "messageId": "00000000-0000-4000-8000-000000000015",
+        "messageId": "00000000-0000-4000-8000-000000000016",
         "content": {
           "type": "text",
           "text": "The "
@@ -1787,7 +1824,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message_chunk",
-        "messageId": "00000000-0000-4000-8000-000000000015",
+        "messageId": "00000000-0000-4000-8000-000000000016",
         "content": {
           "type": "text",
           "text": "scout "
@@ -1803,10 +1840,10 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message_chunk",
-        "messageId": "00000000-0000-4000-8000-000000000015",
+        "messageId": "00000000-0000-4000-8000-000000000016",
         "content": {
           "type": "text",
-          "text": "finished."
+          "text": "replied."
         },
         "_meta": {
           "tantra": {
@@ -1819,11 +1856,11 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message",
-        "messageId": "00000000-0000-4000-8000-000000000015",
+        "messageId": "00000000-0000-4000-8000-000000000016",
         "content": [
           {
             "type": "text",
-            "text": "The scout finished."
+            "text": "The scout replied."
           }
         ],
         "_meta": {
@@ -1863,7 +1900,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "user_message",
-        "messageId": "00000000-0000-4000-8000-000000000016",
+        "messageId": "00000000-0000-4000-8000-000000000017",
         "content": [
           {
             "type": "text",
@@ -1893,7 +1930,7 @@
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
         "sessionUpdate": "agent_message_chunk",
-        "messageId": "00000000-0000-4000-8000-000000000017",
+        "messageId": "00000000-0000-4000-8000-000000000018",
         "content": {
           "type": "text",
           "text": "Working "
@@ -2037,11 +2074,32 @@
       {
         "sessionId": "00000000-0000-4000-8000-000000000001",
         "update": {
+          "_meta": {
+            "tantra": {
+              "reply": true,
+              "cursor": "50.0"
+            }
+          },
+          "sessionUpdate": "session_message",
+          "messageId": "00000000-0000-4000-8000-000000000012",
+          "senderSessionId": "00000000-0000-4000-8000-000000000009",
+          "recipientSessionId": "00000000-0000-4000-8000-000000000001",
+          "content": [
+            {
+              "type": "text",
+              "text": "First pass done."
+            }
+          ]
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
           "sessionUpdate": "state_update",
           "state": "running",
           "_meta": {
             "tantra": {
-              "cursor": "50.0"
+              "cursor": "50.1"
             }
           }
         }
@@ -2063,7 +2121,7 @@
         "sessionId": "00000000-0000-4000-8000-000000000001",
         "update": {
           "sessionUpdate": "session_message",
-          "messageId": "00000000-0000-4000-8000-000000000012",
+          "messageId": "00000000-0000-4000-8000-000000000013",
           "senderSessionId": "00000000-0000-4000-8000-000000000001",
           "recipientSessionId": "00000000-0000-4000-8000-000000000009",
           "content": [
@@ -2083,7 +2141,7 @@
         "sessionId": "00000000-0000-4000-8000-000000000001",
         "update": {
           "sessionUpdate": "agent_message_chunk",
-          "messageId": "00000000-0000-4000-8000-000000000013",
+          "messageId": "00000000-0000-4000-8000-000000000014",
           "content": {
             "type": "text",
             "text": "Sent "
@@ -2099,7 +2157,7 @@
         "sessionId": "00000000-0000-4000-8000-000000000001",
         "update": {
           "sessionUpdate": "agent_message_chunk",
-          "messageId": "00000000-0000-4000-8000-000000000013",
+          "messageId": "00000000-0000-4000-8000-000000000014",
           "content": {
             "type": "text",
             "text": "it."
@@ -2115,7 +2173,7 @@
         "sessionId": "00000000-0000-4000-8000-000000000001",
         "update": {
           "sessionUpdate": "agent_message",
-          "messageId": "00000000-0000-4000-8000-000000000013",
+          "messageId": "00000000-0000-4000-8000-000000000014",
           "content": [
             {
               "type": "text",
@@ -2160,18 +2218,18 @@
         "update": {
           "_meta": {
             "tantra": {
-              "finished": true,
+              "reply": true,
               "cursor": "65.0"
             }
           },
           "sessionUpdate": "session_message",
-          "messageId": "00000000-0000-4000-8000-000000000014",
+          "messageId": "00000000-0000-4000-8000-000000000015",
           "senderSessionId": "00000000-0000-4000-8000-000000000009",
           "recipientSessionId": "00000000-0000-4000-8000-000000000001",
           "content": [
             {
               "type": "text",
-              "text": "{\"answer\":42}"
+              "text": "The answer is 42."
             }
           ]
         }
@@ -2192,7 +2250,7 @@
         "sessionId": "00000000-0000-4000-8000-000000000001",
         "update": {
           "sessionUpdate": "agent_message_chunk",
-          "messageId": "00000000-0000-4000-8000-000000000015",
+          "messageId": "00000000-0000-4000-8000-000000000016",
           "content": {
             "type": "text",
             "text": "The "
@@ -2208,7 +2266,7 @@
         "sessionId": "00000000-0000-4000-8000-000000000001",
         "update": {
           "sessionUpdate": "agent_message_chunk",
-          "messageId": "00000000-0000-4000-8000-000000000015",
+          "messageId": "00000000-0000-4000-8000-000000000016",
           "content": {
             "type": "text",
             "text": "scout "
@@ -2224,10 +2282,10 @@
         "sessionId": "00000000-0000-4000-8000-000000000001",
         "update": {
           "sessionUpdate": "agent_message_chunk",
-          "messageId": "00000000-0000-4000-8000-000000000015",
+          "messageId": "00000000-0000-4000-8000-000000000016",
           "content": {
             "type": "text",
-            "text": "finished."
+            "text": "replied."
           },
           "_meta": {
             "tantra": {
@@ -2240,11 +2298,11 @@
         "sessionId": "00000000-0000-4000-8000-000000000001",
         "update": {
           "sessionUpdate": "agent_message",
-          "messageId": "00000000-0000-4000-8000-000000000015",
+          "messageId": "00000000-0000-4000-8000-000000000016",
           "content": [
             {
               "type": "text",
-              "text": "The scout finished."
+              "text": "The scout replied."
             }
           ],
           "_meta": {
@@ -2284,7 +2342,7 @@
         "sessionId": "00000000-0000-4000-8000-000000000001",
         "update": {
           "sessionUpdate": "user_message",
-          "messageId": "00000000-0000-4000-8000-000000000016",
+          "messageId": "00000000-0000-4000-8000-000000000017",
           "content": [
             {
               "type": "text",
@@ -2314,7 +2372,7 @@
         "sessionId": "00000000-0000-4000-8000-000000000001",
         "update": {
           "sessionUpdate": "agent_message_chunk",
-          "messageId": "00000000-0000-4000-8000-000000000017",
+          "messageId": "00000000-0000-4000-8000-000000000018",
           "content": {
             "type": "text",
             "text": "Working "

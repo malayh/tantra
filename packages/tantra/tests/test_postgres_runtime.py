@@ -1838,8 +1838,8 @@ async def test_recovery_accepts_legacy_lifecycle_notices(postgres_dsn: str, pg_s
     )
     header = await bare.header(child)
     assert header is not None and header.last_turn is not None
-    notice = _lifecycle_input(child, header.last_turn)
-    assert notice is not None and notice.origin == "turn_ended"
+    notice = _lifecycle_input(child, header.last_turn, None)
+    assert notice.origin == "turn_ended"
     await bare.enqueue(root, notice.model_copy(update={"sender_id": None, "origin": None}))
     await bare.append(
         root,

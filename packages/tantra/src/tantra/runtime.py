@@ -80,7 +80,7 @@ from tantra.events import (
     Usage,
 )
 from tantra.hooks import Hook
-from tantra.loop import DEFAULT_RETRY, FinishResult, RetryConfig, TurnEngine
+from tantra.loop import DEFAULT_RETRY, RetryConfig, TurnEngine
 from tantra.permissions import check_permission, decide
 from tantra.providers.base import Provider
 from tantra.skills import SKILL_TOOL, SkillInfo, Skills
@@ -111,6 +111,9 @@ STATUS_EVENTS = (
 )
 STATUS_FIELDS = frozenset({"status", "finished", "title", "model"})
 PARENT_CANCELLED = "cancelled_by_parent"
+REPLY_LIMIT = 32768
+REPLY_TRUNCATED = "\n[reply truncated at 32 KiB]"
+NO_REPLY = "(no text reply)"
 
 
 def _check_schema(label: str, entry: Tool) -> None:
@@ -251,24 +254,47 @@ def _terminal_summary(event: TurnCompleted | TurnFailed | TurnCancelled | TurnIn
     return TurnSummary(UUID(hex=event.turn_id), "interrupted", event.reason, None)
 
 
-def _lifecycle_input(child_id: str, turn: TurnSummary) -> InputQueued | None:
+def _notifies(turn: TurnSummary) -> bool:
     if turn.outcome == "completed" and turn.stop_reason == "finished":
-        return None
-    if turn.outcome == "cancelled" and turn.stop_reason == PARENT_CANCELLED:
-        return None
+        return False
+    return not (turn.outcome == "cancelled" and turn.stop_reason == PARENT_CANCELLED)
+
+
+def _replies(turn: TurnSummary) -> bool:
+    return turn.outcome == "completed" and turn.stop_reason in ("completed", "output")
+
+
+def _reply_text(result: TurnResult | None) -> str:
+    if result is not None and result.stop_reason == "output":
+        text = json.dumps(result.output, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    else:
+        text = result.text if result is not None else ""
+    if not text.strip():
+        return NO_REPLY
+    encoded = text.encode()
+    if len(encoded) <= REPLY_LIMIT:
+        return text
+    return encoded[:REPLY_LIMIT].decode(errors="ignore") + REPLY_TRUNCATED
+
+
+def _lifecycle_input(child_id: str, turn: TurnSummary, reply: str | None) -> InputQueued:
     child_uuid = UUID(hex=child_id)
-    payload = {
-        "child_id": str(child_uuid),
-        "outcome": turn.outcome,
-        "stop_reason": turn.stop_reason,
-        "turn_id": str(turn.turn_id),
-    }
-    if turn.error is not None:
-        payload["error"] = turn.error
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    if reply is not None:
+        text = f"[agent {child_uuid} replied] {reply}"
+    else:
+        payload = {
+            "child_id": str(child_uuid),
+            "outcome": turn.outcome,
+            "stop_reason": turn.stop_reason,
+            "turn_id": str(turn.turn_id),
+        }
+        if turn.error is not None:
+            payload["error"] = turn.error
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        text = f"[agent {child_uuid} turn ended] {encoded}"
     return InputQueued(
         command_id=uuid5(child_uuid, turn.turn_id.hex).hex,
-        input=f"[agent {child_uuid} turn ended] {encoded}",
+        input=text,
         sender_id=child_id,
         origin="turn_ended",
     )
@@ -346,7 +372,7 @@ class Runtime:
             if name not in child_agents:
                 continue
             effective = {tool.name: tool.permission for tool in self.tools[name].values()}
-            effective.update({"send": None, "finish": None})
+            effective["send"] = None
             if agent.subagents:
                 effective.update({"spawn": None, "status": None, "cancel_agent": None})
             for tool_name, tool_permission in sorted(effective.items()):
@@ -364,6 +390,7 @@ class Runtime:
         self._task_reasons: dict[asyncio.Task[None], tuple[str, str]] = {}
         self._task_turns: dict[asyncio.Task[None], str] = {}
         self._errors: dict[str, dict[str, BaseException]] = {}
+        self._delivered: dict[str, str] = {}
         self._failed_prestarts: dict[str, dict[str, str | None]] = {}
         self._known_roots: dict[str, str] = {}
         self._ownerships: dict[str, Ownership] = {}
@@ -995,12 +1022,7 @@ class Runtime:
         async with self._lock(root_id):
             if self._turn_generations.get(agent_id) != generation:
                 raise asyncio.CancelledError
-            batch = list(events)
-            if any(isinstance(event, AgentFinished) for event in batch):
-                state = await self._operational(agent_id)
-                cancelled = [TurnCancelled(turn_id=item.command_id, reason="agent_finished") for item in state.pending]
-                batch = [*cancelled, *batch]
-            return await self._append(agent_id, batch)
+            return await self._append(agent_id, list(events))
 
     async def _journal(self, agent_id: str, *, store: Any = None) -> list[Stamped]:
         source = self.store if store is None else store
@@ -1416,6 +1438,7 @@ class Runtime:
             self._errors.pop(actor_id, None)
             self._activations.pop(actor_id, None)
             self._turn_generations.pop(actor_id, None)
+            self._delivered.pop(actor_id, None)
         self._deleting.discard(root_id)
 
     def connect(self, root_id: UUID, *, after: int = 0, writable: bool = False) -> Connection:
@@ -1738,15 +1761,22 @@ class Runtime:
             self._activate(parent_id, header.root_id or header.id)
 
     async def _deliver_lifecycle_locked(self, child: SessionHeader, turn: TurnSummary) -> None:
-        queued = _lifecycle_input(child.id, turn)
-        if child.parent_id is None or queued is None:
+        if child.parent_id is None or not _notifies(turn):
             return
         root_id = child.root_id or child.id
         await self._header(child.parent_id)
-        accepted = await self._enqueue(child.parent_id, queued)
+        command_id = uuid5(UUID(hex=child.id), turn.turn_id.hex).hex
+        duplicate = self._delivered.get(child.id) == command_id
+        if not duplicate:
+            reply = _reply_text(await self._result(child.id, turn.turn_id)) if _replies(turn) else None
+            try:
+                duplicate = (await self._enqueue(child.parent_id, _lifecycle_input(child.id, turn, reply))).duplicate
+            except InvalidCommandReuse:
+                duplicate = True
+            self._delivered[child.id] = command_id
         await self._notify(child.parent_id)
         parent_task = self.active.get(child.parent_id)
-        if self.coordinator is not None and accepted.duplicate and parent_task is not None and not parent_task.done():
+        if self.coordinator is not None and duplicate and parent_task is not None and not parent_task.done():
             return
         self._activations[child.parent_id] = self._activations.get(child.parent_id, 0) + 1
         self._activate(child.parent_id, root_id)
@@ -1759,12 +1789,12 @@ class Runtime:
     async def _reconcile_lifecycle(self, header: SessionHeader) -> None:
         if header.last_turn is not None:
             await self._deliver_lifecycle(header, header.last_turn)
-            if header.parent_id is not None and _lifecycle_input(header.id, header.last_turn) is not None:
+            if header.parent_id is not None and _notifies(header.last_turn):
                 self._errors.get(header.id, {}).pop(header.last_turn.turn_id.hex, None)
         for child in await self._children(header.id):
             if child.last_turn is not None:
                 await self._deliver_lifecycle(child, child.last_turn)
-                if _lifecycle_input(child.id, child.last_turn) is not None:
+                if _notifies(child.last_turn):
                     self._errors.get(child.id, {}).pop(child.last_turn.turn_id.hex, None)
 
     def _framework_tools(self, header: SessionHeader, agent: type[Agent]) -> dict[str, Tool]:
@@ -1780,9 +1810,6 @@ class Runtime:
             child_status = await self._child_status(header, agent_id)
             return ACTOR_STATUS_ADAPTER.dump_python(child_status, mode="json")
 
-        async def finish(result: Any, ctx: Context) -> FinishResult:
-            return await self._actor_finish(header, agent, ctx, result)
-
         async def cancel_agent(agent_id: UUID) -> dict[str, Any]:
             return await self._actor_cancel(header, agent_id)
 
@@ -1792,21 +1819,25 @@ class Runtime:
                 spawn,
                 description=(
                     "Create a declared child agent, queue its input, and return its ID. "
-                    "Turn-ended messages contain status only. A finished child's result is delivered later as a new "
-                    f"parent input. Available agent types: {', '.join(available)}."
+                    "Each time the child's turn ends, a new input arrives: [agent <id> replied] with its final "
+                    "message, or [agent <id> turn ended] with its status if it failed or stopped. Do not poll for "
+                    f"it. Available agent types: {', '.join(available)}."
                 ),
             )
             spawn_tool.schema.parameters["properties"]["agent_name"]["enum"] = available
             tools["spawn"] = spawn_tool
             tools["status"] = Tool(
                 status,
-                description="Return durable status for one direct child agent. It returns no child output.",
+                description=(
+                    "Return durable status for one direct child agent. Replies arrive as new input; use this only "
+                    "for a child that has not replied."
+                ),
             )
             tools["cancel_agent"] = Tool(
                 cancel_agent,
                 description=(
-                    "Cancel the active and queued work of one direct child agent and its descendants. No turn-ended "
-                    "message follows. The child stays reusable through send."
+                    "Cancel the active and queued work of one direct child agent and its descendants. No reply "
+                    "follows. The child stays reusable through send."
                 ),
             )
         if header.parent_id is not None or agent.subagents:
@@ -1816,11 +1847,6 @@ class Runtime:
             tools["send"] = Tool(
                 send,
                 description=send_description,
-            )
-        if header.parent_id is not None:
-            tools["finish"] = Tool(
-                finish,
-                description="Permanently close this child agent and deliver its result to its parent.",
             )
         return tools
 
@@ -2001,71 +2027,6 @@ class Runtime:
             pending.extend(child.id for child in children)
         return descendants
 
-    async def _actor_finish(
-        self,
-        header: SessionHeader,
-        agent: type[Agent],
-        ctx: Context,
-        result: Any,
-    ) -> FinishResult:
-        if header.parent_id is None:
-            raise TantraError("finish is available only to child agents")
-        if agent.output_schema is not None:
-            normalized = agent.output_schema.model_validate(result).model_dump(mode="json")
-        else:
-            normalized = result
-        encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        root_id = header.root_id or header.id
-        command = self._internal_id(header, ctx, "finish")
-        async with self._lock(root_id):
-            self._ensure_open()
-            current = await self._header(header.id)
-            prior = await self._actor_finished(header.id)
-            if prior is not None:
-                if prior.result != normalized:
-                    raise InvalidCommandReuse(command.hex)
-                parent_id = current.parent_id
-                assert parent_id is not None
-                await self._notify(parent_id)
-                self._activations[parent_id] = self._activations.get(parent_id, 0) + 1
-                self._activate(parent_id, root_id)
-                return FinishResult(normalized)
-            unfinished = []
-            for descendant in await self._descendants(header.id):
-                if await self._actor_finished(descendant.id) is None:
-                    unfinished.append(str(UUID(hex=descendant.id)))
-            if unfinished:
-                raise TantraError(f"unfinished descendants: {unfinished}")
-            parent_id = current.parent_id
-            assert parent_id is not None
-            await self._header(parent_id)
-            parent_input = InputQueued(
-                command_id=command.hex,
-                input=f"[agent {UUID(hex=header.id)} finished] {encoded}",
-                sender_id=header.id,
-                origin="finished",
-            )
-            lookup = getattr(self.store, "lookup_command", None)
-            if lookup is not None:
-                found = await lookup(parent_id, command.hex)
-                existing = found[1].event if found is not None and found[0] == parent_id else None
-            else:
-                existing = next(
-                    (
-                        item.event
-                        for item in await self._journal(parent_id)
-                        if isinstance(item.event, InputQueued) and item.event.command_id == command.hex
-                    ),
-                    None,
-                )
-            if existing is None:
-                if await self._actor_finished(parent_id) is not None:
-                    raise TantraError(f"agent {UUID(hex=parent_id)} is finished")
-                await self._enqueue(parent_id, parent_input)
-            elif existing != parent_input:
-                raise InvalidCommandReuse(command.hex)
-            return FinishResult(normalized, (AgentFinished(result=normalized),))
-
     async def _drain(self, agent_id: str, root_id: str, generation: int) -> None:
         task = asyncio.current_task()
         assert task is not None
@@ -2160,15 +2121,9 @@ class Runtime:
                     patch_header=lambda sid, generation=turn_generation, **fields: self._engine_patch_header(
                         agent_id, root_id, generation, sid, **fields
                     ),
-                    terminal_tool="finish" if header.parent_id is not None else None,
                 )
                 terminal = await engine.run(queued)
                 self._task_turns.pop(task, None)
-                finished = isinstance(terminal, TurnCompleted) and terminal.stop_reason == "finished"
-                if finished:
-                    self._errors.get(agent_id, {}).pop(current, None)
-                    current = None
-                    continue
                 await self._deliver_lifecycle(header, _terminal_summary(terminal))
                 self._errors.get(agent_id, {}).pop(current, None)
                 current = None
@@ -2877,7 +2832,7 @@ class Runtime:
                 header = await self._header(agent_id)
                 if agent_id != connection._root and header.last_turn is not None:
                     await self._deliver_lifecycle_locked(header, header.last_turn)
-                    if _lifecycle_input(header.id, header.last_turn) is not None:
+                    if _notifies(header.last_turn):
                         self._errors.get(header.id, {}).pop(header.last_turn.turn_id.hex, None)
                 live_turns = {item.command_id for item in state.pending}
                 if state.incomplete is not None:
@@ -3206,7 +3161,7 @@ class Runtime:
                         try:
                             header = await self._header(agent_id)
                             last_turn = header.last_turn
-                            if last_turn is not None and _lifecycle_input(header.id, last_turn) is not None:
+                            if last_turn is not None and _notifies(last_turn):
                                 await self._deliver_lifecycle_locked(header, last_turn)
                                 self._errors.get(agent_id, {}).pop(last_turn.turn_id.hex, None)
                         except BaseException as exc:

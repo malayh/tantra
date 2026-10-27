@@ -58,11 +58,11 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
 const messages = (t) =>
   t.sessions[ROOT].entries
     .filter((entry) => entry.kind === "message")
-    .map(({ sender, recipient, text, finished }) => [
+    .map(({ sender, recipient, text, reply }) => [
       sender,
       recipient,
       text,
-      finished,
+      reply,
     ]);
 const statuses = (t, id = ROOT) =>
   t.sessions[id].entries.filter((entry) => entry.kind === "status");
@@ -92,6 +92,7 @@ test("replay from start reduces to the live transcript", () => {
       "tool",
       "message",
       "agent",
+      "message",
       "message",
       "agent",
       "message",
@@ -267,20 +268,21 @@ test("subagent messages flow both ways and an idle child wakes again", () => {
     { child: scout({ state: "running" }), messages: 1, running: true },
     {
       child: scout({ state: "idle", stopReason: "end_turn" }),
-      messages: 1,
+      messages: 2,
       running: true,
     },
-    { child: scout({ state: "running" }), messages: 2, running: true },
+    { child: scout({ state: "running" }), messages: 3, running: true },
     {
-      child: scout({ state: "idle", stopReason: "_tantra_finished" }),
-      messages: 3,
+      child: scout({ state: "idle", stopReason: "end_turn" }),
+      messages: 4,
       running: false,
     },
   ]);
   assert.deepEqual(messages(t), [
     [ROOT, CHILD, "Look around.", false],
+    [CHILD, ROOT, "First pass done.", true],
     [ROOT, CHILD, "Look again.", false],
-    [CHILD, ROOT, '{"answer":42}', true],
+    [CHILD, ROOT, "The answer is 42.", true],
   ]);
   assert.deepEqual(descendants(t, ROOT), [CHILD]);
 });

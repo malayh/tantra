@@ -39,9 +39,9 @@ SKILLS_GUIDANCE = (
     "task or the user explicitly requests it:"
 )
 CHILD_LIFECYCLE_GUIDANCE = (
-    "Ordinary turn completion leaves the child reusable and sends a status-only notification to the parent. When the "
-    "assignment is complete and a final result is ready, use the finish tool. Finishing permanently closes the child "
-    "and delivers its result to the parent."
+    "When your turn ends, your parent receives your final message as your reply, or your submitted output if you "
+    "submit one. Put the complete result there. Use send only for messages during a turn. Your parent may send you "
+    "more work."
 )
 CANCELLATION_CONTEXT = "[runtime] The user cancelled the live root and descendant work."
 ROOT_CANCELLATION_CONTEXT = "[runtime] The user cancelled the live root turn. Descendant agents keep running."

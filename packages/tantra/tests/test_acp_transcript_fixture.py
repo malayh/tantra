@@ -22,7 +22,6 @@ UUID_TEXT = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 UPDATED_AT = "2026-01-01T00:00:00+00:00"
 RUNNING = {"state": "running"}
 END_TURN = {"state": "idle", "stopReason": "end_turn"}
-FINISHED = {"state": "idle", "stopReason": "_tantra_finished"}
 
 
 @tool(permission="ask")
@@ -163,7 +162,7 @@ async def test_the_transcript_fixture_matches_a_scripted_session() -> None:
             Sample(tool_calls=calls("c3", "spawn", agent_name="scout", input="Look around.", name="scout")),
             Sample(text="Spawned the scout."),
         ],
-        scout=[Sample(text="First pass done."), Sample(tool_calls=calls("w1", "finish", result={"answer": 42}))],
+        scout=[Sample(text="First pass done."), Sample(text="The answer is 42.")],
     )
     first, second, wake = provider.gate("scout", 0), provider.gate("scout", 1), provider.gate("lead", 4)
     provider.stalls.add(("lead", 7))
@@ -181,7 +180,7 @@ async def test_the_transcript_fixture_matches_a_scripted_session() -> None:
             "lead",
             Sample(tool_calls=calls("c4", "send", agent_id=spawned["sessionId"], input="Look again.")),
             Sample(text="Sent it."),
-            Sample(text="The scout finished."),
+            Sample(text="The scout replied."),
             Sample(text="Working on it."),
         )
         first.set()
@@ -189,7 +188,7 @@ async def test_the_transcript_fixture_matches_a_scripted_session() -> None:
         wake.set()
         await checkpoint(live, root, mirror, idle(2), RUNNING)
         second.set()
-        await checkpoint(live, root, mirror, idle(3), FINISHED)
+        await checkpoint(live, root, mirror, idle(3), END_TURN)
         await live.prompt(root, "Start a long task.")
         await live.until(
             lambda: [u for u in live.of(root, "agent_message_chunk") if u["content"]["text"] == "Working "]

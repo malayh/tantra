@@ -54,6 +54,7 @@ FRAMEWORK_TOOLS = frozenset({"spawn", "send", "finish"})
 STOP_REASONS = {"max_steps": "max_turn_requests", "finished": "_tantra_finished"}
 _UUID = r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 _TURN_ENDED = re.compile(rf"\[agent {_UUID} turn ended\] ")
+_REPLIED = re.compile(rf"\[agent {_UUID} replied\] (.*)\Z", re.S)
 _FINISHED = re.compile(rf"\[agent {_UUID} finished\] (.*)\Z", re.S)
 _MESSAGE = re.compile(rf"\[agent {_UUID}\] (.*)\Z", re.S)
 
@@ -304,13 +305,16 @@ class Projector:
         return []
 
     def _synthetic(self, text: str, message_id: str) -> list[Output] | None:
-        for pattern in (_TURN_ENDED, _FINISHED, _MESSAGE):
+        for pattern in (_TURN_ENDED, _REPLIED, _FINISHED, _MESSAGE):
             match = pattern.match(text)
             if match is not None and match[1] in self._withheld:
                 return [Withheld()]
         ended = _TURN_ENDED.match(text)
         if ended is not None and ended[1] in self._children:
             return []
+        replied = _REPLIED.match(text)
+        if replied is not None and replied[1] in self._children:
+            return [self._message(message_id, replied[1], self._id, replied[2], reply=True)]
         finished = _FINISHED.match(text)
         if finished is not None and finished[1] in self._children:
             return [self._message(message_id, finished[1], self._id, finished[2], finished=True)]
@@ -337,6 +341,9 @@ class Projector:
             if text.startswith(prefix):
                 return [self._message(message_id, sender_id, self._id, text[len(prefix) :], finished=finished)]
         if origin == "turn_ended" and child:
+            prefix = f"[agent {sender_id} replied] "
+            if text.startswith(prefix):
+                return [self._message(message_id, sender_id, self._id, text[len(prefix) :], reply=True)]
             return []
         return self._synthetic(text, message_id)
 
@@ -365,13 +372,16 @@ class Projector:
             return []
         return [QueueChanged(self.queue)]
 
-    def _message(self, message_id: str, sender: str, recipient: str, text: str, *, finished: bool = False) -> Output:
+    def _message(
+        self, message_id: str, sender: str, recipient: str, text: str, *, finished: bool = False, reply: bool = False
+    ) -> Output:
+        flag = "finished" if finished else "reply" if reply else None
         message = SessionMessage(
             message_id=message_id,
             sender_session_id=sender,
             recipient_session_id=recipient,
             content=[text_block(text)],
-            meta={"tantra": {"finished": True}} if finished else None,
+            meta={"tantra": {flag: True}} if flag is not None else None,
         )
         return dump(message)
 

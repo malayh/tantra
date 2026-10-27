@@ -158,7 +158,7 @@ async def test_every_emitted_message_is_valid_against_the_alpha8_schema() -> Non
         provider.add(
             "worker",
             Sample(tool_calls=calls("w1", "send", agent_id=session_id, input="hi")),
-            Sample(tool_calls=calls("w2", "finish", result={"ok": True})),
+            Sample(text="All done."),
         )
         await client.prompt(session_id, "go")
         await client.idle(session_id, 3)

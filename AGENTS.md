@@ -63,12 +63,6 @@ These guidelines are working when diffs contain fewer unnecessary changes, solut
 - Keep plans, specs, and user responses brief.
 - Prefer short bullets where they improve readability.
 
-## Subagent models
-
-- Use only `gpt-5.6-terra` and `gpt-5.6-sol` for subagents, including reviewers.
-- Use `gpt-5.6-terra` with `high` reasoning effort for routine, non-critical work. Do not use a cheaper model.
-- Use `gpt-5.6-sol` with `high` reasoning effort for security, authorization, migrations, concurrency, architecture, public contracts, data-loss risk, or a failed Terra attempt. Do not use a more expensive model.
-
 ## Executing feature-spec phases
 
 - Work on one requested phase at a time. Do not pull work from another phase into the current phase. If crossing a phase boundary is necessary, explain why and get user approval before proceeding.

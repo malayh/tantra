@@ -90,7 +90,7 @@ def messages(client: Client, session_id: str) -> list[tuple[str, str, str]]:
     ]
 
 
-async def test_spawn_send_and_finish_flow_as_two_way_session_messages() -> None:
+async def test_spawn_send_and_reply_flow_as_two_way_session_messages() -> None:
     provider = Scripted(
         root=[tool_call("spawn", "s1", agent_name="worker", input="investigate", name="scout"), text("waiting")],
         worker=[],
@@ -102,14 +102,12 @@ async def test_spawn_send_and_finish_flow_as_two_way_session_messages() -> None:
         provider.add(
             "worker",
             tool_call("send", "w1", agent_id=root, input="progress"),
-            tool_call("finish", "w2", result={"answer": 42}),
+            text("The answer is 42."),
         )
         await client.prompt(root, "go")
         await client.idle(root, 3)
         [worker] = children(client, root)
-        await client.until(
-            lambda: mirrored(client, root, worker)[-1:] == [{"state": "idle", "stopReason": "_tantra_finished"}]
-        )
+        await client.until(lambda: mirrored(client, root, worker)[-1:] == [{"state": "idle", "stopReason": "end_turn"}])
     assert client.of(root, "subagent_update")[0] == {
         "sessionUpdate": "subagent_update",
         "sessionId": worker,
@@ -119,24 +117,25 @@ async def test_spawn_send_and_finish_flow_as_two_way_session_messages() -> None:
     assert messages(client, root) == [
         (root, worker, "investigate"),
         (worker, root, "progress"),
-        (worker, root, '{"answer":42}'),
+        (worker, root, "The answer is 42."),
     ]
     assert messages(client, worker) == [
         (root, worker, "investigate"),
         (worker, root, "progress"),
-        (worker, root, '{"answer":42}'),
     ]
-    finish_views = [
+    reply_views = [
         update
         for update in client.updates
-        if update["update"].get("content") == [{"type": "text", "text": '{"answer":42}'}]
+        if update["update"]["sessionUpdate"] == "session_message"
+        and update["update"]["content"] == [{"type": "text", "text": "The answer is 42."}]
     ]
-    assert [view["update"]["_meta"] for view in finish_views] == [{"tantra": {"finished": True}}] * 2
-    assert {view["sessionId"] for view in finish_views} == {root, worker}
+    assert [(view["sessionId"], view["update"]["_meta"]) for view in reply_views] == [
+        (root, {"tantra": {"reply": True}})
+    ]
     assert client.of(root, "tool_call_update") == client.of(worker, "tool_call_update") == []
     final = [update for update in client.of(root, "subagent_update") if "state" in update][-1]
-    assert final["_meta"] == {"tantra": {"finished": True}}
-    assert client.states(worker)[-1] == {"state": "idle", "stopReason": "_tantra_finished"}
+    assert "_meta" not in final
+    assert client.states(worker)[-1] == {"state": "idle", "stopReason": "end_turn"}
     await runtime.aclose()
 
 
@@ -198,12 +197,11 @@ async def test_resume_from_start_replays_children_after_their_announcement() -> 
     runtime, server = serve(provider)
     async with Client(server) as live:
         root = await live.new()
-        finish = ToolCall(id="w2", name="finish", args='{"result": "ok"}')
-        provider.add("worker", Sample(reasoning="hmm", text="partial", tool_calls=[finish]))
+        provider.add("worker", Sample(reasoning="hmm", text="partial"))
         await live.prompt(root, "go")
         await live.idle(root, 2)
         [worker] = children(live, root)
-        await live.until(lambda: live.states(worker)[-1:] == [{"state": "idle", "stopReason": "_tantra_finished"}])
+        await live.until(lambda: live.states(worker)[-1:] == [{"state": "idle", "stopReason": "end_turn"}])
         async with Client(server) as replayed:
             await replayed.resume(root, replayFrom={"type": "start"})
             await replayed.until(lambda: replayed.of(root, "session_info_update"))
@@ -211,7 +209,7 @@ async def test_resume_from_start_replays_children_after_their_announcement() -> 
     assert reduce(replayed.updates, worker)["entities"] == reduce(live.updates, worker)["entities"]
     assert reduce(replayed.updates, worker)["order"] == reduce(live.updates, worker)["order"]
     assert reduce(replayed.updates, root)["entities"] == reduce(live.updates, root)["entities"]
-    assert mirrored(replayed, root, worker)[-1] == {"state": "idle", "stopReason": "_tantra_finished"}
+    assert mirrored(replayed, root, worker)[-1] == {"state": "idle", "stopReason": "end_turn"}
     await runtime.aclose()
 
 

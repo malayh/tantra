@@ -129,9 +129,9 @@ def test_execution_environment_is_one_final_capability_block() -> None:
         "the task or the user explicitly requests it:\n"
         "- release: Ship safely.\n\n"
         "Child lifecycle\n\n"
-        "Ordinary turn completion leaves the child reusable and sends a status-only notification to the parent. "
-        "When the assignment is complete and a final result is ready, use the finish tool. Finishing permanently "
-        "closes the child and delivers its result to the parent."
+        "When your turn ends, your parent receives your final message as your reply, or your submitted output if you "
+        "submit one. Put the complete result there. Use send only for messages during a turn. Your parent may send "
+        "you more work."
     )
     assert "Skill description." not in environment
     assert "Finish description." not in environment

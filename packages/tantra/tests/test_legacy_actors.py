@@ -141,10 +141,6 @@ async def test_retries_of_legacy_inputs_are_duplicates_on_every_path() -> None:
     await quiet(runtime)
     legacy(store, root.id)
     assert (await runtime._actor_send(child, send_ctx, root_id, "hello"))["duplicate"] is True
-    finish_ctx = context(store, child.id, "t3", "f1")
-    await runtime._actor_finish(child, Worker, finish_ctx, "result")
-    legacy(store, root.id)
-    assert (await runtime._actor_finish(child, Worker, finish_ctx, "result")).output == "result"
     command = uuid4()
     async with runtime.connect(root_id, writable=True) as connection:
         assert (await connection.send("human", command_id=command)).duplicate is False
@@ -155,7 +151,6 @@ async def test_retries_of_legacy_inputs_are_duplicates_on_every_path() -> None:
     assert [event.input for event in inputs(store, child.id)] == ["start"]
     root_inputs = [event.input for event in inputs(store, root.id)]
     assert sum(event == f"[agent {UUID(hex=child.id)}] hello" for event in root_inputs) == 1
-    assert sum(event.startswith(f"[agent {UUID(hex=child.id)} finished] ") for event in root_inputs) == 1
     assert root_inputs.count("human") == 1
     assert all(event.origin is None for event in inputs(store, root.id))
     await runtime.aclose()
@@ -181,7 +176,7 @@ async def test_lifecycle_reconcile_on_a_fresh_runtime_accepts_legacy_notices() -
         result = await connection.prompt("again", command_id=uuid4())
     await quiet(fresh)
     assert result.outcome == "completed"
-    assert [event.command_id for event in inputs(store, root.id) if " turn ended] " in event.input] == [
+    assert [event.command_id for event in inputs(store, root.id) if " replied] " in event.input] == [
         notices[0].command_id
     ]
     await fresh.aclose()

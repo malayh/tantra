@@ -67,11 +67,10 @@ class Held(Scripted):
 
 def script(release: asyncio.Event) -> Held:
     spawn = ToolCall(id="s1", name="spawn", args=json.dumps({"agent_name": "worker", "input": "dig"}))
-    finish = ToolCall(id="f1", name="finish", args=json.dumps({"result": "found"}))
     return Held(
         release,
         root=[Sample(tool_calls=[spawn]), Sample(text="spawned"), Sample(text="noted")],
-        worker=[Sample(tool_calls=[finish])],
+        worker=[Sample(text="found")],
     )
 
 
@@ -112,16 +111,16 @@ async def test_a_non_owner_watches_the_tree_without_reading_journals(
                 await observer.patch_header(root_id, model="other")
             release.set()
 
-            def finished(change: TreeChange) -> bool:
+            def replied(change: TreeChange) -> bool:
                 return (
                     len(change.actors) == 2
-                    and change.actors[1].state == "finished"
+                    and change.actors[1].state == "idle"
                     and change.actors[0].state == "idle"
                     and change.actors[0].last_turn is not None
                     and not any(actor.active for actor in change.actors)
                 )
 
-            await until(tree, seen, finished)
+            await until(tree, seen, replied)
             while any(not task.done() for task in owner.active.values()):
                 await asyncio.sleep(0.02)
         child = seen[-1].actors[1]
@@ -152,7 +151,7 @@ async def test_a_non_owner_watches_the_tree_without_reading_journals(
             await runtime.aclose()
             await store.close()
     states = [change.actors[1].state for change in seen if len(change.actors) == 2]
-    assert states.index("running") < states.index("finished")
+    assert states.index("running") < states.index("idle")
     assert all(left != right for left, right in zip(seen, seen[1:], strict=False))
 
 

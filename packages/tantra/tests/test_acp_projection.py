@@ -493,10 +493,22 @@ def test_coalesced_replay_reduces_to_the_live_state_at_every_cut() -> None:
 def test_lifecycle_inputs_round_trip_through_the_runtime_formatting() -> None:
     child_hex = CHILD.hex
     summary = TurnSummary(UUID(TURN), "failed", None, "boom")
-    queued = _lifecycle_input(child_hex, summary)
-    assert queued is not None
+    queued = _lifecycle_input(child_hex, summary, None)
     outputs = updates(project([spawned(CHILD), TurnStarted(turn_id=queued.command_id, input=queued.input)]))
     assert outputs[1:] == [{"sessionUpdate": "state_update", "state": "running"}]
+    replied = _lifecycle_input(child_hex, TurnSummary(UUID(TURN), "completed", "completed", None), "found it")
+    outputs = updates(project([spawned(CHILD), TurnStarted(turn_id=replied.command_id, input=replied.input)]))
+    assert outputs[1:] == [
+        {
+            "sessionUpdate": "session_message",
+            "messageId": str(UUID(replied.command_id)),
+            "senderSessionId": str(CHILD),
+            "recipientSessionId": str(ROOT),
+            "content": [text("found it")],
+            "_meta": {"tantra": {"reply": True}},
+        },
+        {"sessionUpdate": "state_update", "state": "running"},
+    ]
 
 
 async def test_runtime_synthetic_inputs_are_classified_from_real_journals() -> None:
@@ -520,9 +532,9 @@ async def test_runtime_synthetic_inputs_are_classified_from_real_journals() -> N
     async with runtime.connect(root_id, writable=True) as connection:
         await connection.prompt("go", command_id=uuid4())
     child = UUID(hex=(await store.list(parent_id=root_id.hex))[0].id)
-    provider.add("worker", calls("w1", "send", agent_id=str(root_id), input="ping"), calls("w2", "finish", result="ok"))
+    provider.add("worker", calls("w1", "send", agent_id=str(root_id), input="ping"), Sample(text="ok"))
     provider.add("root", calls("s2", "send", agent_id=str(child), input="more"), Sample(text="sent"))
-    provider.add("root", Sample(text="pinged"), Sample(text="finished seen"))
+    provider.add("root", Sample(text="pinged"), Sample(text="reply seen"))
 
     async def settled() -> bool:
         events = [item.event for item in await store.read_page(root_id.hex)]
@@ -555,12 +567,13 @@ async def test_runtime_synthetic_inputs_are_classified_from_real_journals() -> N
         for update in root_view
         if update["sessionUpdate"] == "session_message" and update["recipientSessionId"] == str(root_id)
     ]
-    assert any(" turn ended] " in event.input for event in root_events if isinstance(event, TurnStarted))
+    assert any(" replied] " in event.input for event in root_events if isinstance(event, TurnStarted))
     assert [update["content"] for update in root_view if update["sessionUpdate"] == "user_message"] == [
         [text("go")],
         [text("nudge")],
     ]
-    assert incoming == [(str(child), "ping", None), (str(child), '"ok"', {"tantra": {"finished": True}})]
+    reply = {"tantra": {"reply": True}}
+    assert incoming == [(str(child), "first", reply), (str(child), "ping", None), (str(child), "ok", reply)]
     assert [
         (update["senderSessionId"], update["content"][0]["text"])
         for update in child_view

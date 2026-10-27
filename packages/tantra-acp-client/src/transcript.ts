@@ -50,6 +50,7 @@ export interface MessageEntry {
   recipient: string | null;
   text: string;
   finished: boolean;
+  reply: boolean;
 }
 
 export interface StatusEntry {
@@ -252,6 +253,7 @@ const message = (update: SessionMessage): MessageEntry => ({
   recipient: update.recipientSessionId ?? null,
   text: textOf(update.content),
   finished: tantraOf(update._meta)?.["finished"] === true,
+  reply: tantraOf(update._meta)?.["reply"] === true,
 });
 
 function state(view: SessionView, update: StateUpdate): SessionView {

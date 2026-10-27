@@ -157,8 +157,8 @@ def spawn(input: str) -> Sample:
     )
 
 
-def finish() -> Sample:
-    return Sample(tool_calls=[ToolCall(id="f1", name="finish", args=json.dumps({"result": "ok"}))])
+def reply() -> Sample:
+    return Sample(text="ok")
 
 
 async def expected(runtime: Runtime, root_id: UUID) -> TreeChange:
@@ -183,7 +183,7 @@ async def coordinated(coordinator: Any) -> tuple[Runtime, UUID]:
 
 
 async def test_the_first_snapshot_equals_tree_status_and_changes_arrive_in_order() -> None:
-    provider = Held(root=[spawn("dig"), Sample(text="spawned"), Sample(text="noted")], worker=[finish()])
+    provider = Held(root=[spawn("dig"), Sample(text="spawned"), Sample(text="noted")], worker=[reply()])
     runtime = Runtime(provider, MemoryStore(), [Root])
     root_id = await runtime.create(Root)
     tree = runtime.watch_tree(root_id)
@@ -203,11 +203,11 @@ async def test_the_first_snapshot_equals_tree_status_and_changes_arrive_in_order
         final = await expected(runtime, root_id)
         await until(tree, seen, lambda change: change == final)
     await tree.aclose()
-    assert final.actors[1].state == "finished" and final.actors[0].state == "idle"
+    assert final.actors[1].state == "idle" and final.actors[0].state == "idle"
     assert not any(actor.active for actor in final.actors)
     assert all(left != right for left, right in zip(seen, seen[1:], strict=False))
     child = [change.actors[1].state for change in seen if len(change.actors) == 2]
-    assert child.index("running") < child.index("finished")
+    assert child.index("running") < child.index("idle")
     assert [len(change.actors) for change in seen] == sorted(len(change.actors) for change in seen)
     assert seen[0].actors[0].state == "idle" and not seen[0].actors[0].active
     await runtime.aclose()
@@ -295,9 +295,9 @@ async def test_start_errors_deletion_and_close() -> None:
     assert runtime._trees == {}
 
 
-async def test_watching_turns_spawns_and_finishes_reads_no_journal() -> None:
+async def test_watching_turns_spawns_and_replies_reads_no_journal() -> None:
     store = JournalCountingStore()
-    provider = Held(root=[spawn("dig"), Sample(text="spawned"), Sample(text="noted")], worker=[finish()])
+    provider = Held(root=[spawn("dig"), Sample(text="spawned"), Sample(text="noted")], worker=[reply()])
     runtime = Runtime(provider, store, [Root])
     snapshot = runtime._tree_snapshot
 
@@ -322,7 +322,7 @@ async def test_watching_turns_spawns_and_finishes_reads_no_journal() -> None:
             tree,
             seen,
             lambda change: (
-                change.actors[1].state == "finished"
+                change.actors[1].state == "idle"
                 and change.actors[0].state == "idle"
                 and change.actors[0].last_turn is not None
                 and not any(actor.active for actor in change.actors)

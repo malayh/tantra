@@ -113,12 +113,6 @@ class _PreparedCall:
 _NO_OUTPUT = object()
 
 
-@dataclass(frozen=True)
-class FinishResult:
-    output: Any
-    final_events: tuple[SessionEvent, ...] = ()
-
-
 class TurnEngine:
     def __init__(
         self,
@@ -144,7 +138,6 @@ class TurnEngine:
         allow_asks: bool = True,
         append_events: Callable[[Sequence[SessionEvent]], Awaitable[list[Stamped]]] | None = None,
         patch_header: Callable[..., Awaitable[SessionHeader]] | None = None,
-        terminal_tool: str | None = None,
         history_mode: Literal["full", "compacted"] = "full",
         _batch_deltas: bool = False,
     ) -> None:
@@ -174,7 +167,6 @@ class TurnEngine:
         self.allow_asks = allow_asks
         self.append_events = append_events
         self.patch_header = patch_header
-        self.terminal_tool = terminal_tool
         self.schemas = [tool.schema for tool in tools.values()]
         if agent.output_schema is not None:
             self.schemas.append(submit_output_schema(agent.output_schema))
@@ -264,12 +256,8 @@ class TurnEngine:
             verdict = strictest(verdict, decide(name, rules, None, self.default_permission))
         return verdict
 
-    async def _finish(
-        self,
-        terminal: TurnCompleted | TurnFailed,
-        final_events: Sequence[SessionEvent] = (),
-    ) -> TurnCompleted | TurnFailed:
-        await self._append([terminal, *final_events])
+    async def _finish(self, terminal: TurnCompleted | TurnFailed) -> TurnCompleted | TurnFailed:
+        await self._append([terminal])
         self.terminal = terminal
         assert self.turn is not None
         for hook in self.hooks:
@@ -453,7 +441,6 @@ class TurnEngine:
         if end.text:
             events.append(TextPart(sample_id=sample_id, text=end.text))
         rejected: list[SessionEvent] = []
-        terminal_seen = False
         for call in end.tool_calls:
             try:
                 args = json.loads(call.args) if call.args.strip() else {}
@@ -461,18 +448,17 @@ class TurnEngine:
                     raise ValueError("arguments must be a JSON object")
             except ValueError as exc:
                 args = {}
-                if not terminal_seen:
-                    invalid.add(call.id)
-                    rejected.extend(
-                        [
-                            ToolCallStarted(call_id=call.id),
-                            ToolCallCompleted(
-                                call_id=call.id,
-                                result=f"invalid JSON arguments: {exc}",
-                                is_error=True,
-                            ),
-                        ]
-                    )
+                invalid.add(call.id)
+                rejected.extend(
+                    [
+                        ToolCallStarted(call_id=call.id),
+                        ToolCallCompleted(
+                            call_id=call.id,
+                            result=f"invalid JSON arguments: {exc}",
+                            is_error=True,
+                        ),
+                    ]
+                )
             requested = ToolCallRequested(
                 sample_id=sample_id,
                 call_id=call.id,
@@ -481,7 +467,6 @@ class TurnEngine:
             )
             events.append(requested)
             calls.append(requested)
-            terminal_seen = terminal_seen or call.name == self.terminal_tool
         events.append(SampleCompleted(sample_id=sample_id, usage=end.usage, finish_reason=end.finish_reason))
         events.extend(rejected)
         return events, calls, invalid
@@ -530,14 +515,7 @@ class TurnEngine:
         prepared: list[_PreparedCall] = []
         output: Any = _NO_OUTPUT
         stopped = False
-        terminal_index = next(
-            (index for index, call in enumerate(calls) if call.name == self.terminal_tool),
-            None,
-        )
-        for index, call in enumerate(calls):
-            if terminal_index is not None and index > terminal_index:
-                await self._complete(call, COMPLETED_RESULT, is_error=True)
-                continue
+        for call in calls:
             if call.call_id in invalid:
                 continue
             if stopped:
@@ -640,7 +618,7 @@ class TurnEngine:
             prepared.append(_PreparedCall(call=call, effective=effective, tool=tool, kwargs=kwargs))
         return prepared, output
 
-    async def _invoke(self, prepared: _PreparedCall) -> FinishResult | None:
+    async def _invoke(self, prepared: _PreparedCall) -> None:
         call = prepared.call
 
         async def emit(message: str) -> None:
@@ -664,7 +642,6 @@ class TurnEngine:
             kwargs[prepared.tool.ctx_param] = ctx
         result: Any
         is_error = False
-        finished: FinishResult | None = None
         error_type: str | None = None
         try:
             if inspect.iscoroutinefunction(prepared.tool.fn):
@@ -673,9 +650,6 @@ class TurnEngine:
                 result = await asyncio.to_thread(prepared.tool.fn, **kwargs)
             if inspect.isawaitable(result):
                 result = await result
-            if isinstance(result, FinishResult):
-                finished = result
-                result = result.output
         except Exception as exc:
             result = str(exc)
             is_error = True
@@ -694,7 +668,6 @@ class TurnEngine:
             error_type=error_type,
             ask_id=None,
         )
-        return finished
 
     async def _batch(
         self,
@@ -719,9 +692,6 @@ class TurnEngine:
             for result in results:
                 if isinstance(result, BaseException):
                     raise result
-            finished = next((result for result in results if isinstance(result, FinishResult)), None)
-            if finished is not None:
-                return finished
         return output
 
     async def _compact(self, *, forced: bool = False, prepared: SampleRequest | None = None) -> bool:
@@ -765,7 +735,7 @@ class TurnEngine:
             tools=self.schemas,
             params=prepared.params,
             skills=self.skills_index,
-            child_lifecycle=self.terminal_tool == "finish",
+            child_lifecycle=self.header.parent_id is not None,
         )
         self.turn.sample_request = req
         return req
@@ -785,7 +755,7 @@ class TurnEngine:
                 tools=self.schemas,
                 params=params,
                 skills=self.skills_index,
-                child_lifecycle=self.terminal_tool == "finish",
+                child_lifecycle=self.header.parent_id is not None,
             )
             self.turn.sample_request = req
             compacted = await self._compact(prepared=req)
@@ -797,7 +767,7 @@ class TurnEngine:
                     tools=self.schemas,
                     params=params,
                     skills=self.skills_index,
-                    child_lifecycle=self.terminal_tool == "finish",
+                    child_lifecycle=self.header.parent_id is not None,
                 )
                 self.turn.sample_request = req
             sample_id = uuid4().hex
@@ -818,15 +788,6 @@ class TurnEngine:
                 return await self._finish(TurnCompleted(turn_id=self.turn.turn_id, stop_reason="completed"))
             capped = sample_number + 1 >= self.agent.max_steps
             output = await self._batch(calls, invalid, capped)
-            if isinstance(output, FinishResult):
-                return await self._finish(
-                    TurnCompleted(
-                        turn_id=self.turn.turn_id,
-                        stop_reason="finished",
-                        output=output.output,
-                    ),
-                    output.final_events,
-                )
             if output is not _NO_OUTPUT:
                 return await self._finish(
                     TurnCompleted(

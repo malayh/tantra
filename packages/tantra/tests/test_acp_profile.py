@@ -355,7 +355,7 @@ async def test_cursor_resume_at_every_cut_equals_the_uninterrupted_stream() -> N
             Sample(
                 reasoning="digging in", text="Found it.", tool_calls=calls("w1", "send", agent_id=root, input="half")
             ),
-            Sample(tool_calls=calls("w2", "finish", result={"ok": True})),
+            Sample(text="All done."),
         )
         await live.prompt(root, "go")
         [worker] = await live.until(lambda: list(mirror(live, root)))
@@ -364,11 +364,11 @@ async def test_cursor_resume_at_every_cut_equals_the_uninterrupted_stream() -> N
         snapshot = len(live.of(worker))
         provider.gate.set()
         await live.idle(root, 3)
-        finished = {"state": "idle", "stopReason": "_tantra_finished"}
-        await live.until(lambda: mirror(live, root)[worker]["state"] == finished)
-        await live.until(lambda: live.states(worker)[-1:] == [finished])
+        replied = {"state": "idle", "stopReason": "end_turn"}
+        await live.until(lambda: mirror(live, root)[worker]["state"] == replied)
+        await live.until(lambda: live.states(worker)[-1:] == [replied])
         await plain.idle(root, 3)
-        await plain.until(lambda: plain.states(worker)[-1:] == [finished])
+        await plain.until(lambda: plain.states(worker)[-1:] == [replied])
         with pytest.raises(RpcError) as plain_after:
             await plain.resume(root, replayFrom=after("1.0"))
     full = cursored(live, root)
@@ -1114,7 +1114,8 @@ async def test_a_hidden_child_leaks_no_lifecycle_input_and_cuts_still_hold() -> 
         provider.add(
             "worker",
             Sample(text="working", tool_calls=calls("w1", "send", agent_id=root, input="secret-message")),
-            Sample(tool_calls=calls("w2", "finish", result="secret-result")),
+            Sample(text="secret-result"),
+            Sample(text="secret-second"),
         )
         await live.prompt(root, "go", **tantra(commandId=str(command)))
 
@@ -1129,20 +1130,29 @@ async def test_a_hidden_child_leaks_no_lifecycle_input_and_cuts_still_hold() -> 
             events = await journal(runtime, root)
             started = [event for event in events if isinstance(event, TurnStarted)]
             ended = [event for event in events if isinstance(event, TurnCompleted | TurnFailed)]
-            return len(started) == len(ended) == 4 and not reduce_journal(events).pending
+            return len(started) == len(ended) == 5 and not reduce_journal(events).pending
 
         await eventually(settled)
-        await live.idle(root, 4)
+        await live.idle(root, 5)
     events = await journal(runtime, root)
     lifecycle = [event.input for event in events if isinstance(event, TurnStarted) and event.input != "go"]
     origins = {event.origin for event in events if isinstance(event, InputQueued)}
     children = [str(status.agent_id) for status in await runtime.tree_status(UUID(root)) if status.parent_id]
     outcomes = {event.call_id: event.is_error for event in events if isinstance(event, ToolCallCompleted)}
     received = json.dumps(live.transport.received)
-    assert len(lifecycle) == 3 and len(children) == 2 and worker in children
-    assert {"message", "finished", "turn_ended"} <= origins
+    assert len(lifecycle) == 4 and len(children) == 2 and worker in children
+    assert {"message", "turn_ended"} <= origins
     assert {key: outcomes[key] for key in ("t1", "t2", "t3")} == {"t1": False, "t2": True, "t3": False}
-    secrets = [*lifecycle, *children, "secret-message", "secret-result", "secret-send", "scout", "planner"]
+    secrets = [
+        *lifecycle,
+        *children,
+        "secret-message",
+        "secret-result",
+        "secret-second",
+        "secret-send",
+        "scout",
+        "planner",
+    ]
     assert [text for text in secrets if text in received] == []
     assert live.of(root, "tool_call_update") == live.of(root, "session_message") == []
     go = [{"type": "text", "text": "go"}]

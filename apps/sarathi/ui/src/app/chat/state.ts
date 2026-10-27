@@ -83,6 +83,7 @@ export const attachmentsOf = (blocks: ContentBlock[]): Attachment[] =>
   );
 
 const STOP_LABELS: Record<string, string> = {
+  end_turn: "Replied",
   _tantra_finished: "Finished",
   error: "Failed",
   cancelled: "Cancelled",

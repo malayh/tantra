@@ -180,7 +180,7 @@ function MessageChip({
         )}
         <CollapsibleTrigger className="text-muted-foreground hover:text-foreground flex items-center gap-1 text-xs">
           <ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} />
-          {outgoing ? "Sent" : entry.finished ? "Finished" : "Received"}
+          {outgoing ? "Sent" : entry.finished ? "Finished" : entry.reply ? "Replied" : "Received"}
         </CollapsibleTrigger>
       </div>
       <CollapsibleContent>

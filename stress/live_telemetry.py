@@ -41,7 +41,7 @@ async def word_count(text: str) -> int:
 class Scribe(Agent):
     model = MODEL_SCRIBE
     tools = [word_count]
-    permissions = {"word_count": "allow", "finish": "allow"}
+    permissions = {"word_count": "allow"}
 
 
 class Lead(Agent):
@@ -72,7 +72,7 @@ def lead(req: SampleRequest, state: PolicyState) -> Sample:
 def scribe(req: SampleRequest, state: PolicyState) -> Sample:
     if turn_step(req) == 0:
         return Sample(tool_calls=[ToolCall(id=state.next_call_id(), name="word_count", args=f'{{"text":"{FINDING}"}}')])
-    return Sample(tool_calls=[ToolCall(id=state.next_call_id(), name="finish", args='{"result":11}')])
+    return Sample(text="11")
 
 
 class Watcher(SpanProcessor):

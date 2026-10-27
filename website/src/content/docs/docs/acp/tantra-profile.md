@@ -131,7 +131,7 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. "Agent" is
     "protocolVersion": 2,
     "info": {
       "name": "tantra-acp-client",
-      "version": "2.0.1"
+      "version": "2.1.0"
     },
     "capabilities": {
       "_meta": {
@@ -177,7 +177,7 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. "Agent" is
 - `capabilities.elicitation.form` (an object) enables `elicitation/create`.
 - Clients MUST send `initialize` before anything else. The agent does not enforce this: until then a connection is a plain v2 client without elicitation.
 - Profile-only output goes only to profile connections: `_tantra_writer`, `_tantra_queue_update`, `_tantra_notice` and `_meta.tantra.cursor`.
-- These v2-legal extension values go to every client: the stop reasons `_tantra_finished` and `_tantra_interrupted`, `_meta.tantra.ask` on `state_update`, `_meta.tantra.finished` on `session_message` and `subagent_update`, and `_meta.tantra.askId` on requests.
+- These v2-legal extension values go to every client: the stop reasons `_tantra_finished` and `_tantra_interrupted`, `_meta.tantra.ask` on `state_update`, `_meta.tantra.reply` on `session_message`, `_meta.tantra.finished` on `session_message` and `subagent_update` (journals written before 3.0), and `_meta.tantra.askId` on requests.
 - Without the profile, `_meta.tantra.commandId` and `_meta.tantra.mode` are ignored, `_tantra_after` answers `-32602`, and `_tantra/session/claim_writer` answers `-32601`.
 
 ### Methods
@@ -217,7 +217,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 |---|---|
 | `InputQueued` (root user input) | none; profile: `_tantra_queue_update` |
 | `TurnStarted`, user input | `user_message {messageId: commandId, content}`, then `state_update running` |
-| `TurnStarted`, input from a parent or child agent | incoming `session_message {messageId, senderSessionId, recipientSessionId, content}`, with `_meta.tantra.finished: true` for a child's `finish`; nothing for a child's status-only "turn ended" input, and nothing for any input from a child that `view` hid. Then `state_update running` (agent-initiated work). |
+| `TurnStarted`, input from a parent or child agent | incoming `session_message {messageId, senderSessionId, recipientSessionId, content}`, with `_meta.tantra.reply: true` for a child's reply and `_meta.tantra.finished: true` for a child's `finish` in journals written before 3.0; nothing for a child's status-only "turn ended" input, and nothing for any input from a child that `view` hid. Then `state_update running` (agent-initiated work). |
 | `TextDelta` / `ReasoningDelta` | `agent_message_chunk` / `agent_thought_chunk`, `messageId` = sample id |
 | `TextPart` | `agent_message {content: [text]}`, an upsert that replaces the chunks |
 | `ReasoningPart` | `agent_thought {content: [every reasoning block of the sample so far]}` |
@@ -225,13 +225,13 @@ Each journal event becomes zero or more updates on the session that owns the eve
 | `ToolCallStarted` | `tool_call_update {toolCallId, status: "in_progress"}` |
 | `ToolProgress` | `tool_call_content_chunk` |
 | `ToolCallCompleted` | `tool_call_update {status: "completed" or "failed", rawOutput}`, then a `tool_call_content_chunk` with the result when it is not empty |
-| `spawn`, `send`, `finish` calls | Not tool calls. Outgoing `session_message`: `spawn` at `ChildCreated`, `send` and `finish` on success. A failed one is a failed `tool_call_update`. Every update of a `spawn`, `send` or `status` call that targets a child hidden by `view` is withheld; its index is kept. |
+| `spawn`, `send`, and pre-3.0 `finish` calls | Not tool calls. Outgoing `session_message`: `spawn` at `ChildCreated`, `send` and `finish` on success. On the child's own session, a reply stays its final `agent_message`, or its `submit_output` call for a child with an `output_schema`. A failed one is a failed `tool_call_update`. Every update of a `spawn`, `send` or `status` call that targets a child hidden by `view` is withheld; its index is kept. |
 | `ChildCreated` | `subagent_update {sessionId, title}` (the child's name, else its agent type), before any child traffic |
 | `AskRaised` | `state_update requires_action` with `_meta.tantra.ask {askId, state: "pending"}`; the writer also gets a request (see Writer and asks) |
 | `AskAnswered` | one `state_update` with `_meta.tantra.ask {askId, state: "answered"}`: `running`, or `requires_action` while other asks are pending |
 | `SampleCompleted` | `usage_update {used, size}`; omitted when the model's context window is unknown |
 | `CompactionApplied` | `compaction_update {compactionId, status: "completed", summary: []}`, then `compaction_summary_chunk` when there is a summary |
-| `TurnCompleted` | `state_update idle` with `end_turn`, `max_turn_requests` (step limit) or `_tantra_finished` (`finish`) |
+| `TurnCompleted` | `state_update idle` with `end_turn`, `max_turn_requests` (step limit) or `_tantra_finished` (`finish`, journals written before 3.0) |
 | `TurnCancelled` / `TurnFailed` / `TurnInterrupted` | `state_update idle` with `cancelled` / `error` and `error {code: -32603, message}` / `_tantra_interrupted` |
 | End of a queued input that never started | none; profile: `_tantra_queue_update` |
 | Anything else | none |
@@ -652,7 +652,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 }
 ```
 
-- For profile clients, every descendant is mirrored as `subagent_update {sessionId, title, state}` on its parent's session id, parents first. A finished child adds `_meta.tantra.finished: true`.
+- For profile clients, every descendant is mirrored as `subagent_update {sessionId, title, state}` on its parent's session id, parents first. A child that finished before 3.0 adds `_meta.tantra.finished: true`.
 - A snapshot follows `session/new` and `session/resume`; after that, an update whenever the runtime's tree watch reports a change. The watch keeps only the latest tree, so a short-lived state can be skipped, and a new child's state may arrive before the parent's cursored announcement. Live-only.
 - Child state maps to v2 state:
 
@@ -661,7 +661,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 | queued, running | `running` |
 | awaiting input | `requires_action` |
 | idle | `idle` with its last stop reason |
-| finished | `idle`, `_tantra_finished` |
+| finished (before 3.0) | `idle`, `_tantra_finished` |
 | failed | `idle`, `error` with `error {code: -32603, message}` |
 | cancelled | `idle`, `cancelled` |
 | interrupted | `idle`, `_tantra_interrupted` |
@@ -698,7 +698,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 
 - **Plain v2 clients:** every descendant transcript is pushed on the same connection, announced by `subagent_update` before its traffic. Child state is mirrored on the parent's `subagent_update.state`. Resuming a child pushed on this connection answers `-32602`; any other child id answers `-32002`.
 - **Profile clients:** lazy children plus the child mirror, as above.
-- **Messages:** `spawn`, `send` and `finish` appear as two-way `session_message`s on both sessions.
+- **Messages:** `spawn` and `send` appear as two-way `session_message`s on both sessions. A child's reply appears on the parent's session only; on the child's session it is the child's final `agent_message`, or its `submit_output` call.
 - **Cancel** covers the whole tree. There is no per-child cancel, so `subagent_update` carries no `capabilities`.
 
 ### Transports

@@ -22,7 +22,7 @@ from tantra import Agent, Approval, ApprovalResponse, Context, LoggedEvent, Memo
 REQUIRED = ("OPENAI_API_KEY", "OPENAI_ENDPOINT", "TANTRA_MODEL")
 TASK = (
     "Spawn the scribe to count the words in 'the ledger balances nightly at two in the morning'. "
-    "Wait for its finished message, call note_finding with the count, and submit a verdict."
+    "Wait for its reply, call note_finding with the count, and submit a verdict."
 )
 FIELDS = {
     "turn_started": ("input",),
@@ -34,7 +34,6 @@ FIELDS = {
     "child_created": ("agent", "child_id"),
     "ask_raised": ("ask_id",),
     "ask_answered": ("ask_id", "response"),
-    "agent_finished": ("result",),
     "sample_completed": ("finish_reason",),
     "turn_completed": ("stop_reason", "output"),
     "turn_failed": ("error",),
@@ -71,13 +70,13 @@ async def word_count(text: str) -> int:
 
 
 class Scribe(Agent):
-    prompt = "Count words, then call finish with the number."
+    prompt = "Count words, then reply with only the number."
     tools = [word_count]
-    permissions = {"word_count": "allow", "finish": "allow"}
+    permissions = {"word_count": "allow"}
 
 
 class Lead(Agent):
-    prompt = "Use actor tools explicitly. Wait for finished child messages before deciding."
+    prompt = "Use actor tools explicitly. Wait for child replies before deciding."
     tools = [note_finding]
     subagents = [Scribe]
     permissions = {"*": "allow"}
@@ -109,7 +108,7 @@ async def watch_child(runtime: Runtime, connection: Any, child_id: UUID, depth: 
         render(item, depth)
         if item.event.type == "ask_raised":
             await connection.answer(UUID(hex=item.event.ask_id), ask(item.event.request), command_id=uuid4())
-        if item.event.type in ("agent_finished", "turn_failed", "turn_cancelled", "turn_interrupted"):
+        if item.event.type in ("turn_completed", "turn_failed", "turn_cancelled", "turn_interrupted"):
             return
 
 

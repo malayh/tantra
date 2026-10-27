@@ -26,7 +26,7 @@ If the Runtime closes or the process dies, the future is gone. The unfinished tu
 
 Session headers retain the latest actor state, current turn, last terminal summary, and sequence. `status()` and `tree_status()` read these snapshots without activating actors or replaying journals. Existing headers load with defaults; historical state is not backfilled.
 
-After a child turn ends without `finish()`, Tantra durably queues one deterministic status-only input for the direct parent. Activation-time reconciliation repairs a stop between recording the child terminal and enqueueing the parent input. Successful `finish()` uses its result-delivery input instead. Both paths preserve FIFO ordering, and child assistant text remains only in the child journal.
+After a child turn ends, Tantra durably queues one deterministic input for the direct parent: the child's reply for a completed turn, or a status-only notice otherwise. Activation-time reconciliation repairs a stop between recording the child terminal and enqueueing the parent input. The reply is rebuilt from the child journal, so every retry carries the same text, and a notice that a 2.x Runtime already queued under the same command ID counts as delivered. Delivery preserves FIFO ordering. Apart from replies, child assistant text remains only in the child journal.
 
 ## Crash contract
 

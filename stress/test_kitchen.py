@@ -12,7 +12,16 @@ import pytest
 from pydantic import BaseModel
 
 from stress.conftest import track_runtime
-from stress.driver import Policy, PolicyState, SyntheticEmbedder, SyntheticProvider, by_model, flaky, turn_step
+from stress.driver import (
+    Policy,
+    PolicyState,
+    SyntheticEmbedder,
+    SyntheticProvider,
+    by_model,
+    flaky,
+    last_user,
+    turn_step,
+)
 from stress.invariants import check_log, check_pairs, event_type, log, pairs_intact, picks
 from tantra import (
     Agent,
@@ -591,25 +600,27 @@ async def test_subagent_journals_are_independent_and_fire_hooks() -> None:
     def checker_policy(req: SampleRequest, state: PolicyState) -> Sample:
         if turn_step(req) < 1:
             return calls(state, [("lookup", {"topic": "orbit"})])
-        return calls(state, [("finish", {"result": "verified"})])
+        return Sample(text="verified")
 
-    policy = by_model(
-        {
-            MODEL_LEAD: batch_policy(("spawn", {"agent_name": "checker", "input": "verify the orbit key"})),
-            MODEL_CHECK: checker_policy,
-        }
-    )
+    def lead_policy(req: SampleRequest, state: PolicyState) -> Sample:
+        if last_user(req) == "verify it" and turn_step(req) < 1:
+            return calls(state, [("spawn", {"agent_name": "checker", "input": "verify the orbit key"})])
+        return Sample(text="filed")
+
+    policy = by_model({MODEL_LEAD: lead_policy, MODEL_CHECK: checker_policy})
     runtime, provider = build(store, policy, hooks=[recorder])
     sid = (await runtime.create(Lead)).hex
 
     result = await execute(runtime, sid, "verify it")
     child_created = picks(await log(store, sid), "child_created")[0]
     child_id = child_created.child_id
-    await wait_for(store, child_id, "agent_finished")
+    reply = await wait_for(store, sid, "turn_started", 2)
+    await wait_for(store, sid, "turn_completed", 2)
     parent_log = await log(store, sid)
     child_log = await log(store, child_id)
 
     assert result.outcome == "completed"
+    assert reply.input == f"[agent {UUID(hex=child_id)} replied] verified"
     assert [event.name for event in picks(parent_log, "tool_call_requested")] == ["spawn"]
     assert picks(parent_log, "tool_progress") == []
     assert len(picks(child_log, "tool_progress")) == 1

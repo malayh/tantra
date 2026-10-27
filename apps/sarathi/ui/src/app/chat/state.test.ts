@@ -155,7 +155,7 @@ test("actor status labels cover every state", () => {
     "Running",
     "Awaiting input",
     "Idle — awaiting parent",
-    "Idle — awaiting parent",
+    "Replied",
     "Idle — awaiting parent",
     "Finished",
     "Failed",
@@ -277,10 +277,10 @@ test("the golden session reduces end to end through the store", () => {
     assert.deepEqual(attachmentsOf(user.content), []);
   }
   assert.deepEqual(
-    view.entries.filter((entry) => entry.kind === "message").map((entry) => entry.kind === "message" && entry.finished),
-    [false, false, true],
+    view.entries.filter((entry) => entry.kind === "message").map((entry) => entry.kind === "message" && entry.reply),
+    [false, true, false, true],
   );
-  assert.equal(actorStatusLabel(transcript.roster[CHILD].state), "Finished");
+  assert.equal(actorStatusLabel(transcript.roster[CHILD].state), "Replied");
   assert.equal(actorStatusLabel(view.state), "Cancelled");
   assert.equal(view.entries.at(-1)?.kind, "status");
   assert.deepEqual([view.writerReason, view.queue], ["claimed", []]);

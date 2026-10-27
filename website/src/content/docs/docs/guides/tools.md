@@ -21,4 +21,4 @@ Tools declare `permission="allow"`, `"ask"`, or `"deny"`. The longest matching `
 
 All calls in one assistant response are validated and authorized before execution. Accepted async calls start on the event loop; sync callables start with `asyncio.to_thread`. Sibling failures become individual error results, and provider-visible results preserve the assistant's original call order.
 
-Actor coordination uses the injected `spawn`, `send`, and `finish` tools described in [Actor subagents](/tantra/docs/guides/subagents/).
+Actor coordination uses the injected `spawn`, `send`, `status`, and `cancel_agent` tools described in [Actor subagents](/tantra/docs/guides/subagents/).

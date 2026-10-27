@@ -64,7 +64,7 @@ asyncio.run(main())
 
 `Connection.prompt()` accepts a durable command and waits for its terminal result. For streaming, call `send()` and iterate the connection. Reconnect with the last scalar `seq` as `after`; use `Runtime.events()` for a child journal. Command IDs are UUIDs and make acceptance idempotent.
 
-Subagents are independent actors. Models use the injected `spawn`, `status`, `send`, and `finish` tools; no parent stream merges child events. Plain completion leaves a child reusable and notifies its parent with status only, while `finish` delivers the final result. Human asks and approval-gated tools are root-only.
+Subagents are independent actors. Models use the injected `spawn`, `status`, `send`, and `cancel_agent` tools; no parent stream merges child events. Each completed child turn delivers its final message to the parent as a reply, and the child stays reusable. Human asks and approval-gated tools are root-only.
 
 Compaction is opt-in with `Runtime(compactor=PruneThenSummarize())`. Configured runtimes budget the complete provider request, preserve system and tool definitions, and compact each actor independently.
 

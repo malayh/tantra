@@ -25,7 +25,6 @@ from tantra import (
     tool,
 )
 from tantra.events import (
-    AgentFinished,
     AskAnswered,
     AskRaised,
     CancellationRequested,
@@ -69,7 +68,7 @@ FAULT_SCENARIOS = (*LEGACY_FAULT_SCENARIOS, *CLEANUP_SCENARIOS)
 
 def _fault_policy(req: Any, state: Any) -> Sample:
     if req.model == FaultChild.model:
-        return Sample(tool_calls=[ToolCall(id=state.next_call_id(), name="finish", args='{"result":"child complete"}')])
+        return Sample(text="child complete")
     if req.model == FaultRoot.model:
         if last_user(req) == "hold" and turn_step(req) < 1:
             return Sample(tool_calls=[ToolCall(id=state.next_call_id(), name="fault_wait", args="{}")])
@@ -279,7 +278,7 @@ class FaultState:
                     emit=emit,
                 ),
                 "fault_child",
-                "finish",
+                "report",
             )
             child_id = UUID(child).hex
 
@@ -288,11 +287,11 @@ class FaultState:
                 lifecycle = any(
                     isinstance(event, InputQueued)
                     and event.input.startswith(prefix)
-                    and (" finished]" in event.input or " turn ended]" in event.input)
+                    and event.input.endswith(" replied] child complete")
                     for event in await _events(self.runtime, sid)
                 )
-                finished = any(isinstance(event, AgentFinished) for event in await _events(self.runtime, child_id))
-                return lifecycle and finished
+                completed = any(isinstance(event, TurnCompleted) for event in await _events(self.runtime, child_id))
+                return lifecycle and completed
 
             await _eventually(notified)
             await self.connections[sid].send("drain", command_id=UUID(hex=queued))
@@ -307,7 +306,7 @@ class FaultState:
                     for event in events
                     if isinstance(event, InputQueued)
                     and event.input.startswith(f"[agent {UUID(hex=child_id)} ")
-                    and (" finished]" in event.input or " turn ended]" in event.input)
+                    and event.input.endswith(" replied] child complete")
                 ]
                 return bool(
                     any(isinstance(event, TurnCompleted) and event.turn_id == queued for event in events)
@@ -326,7 +325,7 @@ class FaultState:
                 for event in events
                 if isinstance(event, InputQueued)
                 and event.input.startswith(f"[agent {UUID(hex=child_id)} ")
-                and (" finished]" in event.input or " turn ended]" in event.input)
+                and event.input.endswith(" replied] child complete")
             ]
             header = await self.runtime.store.header(sid)
             checks = {
@@ -343,7 +342,7 @@ class FaultState:
                 )
                 == 1,
                 "child_notice_once": len(lifecycle) == 1,
-                "child_finished_once": sum(isinstance(event, AgentFinished) for event in child_events) == 1,
+                "child_completed_once": sum(isinstance(event, TurnCompleted) for event in child_events) == 1,
                 "pending_ask_cleared": header is not None and header.pending_ask is None,
             }
             if not all(checks.values()):

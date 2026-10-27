@@ -31,7 +31,7 @@ import {
   type SessionUpdate,
 } from "./protocol.js";
 
-export const VERSION = "2.0.1";
+export const VERSION = "2.1.0";
 
 export type ErrorCode =
   | ServerErrorCode

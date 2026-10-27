@@ -39,13 +39,13 @@ async def confirm(step: str, ctx: Context) -> str:
 class Leaf(Agent):
     model = MODEL_LEAF
     tools = [confirm]
-    permissions = {"confirm": "allow", "finish": "allow"}
+    permissions = {"confirm": "allow"}
 
 
 class Mid(Agent):
     model = MODEL_MID
     subagents = [Leaf]
-    permissions = {"spawn": "allow", "finish": "allow"}
+    permissions = {"spawn": "allow"}
 
 
 class Root(Agent):
@@ -74,6 +74,23 @@ async def wait_for(store: Store, sid: str, kind: str, count: int = 1) -> Any:
     raise AssertionError(f"{kind} was not recorded for {sid}")
 
 
+async def wait_input(store: Store, sid: str, text: str) -> None:
+    for _ in range(20_000):
+        if text in [event.input for event in picks(await log(store, sid), "input_queued")]:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"{text!r} was not queued for {sid}")
+
+
+async def wait_replies(store: Store, sid: str, count: int) -> list[str]:
+    for _ in range(20_000):
+        replies = [event.input for event in picks(await log(store, sid), "input_queued") if " replied] " in event.input]
+        if len(replies) >= count:
+            return replies
+        await asyncio.sleep(0)
+    raise AssertionError(f"{count} replies were not queued for {sid}")
+
+
 async def wait_idle(runtime: Runtime) -> None:
     try:
         async with asyncio.timeout(10):
@@ -83,7 +100,7 @@ async def wait_idle(runtime: Runtime) -> None:
         raise AssertionError("runtime did not become idle") from exc
 
 
-async def test_deep_tree_rejects_child_asks_and_uses_explicit_finish(store: Store) -> None:
+async def test_deep_tree_rejects_child_asks_and_replies_up_the_tree(store: Store) -> None:
     def root_policy(req: SampleRequest, state: PolicyState) -> Sample:
         if last_user(req) == "go":
             step = turn_step(req)
@@ -106,12 +123,12 @@ async def test_deep_tree_rejects_child_asks_and_uses_explicit_finish(store: Stor
                 parent_id = incoming.removeprefix("[agent ").split("]", 1)[0]
                 return calls(state, [("send", {"agent_id": parent_id, "input": "mid pong"})])
             return Sample(text="mid acknowledged")
-        return calls(state, [("finish", {"result": "mid done"})])
+        return Sample(text="mid done")
 
     def leaf_policy(req: SampleRequest, state: PolicyState) -> Sample:
         if turn_step(req) < 1:
             return calls(state, [("confirm", {"step": "ship"})])
-        return calls(state, [("finish", {"result": "leaf done"})])
+        return Sample(text="leaf done")
 
     policy = by_model({MODEL_ROOT: root_policy, MODEL_MID: mid_policy, MODEL_LEAF: leaf_policy})
     runtime, provider = build(store, policy, [Root])
@@ -122,8 +139,8 @@ async def test_deep_tree_rejects_child_asks_and_uses_explicit_finish(store: Stor
         mid_id = picks(await log(store, root_id.hex), "child_created")[0].child_id
         leaf_created = await wait_for(store, mid_id, "child_created")
         leaf_id = leaf_created.child_id
-        await wait_for(store, leaf_id, "agent_finished")
-        await wait_for(store, mid_id, "agent_finished")
+        await wait_input(store, mid_id, f"[agent {UUID(hex=leaf_id)} replied] leaf done")
+        await wait_input(store, root_id.hex, f"[agent {UUID(hex=mid_id)} replied] mid done")
         await wait_for(store, root_id.hex, "turn_completed", 2)
 
     await wait_idle(runtime)
@@ -139,7 +156,6 @@ async def test_deep_tree_rejects_child_asks_and_uses_explicit_finish(store: Stor
     assert mid_pong in [event.input for event in picks(root_log, "turn_started")]
     assert "child agents cannot ask humans; use send() to message the parent" in leaf_results
     assert picks(await log(store, leaf_id), "ask_raised") == []
-    assert picks(await log(store, leaf_id), "agent_finished")[0].result == "leaf done"
     assert len(await store.list(parent_id=root_id.hex)) == 1
     assert len(await store.list(parent_id=mid_id)) == 1
     assert len(picks(await log(store, root_id.hex), "child_created")) == 1
@@ -149,7 +165,7 @@ async def test_deep_tree_rejects_child_asks_and_uses_explicit_finish(store: Stor
         await check_log(store, sid)
 
 
-async def test_parallel_actors_finish_into_independent_journals(store: Store) -> None:
+async def test_parallel_actors_reply_from_independent_journals(store: Store) -> None:
     active = 0
     peak = 0
     release = asyncio.Event()
@@ -171,7 +187,7 @@ async def test_parallel_actors_finish_into_independent_journals(store: Store) ->
     class Hand(Agent):
         model = MODEL_HAND
         tools = [work]
-        permissions = {"work": "allow", "finish": "allow"}
+        permissions = {"work": "allow"}
 
     class Dispatcher(Agent):
         model = MODEL_ROOT
@@ -190,7 +206,7 @@ async def test_parallel_actors_finish_into_independent_journals(store: Store) ->
         index = int(last_user(req).split()[-1])
         if turn_step(req) < 1:
             return calls(state, [("work", {"index": index})])
-        return calls(state, [("finish", {"result": f"done {index}"})])
+        return Sample(text=f"done {index}")
 
     runtime, provider = build(store, by_model({MODEL_ROOT: dispatcher, MODEL_HAND: hand}), [Dispatcher])
     root_id = await runtime.create(Dispatcher)
@@ -198,8 +214,7 @@ async def test_parallel_actors_finish_into_independent_journals(store: Store) ->
         result = await connection.prompt("go", command_id=uuid4())
 
     children = await store.list(parent_id=root_id.hex, limit=FAN_TASKS)
-    for child in children:
-        await wait_for(store, child.id, "agent_finished")
+    replies = await wait_replies(store, root_id.hex, FAN_TASKS)
 
     await wait_idle(runtime)
 
@@ -214,6 +229,7 @@ async def test_parallel_actors_finish_into_independent_journals(store: Store) ->
         errors.extend(event for event in picks(child_log, "tool_call_completed") if event.is_error)
         await check_log(store, child.id)
     assert sorted(int(str(event.result).split()[1]) for event in errors) == list(FAN_FAILURES)
+    assert sorted(int(reply.rsplit(" ", 1)[1]) for reply in replies) == list(range(FAN_TASKS))
     assert check_pairs(provider.requests) >= FAN_TASKS * 2
     await check_log(store, root_id.hex)
 
@@ -278,7 +294,7 @@ async def test_permissions_apply_at_depth(store: Store) -> None:
     class Kid(Agent):
         model = MODEL_LEAF
         tools = [probe, forbidden_write]
-        permissions = {"probe": "allow", "forbidden_write": "deny", "send": "allow", "finish": "allow"}
+        permissions = {"probe": "allow", "forbidden_write": "deny", "send": "allow"}
 
     class Parent(Agent):
         model = MODEL_ROOT
@@ -301,7 +317,7 @@ async def test_permissions_apply_at_depth(store: Store) -> None:
                     ("forbidden_write", {"path": "/etc/hosts"}),
                 ],
             )
-        return calls(state, [("finish", {"result": "kid done"})])
+        return Sample(text="kid done")
 
     runtime, provider = build(
         store,
@@ -314,7 +330,7 @@ async def test_permissions_apply_at_depth(store: Store) -> None:
     async with runtime.connect(root_id, writable=True) as connection:
         opening = await connection.prompt("go", command_id=uuid4())
         kid_id = picks(await log(store, root_id.hex), "child_created")[0].child_id
-        await wait_for(store, kid_id, "agent_finished")
+        await wait_input(store, root_id.hex, f"[agent {UUID(hex=kid_id)} replied] kid done")
 
     kid_log = await log(store, kid_id)
     denied = [event for event in picks(kid_log, "tool_call_completed") if event.is_error]

@@ -65,10 +65,11 @@ def test_framework_tool_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         "spawn",
         "send",
         "status",
+        "cancel_agent",
     }
     assert root_tools["spawn"].schema.description.endswith("Available agent types: subagent.")
     assert root_tools["spawn"].schema.parameters["properties"]["agent_name"]["enum"] == ["subagent"]
-    assert "delivered later as a new parent input" in root_tools["spawn"].schema.description
+    assert "[agent <id> replied] with its final message" in root_tools["spawn"].schema.description
     assert set(child_tools) == {
         "web_search",
         "web_fetch",
@@ -76,11 +77,7 @@ def test_framework_tool_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         "memory_recall",
         "skill",
         "send",
-        "finish",
     }
-    assert child_tools["finish"].schema.description == (
-        "Permanently close this child agent and deliver its result to its parent."
-    )
 
 
 async def test_both_actors_inherit_the_full_skill_catalogue() -> None:

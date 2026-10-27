@@ -48,16 +48,15 @@ COMPACT_ARCHIVE_INPUTS = tuple(
     for index, marker in enumerate(ARCHIVE_MARKERS)
 )
 COMPACT_LIMITS = ModelLimits(context_window=16_000, max_output=4_096)
-CHILD_INPUT = "Read and finish the total."
+CHILD_INPUT = "Read and report the total."
 CHILD_PARENT_RESULTS = ("60", '"60"')
 CHILD_PROMPT = (
-    "Call behavior_gated_fixture_stats exactly once. Then call finish exactly once with the numeric total. "
-    "Do not call send."
+    "Call behavior_gated_fixture_stats exactly once. Then reply with only the numeric total. Do not call send."
 )
 CHILD_PARENT_PROMPT = (
     f'Spawn exactly one fixture_child with input "{CHILD_INPUT}" and omit name. After spawn returns, reply exactly '
-    "WAITING without calling status or send. When the finished child result arrives as a new input, reply with only "
-    "that result."
+    "WAITING without calling status or send. When the child's reply arrives as a new input, reply with only that "
+    "total."
 )
 COMPACTION = CompactionConfig(
     buffer=1_024,
@@ -94,8 +93,8 @@ PROMPTS = {
     ),
     "structured_result": ("Call behavior_fixture_stats exactly once, then submit the typed total and row count."),
     "child_completion": (
-        "Spawn exactly one fixture_child to calculate the fixture total. Wait for its explicit finish result, "
-        "then reply with only that total."
+        "Spawn exactly one fixture_child to calculate the fixture total. Wait for its reply, then reply with only "
+        "that total."
     ),
     "compacted_recall": (
         "Preserve the original marker from the first archive turn and loaded settlement rules across compaction. "
@@ -300,7 +299,7 @@ class FixtureChild(Agent):
     prompt = CHILD_PROMPT
     tools = [behavior_gated_fixture_stats]
     skills = []
-    permissions = {"behavior_gated_fixture_stats": "allow", "send": "deny", "finish": "allow"}
+    permissions = {"behavior_gated_fixture_stats": "allow", "send": "deny"}
     max_steps = 6
 
 
@@ -378,10 +377,9 @@ def behavior_policy(request: SampleRequest, state: Any) -> Sample:
     if user == CHILD_INPUT:
         if step == 0:
             return _call(state, "behavior_gated_fixture_stats", {})
-        return _call(state, "finish", {"result": "60"})
-    if user.startswith("[agent ") and " finished] " in user:
-        result = json.loads(user.split(" finished] ", 1)[1])
-        if result in (60, "60"):
+        return Sample(text="60")
+    if user.startswith("[agent ") and " replied] " in user:
+        if user.split(" replied] ", 1)[1] == "60":
             return Sample(text="60")
     if user.startswith("Archive turn "):
         marker = user.split(" marker ", 1)[1].split(". ", 1)[0]
@@ -526,22 +524,30 @@ class BehaviorState:
                 if gate == "compaction" and any(isinstance(event, CompactionApplied) for event in events):
                     event = next(event for event in reversed(events) if isinstance(event, CompactionApplied))
                     return {"gate": gate, "summary": event.summary, "floor_turn_id": event.floor_turn_id}
-                if gate == "child_finished":
+                if gate == "child_replied":
                     children = await self.runtime.store.list(parent_id=sid, limit=2)
                     if len(children) == 1:
+                        replies = [
+                            event
+                            for event in events
+                            if isinstance(event, InputQueued)
+                            and event.sender_id == children[0].id
+                            and " replied] " in event.input
+                        ]
+                        if replies:
+                            result = replies[0].input.split(" replied] ", 1)[1]
+                            return {"gate": gate, "child_id": children[0].id, "result": result}
                         child_events = await self._events(children[0].id)
-                        finished = [event for event in child_events if event.type == "agent_finished"]
-                        if finished:
-                            return {"gate": gate, "child_id": children[0].id, "result": finished[0].result}
                         terminal = [
                             event
                             for event in child_events
-                            if event.type in ("turn_completed", "turn_failed", "turn_cancelled", "turn_interrupted")
+                            if event.type in ("turn_failed", "turn_cancelled", "turn_interrupted")
+                            or (event.type == "turn_completed" and event.stop_reason == "max_steps")
                         ]
                         if terminal:
                             event = terminal[-1]
                             detail = getattr(event, "error", None) or getattr(event, "stop_reason", None)
-                            raise OracleError(f"child ended without explicit finish: {event.type}: {detail}")
+                            raise OracleError(f"child ended without a reply: {event.type}: {detail}")
                 if gate == "parent_waiting" and turn is not None:
                     completed = [
                         event for event in events if isinstance(event, TurnCompleted) and event.turn_id == turn.command
@@ -556,7 +562,7 @@ class BehaviorState:
                         for index, event in enumerate(events)
                         if isinstance(event, InputQueued)
                         and event.input.startswith("[agent ")
-                        and " finished]" in event.input
+                        and " replied]" in event.input
                     ]
                     completed = [
                         (index, event)
@@ -685,7 +691,7 @@ class BehaviorState:
             lifecycle = [
                 event
                 for event in events
-                if isinstance(event, InputQueued) and event.input.startswith("[agent ") and " finished]" in event.input
+                if isinstance(event, InputQueued) and event.input.startswith("[agent ") and " replied]" in event.input
             ]
             initial = [
                 index
@@ -707,7 +713,7 @@ class BehaviorState:
             if parent_text not in CHILD_PARENT_RESULTS:
                 raise ModelBehaviorError(f"child parent returned {parent_text!r}, expected 60")
             child_events = await self._events(children[0].id)
-            finished = [event for event in child_events if event.type == "agent_finished"]
+            child_result = lifecycle[0].input.split(" replied] ", 1)[1].strip()
             child_calls = [event.name for event in child_events if isinstance(event, ToolCallRequested)]
             child_names = {event.call_id: event.name for event in child_events if isinstance(event, ToolCallRequested)}
             child_reads = [
@@ -717,23 +723,17 @@ class BehaviorState:
                 and child_names.get(event.call_id) == "behavior_gated_fixture_stats"
                 and not event.is_error
             ]
-            if (
-                len(finished) != 1
-                or finished[0].result not in (60, "60")
-                or child_calls != ["behavior_gated_fixture_stats", "finish"]
-                or [event.result for event in child_reads] != [stats]
-            ):
-                raise OracleError(
-                    f"child did not read the fixture and explicitly finish once with 60: "
-                    f"reads={child_reads}, finished={finished}"
-                )
+            if child_calls != ["behavior_gated_fixture_stats"] or [event.result for event in child_reads] != [stats]:
+                raise OracleError(f"child did not read the fixture exactly once: reads={child_reads}")
+            if child_result not in CHILD_PARENT_RESULTS:
+                raise ModelBehaviorError(f"child replied {child_result!r}, expected 60")
             await check_log(self.runtime.store, children[0].id)
             pairs_intact(child_events)
             evidence.update(
                 {
                     "child_id": children[0].id,
                     "lifecycle": 1,
-                    "child_result": finished[0].result,
+                    "child_result": child_result,
                     "child_stats": child_reads[0].result,
                     "parent_text": parent_text,
                 }
@@ -857,7 +857,7 @@ def _run_scenario(
         )
     if scenario == "child_completion":
         call("parent_waiting", "behavior_wait", name="main", gate="parent_waiting")
-        call("child_finished", "behavior_wait", name="main", gate="child_finished")
+        call("child_replied", "behavior_wait", name="main", gate="child_replied")
         call("parent_final", "behavior_wait", name="main", gate="parent_final")
     result = call("result", "behavior_result", name="main")
     if result["outcome"] != "completed":

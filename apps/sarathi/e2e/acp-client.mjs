@@ -501,10 +501,10 @@ try {
     await post(gate, "/control/gates/worker/open", {});
     await wait(
       () =>
-        view(second, child).entries.some(
-          (entry) => entry.kind === "message" && entry.sender === child,
+        view(second, child)?.entries.some(
+          (entry) => entry.kind === "agent" && entry.final,
         ),
-      "child finish sent",
+      "child reply written",
     );
     await wait(() => {
       const woke = position(
@@ -513,15 +513,13 @@ try {
         (update) =>
           update.sessionUpdate === "session_message" &&
           update.senderSessionId === child &&
-          update._meta?.tantra?.finished === true,
+          update._meta?.tantra?.reply === true,
       );
       return woke >= 0 && position(second, root, idle, woke + 1) >= 0;
-    }, "root woken by the finished child");
+    }, "root woken by the child's reply");
     await wait(
-      () =>
-        second.transcript.roster[child]?.state?.stopReason ===
-        "_tantra_finished",
-      "child mirrored as finished",
+      () => second.transcript.roster[child]?.state?.stopReason === "end_turn",
+      "child mirrored as replied",
     );
     assert.equal(second.transcript.roster[child].title, "Gate worker");
     assert.deepEqual(descendants(second.transcript, root), [child]);

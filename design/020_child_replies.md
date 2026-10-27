@@ -161,20 +161,25 @@ Out:
   - A queued `send` to a child that used to finish now runs as another child turn. `test_a_hidden_child_leaks_no_lifecycle_input_and_cuts_still_hold` gained that turn.
   - The `_REPLIED` prefix in `projection._synthetic` only keeps origin-less classification equal to the structured path. 3.0 always writes an origin on replies.
 
-### Phase 2 — Sarathi, docs, stress · deps: P1 · —
+### Phase 2 — Sarathi, docs, stress · deps: P1 · ✅ DONE (Sarathi docker e2e not run)
 
 - **Deliverables**
   - Sarathi backend, UI and e2e.
-  - Website docs and README.
+  - Website docs and README, plus `guides/migration-3.0.md`.
   - The stress bench.
-  - The changelog. The owner cuts the 3.0.0 release.
+  - The changelog and versions: `tantra-harness` 3.0.0, `tantra-acp-client` 2.1.0. The owner cuts the 3.0.0 release and publishes the client.
 - **Verify**
   - The Sarathi e2e passes.
   - A live run with `z-ai/glm-5.3-flash`: 7 essay children all deliver their text to the lead, and the lead never polls `status`.
 - **Checklist**
-  - [ ] Sarathi
-  - [ ] docs, stress bench, changelog
-  - [ ] live check
+  - [x] Sarathi
+  - [x] docs, stress bench, changelog
+  - [x] live check
+- **Build notes**
+  - The Sarathi compose e2e and `e2e/acp-client.mjs` were updated but not run: this machine has no docker. Sarathi backend (116), UI tests (12), lint and build pass.
+  - Sarathi's `test_framework_tool_contracts` had failed since 2.1.0, because its root tool set lacked `cancel_agent`. Fixed with the `finish` change in the same test.
+  - Live run (2026-10-27, `z-ai/glm-5.3-flash`, children at `medium`, lead at `high`): 7 of 7 children replied with 616–697-word essays in 62 s. The lead made 0 `status` calls in 8 turns, one plus one per child. Before 3.0, 1 of 7 delivered. `stress/live_raw.py` also completes with a reply and a verdict.
+  - `just stress`: 157 pass. The fault bench now requires the exact reply text for the owner-death scenario.
 
 ### Downstream (outside this spec)
 

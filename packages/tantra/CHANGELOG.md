@@ -1,5 +1,27 @@
 # Changelog
 
+## 3.0.0
+
+Removed:
+
+- The `finish` framework tool, with `FinishResult` and `TurnEngine(terminal_tool=...)`. Children no longer close themselves, and new sessions never write `AgentFinished` or `TurnCompleted(stop_reason="finished")`.
+
+Changed:
+
+- Every completed child turn queues `[agent <child-uuid> replied] <text>` for the direct parent, where the text is the turn's final assistant message, or the canonical JSON of `submit_output` for a child with an `output_schema`. Text over 32 KiB of UTF-8 is cut at a character boundary and ends with `[reply truncated at 32 KiB]`; an empty message becomes `(no text reply)`. The input keeps `origin="turn_ended"` and the command ID `uuid5(child_id, turn_id)`. `max_steps`, failed, cancelled and interrupted turns keep the status-only `[agent <child-uuid> turn ended] <stable-json>` notice, and a cancel by the parent still queues nothing.
+- The child guidance and the `spawn`, `status` and `cancel_agent` descriptions describe replies.
+
+Added:
+
+- Over ACP, a reply is an incoming `session_message` from the child with `_meta.tantra.reply: true`. `tantra-acp-client` 2.1.0 adds `MessageEntry.reply`. The profile version stays 1.
+
+Compatibility and upgrade:
+
+- Journals written by 2.x load unchanged and need no migration. A child finished under 2.x stays closed and its finished input projects as before. A turn that 2.x already notified under the same command ID is not delivered again.
+- `finish` remains a reserved tool name for child agents.
+- Parents now receive child text. Check views or logs that show parent inputs to people who must not see child output.
+- Stop 2.x workers before starting 3.0 workers. See the [3.0 upgrade guide](https://malayh.github.io/tantra/docs/guides/migration-3.0/).
+
 ## 2.2.0
 
 Added:

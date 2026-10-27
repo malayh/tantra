@@ -138,7 +138,7 @@ Per-page distinctive facts:
 
 - A `Wasm scout` chip (bot icon, spinner, `Running`) appears with the delegated task under its `Sent` toggle, and the strip above the composer lists it while it runs. It renders **in place of** the delegate tool chip — there must not be both.
 - Opening the chip shows the subagent's own activity in the child drawer: `web_search` / `web_fetch` chips and its text.
-- When the subagent finishes, its spinner clears and a `Finished` chip carries its result.
+- When the subagent replies, its spinner clears and a `Replied` chip carries its result.
 - No approval or human-input card appears in the child drawer. Refresh the page and confirm the child is still named `Wasm scout` and its journal remains inspectable.
 - After the block completes, the root agent streams a **synthesis** answer below it (text outside the block).
 - The composer stays disabled until the *root* turn completes (a subagent turn emits two `turn_completed`s; the composer must not unlock early).
@@ -298,7 +298,7 @@ Copy into `e2e/reports/<YYYY-MM-DD>.md` and fill.
 - **Notes:**
 
 ### 5 — Subagent · PASS/FAIL/SKIP
-- **Evidence:** `Wasm scout` block, nested chips, explicit finish delivery, refresh persistence, synthesis after
+- **Evidence:** `Wasm scout` block, nested chips, reply delivery, refresh persistence, synthesis after
 - **Notes:**
 
 ### 6 — Memory HITL + durability + scoping · PASS/FAIL/SKIP

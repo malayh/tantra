@@ -202,12 +202,12 @@ def _tool(plan: Plan) -> tuple[str, dict[str, Any]] | None:
                 "name": f"Gate {plan.name}",
             },
         )
-    if plan.action == "finish":
-        return "finish", {"result": f"Child {plan.name} finished"}
     return None
 
 
 def _text(plan: Plan, payload: dict[str, Any]) -> str:
+    if plan.action == "finish":
+        return f"Child {plan.name} finished"
     if plan.name == "title":
         user = _latest_user(payload.get("messages") or [])
         source = user.rsplit("\n", 1)[-1]

@@ -59,11 +59,12 @@ def test_tool_results_do_not_repeat_root_tools() -> None:
     assert _text(plan, {}) == "memory_write completed deterministically."
 
 
-def test_child_finishes_after_its_blocked_tool() -> None:
+def test_child_replies_after_its_blocked_tool() -> None:
     plan = _plan(payload("[gate:tool=child] [gate:finish=child]", last_tool="e2e_gate"))
 
     assert plan == Plan(action="finish", name="child")
-    assert _tool(plan) == ("finish", {"result": "Child child finished"})
+    assert _tool(plan) is None
+    assert _text(plan, {}) == "Child child finished"
 
 
 def test_child_plan_carries_a_provider_gate_and_finish_directive() -> None:

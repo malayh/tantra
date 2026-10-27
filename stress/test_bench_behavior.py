@@ -113,14 +113,14 @@ async def _strict_child_run(
             }
         )
         await state.operation({"op": "behavior_wait", "name": "main", "gate": "parent_waiting"})
-        await state.operation({"op": "behavior_wait", "name": "main", "gate": "child_finished"})
+        await state.operation({"op": "behavior_wait", "name": "main", "gate": "child_replied"})
         final = await state.operation({"op": "behavior_wait", "name": "main", "gate": "parent_final"})
         assert final is not None
         events = await state._events(str(setup["sid"]))
         lifecycle = [
             event
             for event in events
-            if isinstance(event, InputQueued) and event.input.startswith("[agent ") and " finished]" in event.input
+            if isinstance(event, InputQueued) and event.input.startswith("[agent ") and " replied]" in event.input
         ]
         assert len(lifecycle) == 1
         assert final["turn_id"] == lifecycle[0].command_id
@@ -184,7 +184,7 @@ async def test_child_parent_final_text(
 
     def policy(request: object, state: object) -> Sample:
         user = last_user(request)
-        if user.startswith("[agent ") and " finished]" in user:
+        if user.startswith("[agent ") and " replied]" in user:
             return Sample(text=parent_text)
         return behavior_policy(request, state)
 

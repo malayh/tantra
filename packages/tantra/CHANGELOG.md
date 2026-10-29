@@ -1,5 +1,25 @@
 # Changelog
 
+## 3.1.0
+
+Added:
+
+- `Runtime.deliver(agent_id, input, *, command_id, source)` wakes any agent of a tree that isn't finished (root, child or grandchild) from code outside a turn. It queues `[event <source>] <input>` with the new `InputQueued.origin="event"`, no `sender_id` and no `submitted_by`, on the local and the coordinator path. It needs no `Connection` or writer token, and the tree's writer never changes. `source` must match `^[a-z][a-z0-9_]{0,31}$`, otherwise `ValueError`. An unknown id raises `SessionNotFound`, and a finished target raises `TantraError`. A retry with the same `command_id`, target and content returns `duplicate=True` and wakes the target again; other content raises `InvalidCommandReuse`. With a coordinator and no owner for the tree, the caller becomes the owner and runs the woken turn, so its Runtime must register the same agents, provider, hooks and `deps_factory`. See the [Runtime reference](https://malayh.github.io/tantra/docs/reference/runtime/#deliver).
+- `DeliverPayload`, exported from `tantra`, and the `deliver` coordinator operation, which carries no writer token.
+- `Hook.on_cancel(root_id, agent_ids)`, awaited after a tree cancel or `cancel_agent` is saved, with every agent it covers, idle and finished ones included. A tree cancel calls it on the Runtime that called `Connection.cancel`, with every agent in the tree; `cancel_agent` calls it on the owner, with the child and its descendants. Root-only cancel doesn't call it. A retried cancel calls it again. Its error makes `cancel` raise and `cancel_agent` return a tool error, and the cancel stays saved. The owner's tree cancel reply carries `agent_ids`.
+- Over ACP, an event input is an incoming `session_message` with no sender, the agent as recipient, the text without the prefix, and `_meta.tantra.source`, on every client. It never enters `_tantra_queue_update`. `tantra-acp-client` 2.2.0 adds `MessageEntry.source`. The profile version stays 1.
+
+Changed:
+
+- Root-only cancel (`descendants=False`) keeps queued event inputs, as it keeps inputs from agents. It still cancels user inputs, and inputs with no `origin` and no `sender_id` from older journals.
+
+Compatibility and upgrade:
+
+- Run every Runtime on 3.1.0 before any caller uses `deliver`. A 3.0.0 owner's command dispatcher dies on a `deliver` request, and that Runtime handles no more commands for any tree it owns until it restarts. 3.0.0 also can't read a journal that holds an event input.
+- No downgrade to 3.0.0 once an event input is journaled.
+- During a rolling deploy, a 3.0.0 owner's cancel reply has no `agent_ids`, and `on_cancel` isn't called.
+- Journals written by 3.0 load unchanged and need no migration.
+
 ## 3.0.0
 
 Removed:

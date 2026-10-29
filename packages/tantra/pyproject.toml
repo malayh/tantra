@@ -1,6 +1,6 @@
 [project]
 name = "tantra-harness"
-version = "3.0.0"
+version = "3.1.0"
 description = "Durable actor runtime for Python agents, served over ACP"
 readme = "README.md"
 requires-python = ">=3.13"

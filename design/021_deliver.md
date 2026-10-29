@@ -98,7 +98,7 @@ class Hook:
 | --- | --- | --- | --- |
 | Tree cancel (`descendants=True`) | Removed | Every agent in the tree, from `_tree_headers(root_id)` | The runtime that called `Connection.cancel`, after the cancel is saved |
 | Root-only cancel (`descendants=False`) | Kept | Not called | — |
-| `cancel_agent` | Kept | The child and its descendants (`actors`, `runtime.py:1991`) | The owner, inside the parent's tool call, after its lock block |
+| `cancel_agent` | Removed for the child and its descendants | The child and its descendants (`actors`, `runtime.py:1991`) | The owner, inside the parent's tool call, after its lock block |
 
 - **The list is computed, not taken from `CancellationRequested.targets`.** Targets list only agents with a live turn (`_operational_targets`, `runtime.py:2519`; the local path reads `self.active`, `runtime.py:2808`). An idle agent waiting on background work is never in it.
 - **Finished agents are included.** A finished agent can still own work outside tantra.
@@ -202,7 +202,7 @@ class Hook:
   - The two-runtime test keeps the root busy so the owner keeps ownership. Otherwise the duplicate cancel can make the caller the owner. The hook runs on the caller either way.
   - `test_postgres_runtime.py::test_tree_recovery_preserves_cancellation_targets_and_interrupts_only_started` fails now and then in full runs: it asserts ownership under a 0.12 s lease before any cancel. It passes alone.
 
-### Phase 3 — ACP, client, docs, release · deps: P1, P2 · —
+### Phase 3 — ACP, client, docs, release · deps: P1, P2 · CODE DONE, release pending owner approval
 
 - **Deliverables**
   - `acp/projection.py`: the `"event"` branch, `_message` changes.
@@ -221,11 +221,16 @@ class Hook:
   - Client test: the reducer sets `source`. Replay gives the same transcript as live.
   - Existing projection and client tests pass unchanged.
 - **Checklist**
-  - [ ] projection
-  - [ ] client
-  - [ ] docs
-  - [ ] changelog, versions
+  - [x] projection
+  - [x] client
+  - [x] docs
+  - [x] changelog, versions
   - [ ] release
+- **Notes after landing**
+  - The golden `test/fixtures/session.json` now holds an event turn. It is read by the client's `transcript.test.mjs` and by Sarathi's `apps/sarathi/ui/src/app/chat/state.test.ts`, whose reply-flag list needed one more entry. That was the only Sarathi change. `just test` doesn't run the Sarathi test.
+  - The main checkout's `apps/sarathi/ui/node_modules/tantra-acp-client` is a stale copy. To run Sarathi's tests against a branch, link that branch's built client.
+  - Sarathi labels a message with no sender as "Parent · Received", so an event would show as from the parent. Sarathi never calls `deliver`, so this is left as is.
+  - `test_postgres_runtime.py::test_cancel_agent_through_the_coordinator_leaves_no_notice_after_takeover` fails now and then in full runs, also before P2. It passes alone.
 
 ### Downstream (outside this spec)
 

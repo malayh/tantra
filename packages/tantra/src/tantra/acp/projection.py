@@ -57,6 +57,7 @@ _TURN_ENDED = re.compile(rf"\[agent {_UUID} turn ended\] ")
 _REPLIED = re.compile(rf"\[agent {_UUID} replied\] (.*)\Z", re.S)
 _FINISHED = re.compile(rf"\[agent {_UUID} finished\] (.*)\Z", re.S)
 _MESSAGE = re.compile(rf"\[agent {_UUID}\] (.*)\Z", re.S)
+_EVENT = re.compile(r"\[event ([a-z][a-z0-9_]{0,31})\] (.*)\Z", re.S)
 
 
 @dataclass(frozen=True)
@@ -328,6 +329,10 @@ class Projector:
     def _classify(self, text: str, message_id: str, origin: str | None, sender: str | None) -> list[Output] | None:
         if origin == "user":
             return None
+        if origin == "event":
+            event = _EVENT.match(text)
+            if event is not None:
+                return [self._message(message_id, None, self._id, event[2], source=event[1])]
         sender_id = entity_id(sender) if sender is not None else None
         if origin in ("message", "finished", "turn_ended") and sender_id in self._withheld:
             return [Withheld()]
@@ -373,15 +378,26 @@ class Projector:
         return [QueueChanged(self.queue)]
 
     def _message(
-        self, message_id: str, sender: str, recipient: str, text: str, *, finished: bool = False, reply: bool = False
+        self,
+        message_id: str,
+        sender: str | None,
+        recipient: str,
+        text: str,
+        *,
+        finished: bool = False,
+        reply: bool = False,
+        source: str | None = None,
     ) -> Output:
         flag = "finished" if finished else "reply" if reply else None
+        meta = {"tantra": {flag: True}} if flag is not None else None
+        if source is not None:
+            meta = {"tantra": {"source": source}}
         message = SessionMessage(
             message_id=message_id,
             sender_session_id=sender,
             recipient_session_id=recipient,
             content=[text_block(text)],
-            meta={"tantra": {flag: True}} if flag is not None else None,
+            meta=meta,
         )
         return dump(message)
 

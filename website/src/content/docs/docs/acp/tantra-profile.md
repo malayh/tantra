@@ -131,7 +131,7 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. "Agent" is
     "protocolVersion": 2,
     "info": {
       "name": "tantra-acp-client",
-      "version": "2.1.0"
+      "version": "2.2.0"
     },
     "capabilities": {
       "_meta": {
@@ -177,7 +177,7 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119. "Agent" is
 - `capabilities.elicitation.form` (an object) enables `elicitation/create`.
 - Clients MUST send `initialize` before anything else. The agent does not enforce this: until then a connection is a plain v2 client without elicitation.
 - Profile-only output goes only to profile connections: `_tantra_writer`, `_tantra_queue_update`, `_tantra_notice` and `_meta.tantra.cursor`.
-- These v2-legal extension values go to every client: the stop reasons `_tantra_finished` and `_tantra_interrupted`, `_meta.tantra.ask` on `state_update`, `_meta.tantra.reply` on `session_message`, `_meta.tantra.finished` on `session_message` and `subagent_update` (journals written before 3.0), and `_meta.tantra.askId` on requests.
+- These v2-legal extension values go to every client: the stop reasons `_tantra_finished` and `_tantra_interrupted`, `_meta.tantra.ask` on `state_update`, `_meta.tantra.reply` and `_meta.tantra.source` on `session_message`, `_meta.tantra.finished` on `session_message` and `subagent_update` (journals written before 3.0), and `_meta.tantra.askId` on requests.
 - Without the profile, `_meta.tantra.commandId` and `_meta.tantra.mode` are ignored, `_tantra_after` answers `-32602`, and `_tantra/session/claim_writer` answers `-32601`.
 
 ### Methods
@@ -218,6 +218,7 @@ Each journal event becomes zero or more updates on the session that owns the eve
 | `InputQueued` (root user input) | none; profile: `_tantra_queue_update` |
 | `TurnStarted`, user input | `user_message {messageId: commandId, content}`, then `state_update running` |
 | `TurnStarted`, input from a parent or child agent | incoming `session_message {messageId, senderSessionId, recipientSessionId, content}`, with `_meta.tantra.reply: true` for a child's reply and `_meta.tantra.finished: true` for a child's `finish` in journals written before 3.0; nothing for a child's status-only "turn ended" input, and nothing for any input from a child that `view` hid. Then `state_update running` (agent-initiated work). |
+| `TurnStarted`, event input (`Runtime.deliver`) | incoming `session_message {messageId, recipientSessionId, content, _meta.tantra.source}` with no `senderSessionId`; `content` is the text after the `[event <source>] ` prefix. Then `state_update running`. Never queued. Since tantra 3.1.0; `tantra-acp-client` 2.2.0 reads it as `MessageEntry.source`. |
 | `TextDelta` / `ReasoningDelta` | `agent_message_chunk` / `agent_thought_chunk`, `messageId` = sample id |
 | `TextPart` | `agent_message {content: [text]}`, an upsert that replaces the chunks |
 | `ReasoningPart` | `agent_thought {content: [every reasoning block of the sample so far]}` |

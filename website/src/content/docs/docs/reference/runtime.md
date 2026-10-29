@@ -63,6 +63,23 @@ A dry run writes nothing, acquires no execution ownership, cancels nothing, and 
 
 Pages contain 1–1,000 roots, oldest first by `(created_at, id)`. Pass `report.next_after` to the next call with the same selector; this value cursor stays valid after deletion. Active and definitive failed entries advance it. Trees commit individually, so earlier deletions survive later errors. Infrastructure failures stop further admission, set `report.error_code`, and retain the preceding cursor for safe retry; a null cursor with an error does not mean completion. Caller cancellation stops new admission while an accepted deletion can still finish.
 
+### Deliver
+
+`await deliver(agent_id, input, *, command_id, source) -> CommandReceipt` wakes any agent of a tree from code outside a turn, such as a worker job, a webhook or a timer. The target is a root, child or grandchild that exists and isn't finished.
+
+```python
+await runtime.deliver(child_id, "task 3f2a finished, exit 0", command_id=task_id, source="sandbox")
+```
+
+- `source` must match `^[a-z][a-z0-9_]{0,31}$`, otherwise `ValueError`.
+- The agent sees `[event <source>] <input>`, queued as `InputQueued(origin="event")` with no `sender_id` and no `submitted_by`. tantra adds only the prefix. The input queues behind the current turn like any other input, and a pending ask blocks it until answered.
+- It needs no `Connection` and no writer token. The tree's writer never changes.
+- An unknown id raises `SessionNotFound`, and a finished target raises `TantraError` (`RemoteExecutionError`, a subclass, with a coordinator). A `command_id` already used in the tree for another target or content raises `InvalidCommandReuse`.
+- A retry with the same `command_id`, target and content returns `duplicate=True`, queues nothing, and wakes the target again. Retry the same `command_id` after a crash or a `CommandTimeout`.
+- With a coordinator, the tree's owner queues the input and runs the turn. With no owner, the caller becomes the owner and runs the woken turn, and every turn after it while it owns the tree. Its Runtime must register the same agents, provider, hooks and `deps_factory` as the main one.
+- Only root-only cancel keeps queued event inputs. A tree cancel removes them, and `cancel_agent` removes those of the child and its descendants.
+- Every Runtime must run 3.1.0 before any caller uses `deliver`. See the [changelog](https://github.com/malayh/tantra/blob/main/packages/tantra/CHANGELOG.md).
+
 ### Connections
 
 `connect(root_id, *, after=0, writable=False) -> Connection` validates a root. A connection iterates only the root journal.
@@ -90,7 +107,7 @@ Enter a connection with `async with`. Read-only connections iterate events. A wr
 - `send(input, *, command_id, submitted_by=None) -> CommandReceipt` accepts a durable root input.
 - `prompt(input, *, command_id, submitted_by=None) -> TurnResult` accepts the same input and waits for its terminal event.
 - `answer(ask_id, response, *, command_id, submitted_by=None) -> CommandReceipt` resolves a live root ask.
-- `cancel(*, command_id, submitted_by=None, descendants=True) -> CommandReceipt` cancels active and queued work in the live tree. With `descendants=False` it cancels only the root's active turn and its queued user inputs: descendants keep running, and inputs from agents stay queued and run next. The flag is recorded on `CancellationRequested`, and a retry with a different value raises `InvalidCommandReuse`.
+- `cancel(*, command_id, submitted_by=None, descendants=True) -> CommandReceipt` cancels active and queued work in the live tree. With `descendants=False` it cancels only the root's active turn and its queued user inputs: descendants keep running, and inputs from agents and `deliver` stay queued and run next. The flag is recorded on `CancellationRequested`, and a retry with a different value raises `InvalidCommandReuse`. A tree cancel awaits [`Hook.on_cancel`](/tantra/docs/reference/hooks/#on_cancel) before it returns.
 
 `submitted_by` is optional application-supplied audit context: an exact nonempty string of at most 256 characters. Runtime persists it with the command and exposes input attribution to hooks and tools, without automatically adding it to model prompts. It grants no access. Obtain it from trusted authentication and authorize tool execution independently; accepted work can outlive the connection. Internal agent commands remain unattributed. `AskAnswered.answered_by` remains the Runtime root actor.
 

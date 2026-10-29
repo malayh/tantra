@@ -14,4 +14,6 @@ A denied call becomes an error result the model can observe. Invalid verdicts fa
 
 Child agents cannot use approval-gated tools. Runtime rejects a statically configured child tool whose effective permission is `ask`. A hook or other dynamic policy that escalates a child call to `ask` returns an error without raising a human ask; the child should use `send()` to report the blocker to its parent.
 
-Hooks receive turn, sample, tool, and event lifecycle callbacks. Pass instances with `Runtime(..., hooks=[AuditHook()])`. A `before_tool` hook may transform the validated call, return `Denial`, or return `Escalation`; sibling calls still follow their own outcomes.
+Hooks receive turn, sample, tool, event, and cancel callbacks. Pass instances with `Runtime(..., hooks=[AuditHook()])`. A `before_tool` hook may transform the validated call, return `Denial`, or return `Escalation`; sibling calls still follow their own outcomes.
+
+Every hook is awaited: the turn waits until the hook returns, and `cancel` or `cancel_agent` waits for [`on_cancel`](/tantra/docs/reference/hooks/#on_cancel). Slow work, such as network calls, killing processes or heavy compute, belongs outside the hook, in a job or a task the host starts.

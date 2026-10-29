@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -33,6 +34,7 @@ from tantra.coordinator import (
     CoordinatedStoreProtocol,
     Coordinator,
     DeletePayload,
+    DeliverPayload,
     Ownership,
     PostgresCoordinator,
     ReleaseWriterPayload,
@@ -114,6 +116,7 @@ PARENT_CANCELLED = "cancelled_by_parent"
 REPLY_LIMIT = 32768
 REPLY_TRUNCATED = "\n[reply truncated at 32 KiB]"
 NO_REPLY = "(no text reply)"
+SOURCE_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 
 def _check_schema(label: str, entry: Tool) -> None:
@@ -300,9 +303,17 @@ def _lifecycle_input(child_id: str, turn: TurnSummary, reply: str | None) -> Inp
     )
 
 
+def _event_input(command_id: str, input: str, source: str) -> InputQueued:
+    return InputQueued(command_id=command_id, input=f"[event {source}] {input}", origin="event")
+
+
+def _user_input(item: InputQueued) -> bool:
+    return item.origin == "user" or (item.origin is None and item.sender_id is None)
+
+
 def _root_only(states: Mapping[str, OperationalState], root_id: str) -> dict[str, OperationalState]:
     state = states[root_id]
-    return {root_id: replace(state, pending=[item for item in state.pending if item.sender_id is None])}
+    return {root_id: replace(state, pending=[item for item in state.pending if _user_input(item)])}
 
 
 async def _shielded[T](awaitable: Awaitable[T]) -> T:
@@ -1449,6 +1460,43 @@ class Runtime:
             raise ValueError("after must be non-negative")
         return Connection(self, root_id, sid, after=after, writable=writable)
 
+    async def deliver(self, agent_id: UUID, input: str, *, command_id: UUID, source: str) -> CommandReceipt:
+        if SOURCE_PATTERN.fullmatch(source) is None:
+            raise ValueError(f"source must match {SOURCE_PATTERN.pattern}")
+        return await _shielded(self._accept_deliver(agent_id, input, command_id, source))
+
+    async def _accept_deliver(self, agent_id: UUID, input: str, command_id: UUID, source: str) -> CommandReceipt:
+        _, target_id = _id(agent_id, "agent_id")
+        public_id, cid = _id(command_id, "command_id")
+        self._ensure_open()
+        header = await self._header(target_id)
+        root_id = header.root_id or header.id
+        if self.coordinator is not None:
+            result = await self._request_command(
+                root_id,
+                "deliver",
+                DeliverPayload(command_id=public_id, agent_id=agent_id, input=input, source=source),
+                None,
+            )
+            return CommandReceipt(public_id, bool(result["duplicate"]))
+        event = _event_input(cid, input, source)
+        async with self._lock(root_id):
+            self._ensure_open()
+            self._agent_for(header.agent)
+            existing = await self._tree_command(root_id, cid)
+            if existing is not None:
+                if existing != (target_id, event):
+                    raise InvalidCommandReuse(cid)
+                duplicate = True
+            else:
+                if await self._actor_finished(target_id) is not None:
+                    raise TantraError(f"agent {agent_id} is finished")
+                duplicate = (await self._enqueue(target_id, event)).duplicate
+            await self._notify(target_id)
+            self._activations[target_id] = self._activations.get(target_id, 0) + 1
+            self._activate(target_id, root_id)
+            return CommandReceipt(command_id=public_id, duplicate=duplicate)
+
     def _status_from_header(self, header: SessionHeader, active: bool | None = None) -> ActorStatus:
         task = self.active.get(header.id)
         return ActorStatus(
@@ -2283,11 +2331,11 @@ class Runtime:
                 self._unrecovered.discard(envelope.root_id)
             headers: list[SessionHeader] = []
             if isinstance(envelope.payload, CancelPayload) or (
-                isinstance(envelope.payload, SendPayload | AnswerPayload)
+                isinstance(envelope.payload, SendPayload | AnswerPayload | DeliverPayload)
                 and (
                     not isinstance(self.coordinator, PostgresCoordinator)
                     or getattr(self.store, "lookup_command", None) is None
-                    or isinstance(envelope.payload, SendPayload)
+                    or isinstance(envelope.payload, SendPayload | DeliverPayload)
                     and getattr(self.store, "lookup_finished", None) is None
                 )
             ):
@@ -2318,6 +2366,26 @@ class Runtime:
                         writer_change_id = getattr(store, "writer_change_id", None)
                         if writer_change_id is not None:
                             result["writer_change_id"] = writer_change_id
+                    elif isinstance(payload, DeliverPayload):
+                        if isinstance(self.coordinator, PostgresCoordinator):
+                            journals = {header.id: await self._journal(header.id, store=store) for header in headers}
+                        target_id = payload.agent_id.hex
+                        event = _event_input(payload.command_id.hex, payload.input, payload.source)
+                        existing = await find_command(payload.command_id.hex)
+                        if existing is not None:
+                            if existing != (target_id, event):
+                                raise InvalidCommandReuse(payload.command_id.hex)
+                            duplicate = True
+                        else:
+                            lookup = getattr(store, "lookup_finished", None)
+                            finished = (
+                                await lookup(target_id) if lookup is not None else self._finished(journals[target_id])
+                            )
+                            if finished is not None:
+                                raise TantraError(f"agent {payload.agent_id} is finished")
+                            duplicate = (await store.enqueue(target_id, event)).duplicate
+                        after.append(lambda target_id=target_id: self._accepted_input(target_id, request.root_id))
+                        result = {"command_id": str(payload.command_id), "duplicate": duplicate}
                     else:
                         assert request.writer_token is not None
                         await store.validate_writer(request.writer_token)
@@ -2349,7 +2417,7 @@ class Runtime:
                                 if finished is not None:
                                     raise TantraError(f"agent {UUID(hex=request.root_id)} is finished")
                                 duplicate = (await store.enqueue(request.root_id, event)).duplicate
-                            after.append(lambda: self._accepted_input(request.root_id))
+                            after.append(lambda: self._accepted_input(request.root_id, request.root_id))
                             result = {"command_id": str(payload.command_id), "duplicate": duplicate}
                         elif isinstance(payload, AnswerPayload):
                             event = AskAnswered(
@@ -2528,10 +2596,10 @@ class Runtime:
                 targets[actor_id] = turns
         return targets
 
-    def _accepted_input(self, root_id: str) -> None:
-        self._activations[root_id] = self._activations.get(root_id, 0) + 1
-        self._activate(root_id, root_id)
-        asyncio.create_task(self._notify(root_id))
+    def _accepted_input(self, agent_id: str, root_id: str) -> None:
+        self._activations[agent_id] = self._activations.get(agent_id, 0) + 1
+        self._activate(agent_id, root_id)
+        asyncio.create_task(self._notify(agent_id))
 
     def _cancel_local(self, targets: Mapping[str, Sequence[str]], reason: str = "cancelled") -> None:
         for actor_id, turn_ids in targets.items():
@@ -2553,7 +2621,7 @@ class Runtime:
         if task is not None and self.active.get(root_id) is not task:
             self._activations[root_id] = self._activations.get(root_id, 0) + 1
         else:
-            self._accepted_input(root_id)
+            self._accepted_input(root_id, root_id)
 
     async def _claim(self, connection: Connection) -> None:
         self._ensure_open()
@@ -2815,7 +2883,7 @@ class Runtime:
                     state = await self._operational(agent_id)
                     if state.finished is not None:
                         continue
-                    turn_ids = [item.command_id for item in state.pending if descendants or item.sender_id is None]
+                    turn_ids = [item.command_id for item in state.pending if descendants or _user_input(item)]
                     if state.incomplete is not None and state.incomplete.turn_id not in turn_ids:
                         turn_ids.append(state.incomplete.turn_id)
                     if turn_ids:
@@ -2868,7 +2936,7 @@ class Runtime:
                         del self.active[agent_id]
                     task.cancel()
             if not event.descendants and (await self._operational(connection._root)).pending:
-                self._accepted_input(connection._root)
+                self._accepted_input(connection._root, connection._root)
             return CommandReceipt(command_id=public_id, duplicate=duplicate)
 
     async def _wait_result(self, agent_id: str, command_id: UUID) -> TurnResult:

@@ -93,6 +93,14 @@ class CancelPayload(FrozenModel):
     descendants: bool = True
 
 
+class DeliverPayload(FrozenModel):
+    type: Literal["deliver"] = "deliver"
+    command_id: UUID
+    agent_id: UUID
+    input: str
+    source: str
+
+
 class DeletePayload(FrozenModel):
     type: Literal["delete"] = "delete"
     allow_active: bool = False
@@ -100,10 +108,16 @@ class DeletePayload(FrozenModel):
 
 
 CommandPayload = Annotated[
-    ClaimWriterPayload | ReleaseWriterPayload | SendPayload | AnswerPayload | CancelPayload | DeletePayload,
+    ClaimWriterPayload
+    | ReleaseWriterPayload
+    | SendPayload
+    | AnswerPayload
+    | CancelPayload
+    | DeliverPayload
+    | DeletePayload,
     Field(discriminator="type"),
 ]
-CommandOperation = Literal["claim_writer", "release_writer", "send", "answer", "cancel", "delete"]
+CommandOperation = Literal["claim_writer", "release_writer", "send", "answer", "cancel", "deliver", "delete"]
 
 
 class CommandEnvelope(FrozenModel):
@@ -119,9 +133,9 @@ class CommandEnvelope(FrozenModel):
     def validate_operation(self) -> CommandEnvelope:
         if self.operation != self.payload.type:
             raise ValueError("operation does not match payload")
-        if self.operation in ("claim_writer", "delete") and self.writer_token is not None:
+        if self.operation in ("claim_writer", "deliver", "delete") and self.writer_token is not None:
             raise ValueError(f"{self.operation} cannot include a writer token")
-        if self.operation not in ("claim_writer", "delete") and self.writer_token is None:
+        if self.operation not in ("claim_writer", "deliver", "delete") and self.writer_token is None:
             raise ValueError(f"{self.operation} requires a writer token")
         if self.writer_token is not None and self.writer_token.root_id != self.root_id:
             raise ValueError("writer token belongs to another root")

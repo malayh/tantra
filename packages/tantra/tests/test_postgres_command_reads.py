@@ -121,7 +121,7 @@ async def test_indexed_reads_and_warm_dispatch_are_bounded(postgres_dsn, pg_sche
 
     monkeypatch.setattr(runtime, "_release_if_idle_locked", keep_owner)
     monkeypatch.setattr(runtime, "_journal", forbidden)
-    monkeypatch.setattr(runtime, "_accepted_input", lambda sid: None)
+    monkeypatch.setattr(runtime, "_accepted_input", lambda agent_id, root_id: None)
     token = None
 
     async def dispatch(operation, payload, *, error=None):

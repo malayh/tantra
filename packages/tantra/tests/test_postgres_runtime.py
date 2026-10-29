@@ -16,6 +16,7 @@ from tantra import (
     CoordinatorUnavailable,
     FreeText,
     FreeTextResponse,
+    InvalidCommandReuse,
     PostgresCoordinator,
     PostgresStore,
     RemoteExecutionError,
@@ -23,10 +24,12 @@ from tantra import (
     Sample,
     SessionHeader,
     SessionNotFound,
+    TantraError,
     WriterReplaced,
     tool,
 )
 from tantra.events import (
+    AgentFinished,
     AskRaised,
     CancellationRequested,
     InputQueued,
@@ -2053,3 +2056,254 @@ async def test_cancel_agent_through_the_coordinator_leaves_no_notice_after_takeo
             await replacement_store.close()
         await old.aclose()
         await old_store.close()
+
+
+class EventChild(Agent):
+    model = "child"
+
+
+class EventRoot(Agent):
+    model = "root"
+    subagents = [EventChild]
+
+
+class EventProvider(EchoProvider):
+    def __init__(self) -> None:
+        self.requests: list[SampleRequest] = []
+        self.hold = asyncio.Event()
+
+    async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+        self.requests.append(req)
+        if req.messages[-1].content == "hold":
+            await self.hold.wait()
+        yield StreamEnd(text=f"{req.model} done")
+
+    def inputs(self, model: str) -> list[str]:
+        return [request.messages[-1].content for request in self.requests if request.model == model]
+
+
+async def _event_runtime(dsn: str, schema: str, provider: EventProvider) -> tuple[PostgresStore, Runtime]:
+    store = PostgresStore(dsn, schema=schema)
+    runtime = Runtime(provider, store, [EventRoot], coordinator=_coordinator(store))
+    await runtime.start()
+    return store, runtime
+
+
+async def _until_completed(store: PostgresStore, sid: str) -> None:
+    async def completed() -> None:
+        while not any(isinstance(event, TurnCompleted) for event in await _events(store, sid)):
+            await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(completed(), 5)
+
+
+async def test_deliver_from_a_non_owner_runs_on_the_owner_and_keeps_the_writer(
+    postgres_dsn: str, pg_schema: str
+) -> None:
+    owner_provider, worker_provider = EventProvider(), EventProvider()
+    owner_store, owner = await _event_runtime(postgres_dsn, pg_schema, owner_provider)
+    worker_store: PostgresStore | None = None
+    worker: Runtime | None = None
+    try:
+        root_id = await owner.create(EventRoot)
+        root = await owner_store.header(root_id.hex)
+        assert root is not None
+        async with owner._lock(root.id):
+            await owner._ensure_owner_locked(root.id)
+        child_public = await owner._actor_spawn(
+            root, EventRoot, _actor_context(owner_store, root.id, "s1"), "event_child", "start"
+        )
+        child_id = UUID(child_public)
+        await _until_completed(owner_store, child_id.hex)
+        command, after = uuid4(), uuid4()
+        async with owner.connect(root_id, writable=True) as connection:
+            await connection.send("hold", command_id=uuid4())
+
+            async def held() -> None:
+                while "hold" not in owner_provider.inputs("root"):
+                    await asyncio.sleep(0.02)
+
+            await asyncio.wait_for(held(), 5)
+            worker_store, worker = await _event_runtime(postgres_dsn, pg_schema, worker_provider)
+            receipt = await worker.deliver(child_id, "task finished", command_id=command, source="sandbox")
+            result = await asyncio.wait_for(owner._wait_result(child_id.hex, command), 5)
+            again = await worker.deliver(child_id, "task finished", command_id=command, source="sandbox")
+            for target, text, source in (
+                (child_id, "changed", "sandbox"),
+                (root_id, "task finished", "sandbox"),
+                (child_id, "task finished", "timer"),
+            ):
+                with pytest.raises(InvalidCommandReuse):
+                    await worker.deliver(target, text, command_id=command, source=source)
+            assert root.id not in worker._ownerships
+            connection._check_iteration()
+            await connection.send("after", command_id=after)
+            owner_provider.hold.set()
+            assert (await asyncio.wait_for(owner._wait_result(root.id, after), 5)).outcome == "completed"
+        child_inputs = [event for event in await _events(owner_store, child_id.hex) if isinstance(event, InputQueued)]
+        root_inputs = [event for event in await _events(owner_store, root.id) if isinstance(event, InputQueued)]
+    finally:
+        owner_provider.hold.set()
+        if worker is not None:
+            await worker.aclose()
+        if worker_store is not None:
+            await worker_store.close()
+        await owner.aclose()
+        await owner_store.close()
+    assert (receipt.duplicate, again.duplicate) == (False, True)
+    assert result.outcome == "completed"
+    assert worker_provider.requests == []
+    assert owner_provider.inputs("child") == ["start", "[event sandbox] task finished"]
+    assert [
+        (event.input, event.origin, event.sender_id) for event in child_inputs if event.command_id == command.hex
+    ] == [("[event sandbox] task finished", "event", None)]
+    assert "event" not in [event.origin for event in root_inputs]
+
+
+class DroppedActivationRuntime(Runtime):
+    drop_target: str | None = None
+
+    def _activate(self, agent_id: str, root_id: str) -> None:
+        if self.drop_target == agent_id:
+            self.drop_target = None
+            return
+        super()._activate(agent_id, root_id)
+
+
+async def test_a_duplicate_deliver_through_the_coordinator_wakes_a_target_whose_activation_was_lost(
+    postgres_dsn: str, pg_schema: str
+) -> None:
+    provider = EventProvider()
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    owner = DroppedActivationRuntime(provider, store, [EventRoot], coordinator=_coordinator(store))
+    await owner.start()
+    try:
+        root_id = await owner.create(EventRoot)
+        root = await store.header(root_id.hex)
+        assert root is not None
+        async with owner._lock(root.id):
+            await owner._ensure_owner_locked(root.id)
+        child_public = await owner._actor_spawn(
+            root, EventRoot, _actor_context(store, root.id, "s1"), "event_child", "start"
+        )
+        child_id = UUID(child_public)
+        await _until_completed(store, child_id.hex)
+        command = uuid4()
+        async with owner.connect(root_id, writable=True) as connection:
+            await connection.send("hold", command_id=uuid4())
+
+            async def held() -> None:
+                while "hold" not in provider.inputs("root"):
+                    await asyncio.sleep(0.02)
+
+            await asyncio.wait_for(held(), 5)
+            owner.drop_target = child_id.hex
+            first = await owner.deliver(child_id, "done", command_id=command, source="sandbox")
+            await asyncio.sleep(0.2)
+            assert owner.drop_target is None
+            assert provider.inputs("child") == ["start"]
+            assert not any(
+                isinstance(event, TurnStarted) and event.turn_id == command.hex
+                for event in await _events(store, child_id.hex)
+            )
+            again = await owner.deliver(child_id, "done", command_id=command, source="sandbox")
+            result = await asyncio.wait_for(owner._wait_result(child_id.hex, command), 5)
+            provider.hold.set()
+    finally:
+        provider.hold.set()
+        await owner.aclose()
+        await store.close()
+    assert (first.duplicate, again.duplicate) == (False, True)
+    assert result.outcome == "completed"
+    assert provider.inputs("child") == ["start", "[event sandbox] done"]
+
+
+async def test_deliver_without_an_owner_makes_the_caller_own_and_run_the_turn(
+    postgres_dsn: str, pg_schema: str
+) -> None:
+    bare = PostgresStore(postgres_dsn, schema=pg_schema)
+    await bare.setup()
+    root, child, finished, turn = uuid4().hex, uuid4().hex, uuid4().hex, uuid4().hex
+    await bare.create(SessionHeader(id=root, root_id=root, agent="event_root", model="root"))
+    await bare.append(root, [SessionCreated(agent="event_root", root_id=root, model="root")])
+    for sid in (child, finished):
+        await bare.create(
+            SessionHeader(id=sid, root_id=root, parent_id=root, agent="event_child", depth=1, model="child")
+        )
+        await bare.append(
+            sid, [SessionCreated(agent="event_child", root_id=root, parent_id=root, depth=1, model="child")]
+        )
+    await bare.append(
+        finished,
+        [
+            InputQueued(command_id=turn, input="work", sender_id=root, origin="spawn"),
+            TurnStarted(turn_id=turn, input="work"),
+            TurnCompleted(turn_id=turn, stop_reason="finished", output="done"),
+            AgentFinished(result="done"),
+        ],
+    )
+    provider = EventProvider()
+    store, caller = await _event_runtime(postgres_dsn, pg_schema, provider)
+    command = uuid4()
+    try:
+        assert caller.coordinator is not None
+        assert await caller.coordinator.locate(root) is None
+        receipt = await caller.deliver(UUID(hex=child), "wake", command_id=command, source="timer")
+        result = await asyncio.wait_for(caller._wait_result(child, command), 5)
+        await _until_completed(store, root)
+        with pytest.raises(TantraError, match=f"agent {UUID(hex=finished)} is finished"):
+            await caller.deliver(UUID(hex=finished), "late", command_id=uuid4(), source="timer")
+        finished_inputs = [event for event in await _events(store, finished) if isinstance(event, InputQueued)]
+    finally:
+        await caller.aclose()
+        await store.close()
+        await bare.close()
+    assert receipt.duplicate is False
+    assert result.outcome == "completed"
+    assert provider.inputs("child") == ["[event timer] wake"]
+    assert provider.inputs("root") == [f"[agent {UUID(hex=child)} replied] child done"]
+    assert [event.input for event in finished_inputs] == ["work"]
+
+
+@pytest.mark.parametrize("descendants", [False, True])
+async def test_cancel_scope_through_the_coordinator_decides_a_queued_event(
+    postgres_dsn: str, pg_schema: str, descendants: bool
+) -> None:
+    class Provider(EchoProvider):
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.inputs: list[str] = []
+
+        async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+            self.inputs.append(req.messages[-1].content)
+            if len(self.inputs) == 1:
+                self.started.set()
+                await asyncio.Event().wait()
+            yield StreamEnd(text="ok")
+
+    provider = Provider()
+    store = PostgresStore(postgres_dsn, schema=pg_schema)
+    runtime = Runtime(provider, store, [Bot], default_model="m", coordinator=_coordinator(store))
+    await runtime.start()
+    try:
+        root_id = await runtime.create(Bot)
+        active, legacy, event = uuid4(), uuid4(), uuid4()
+        async with runtime._lock(root_id.hex):
+            await runtime._ensure_owner_locked(root_id.hex)
+        await runtime._enqueue(root_id.hex, InputQueued(command_id=active.hex, input="active", origin="user"))
+        await runtime._enqueue(root_id.hex, InputQueued(command_id=legacy.hex, input="legacy"))
+        runtime._activate(root_id.hex, root_id.hex)
+        await asyncio.wait_for(provider.started.wait(), 2)
+        await runtime.deliver(root_id, "done", command_id=event, source="sandbox")
+        async with runtime.connect(root_id, writable=True) as connection:
+            await connection.cancel(command_id=uuid4(), descendants=descendants)
+            results = [
+                await asyncio.wait_for(runtime._wait_result(root_id.hex, command), 5)
+                for command in (active, legacy, event)
+            ]
+    finally:
+        await runtime.aclose()
+        await store.close()
+    kept = not descendants
+    assert [result.outcome for result in results] == ["cancelled", "cancelled", "completed" if kept else "cancelled"]
+    assert provider.inputs == (["active", "[event sandbox] done"] if kept else ["active"])

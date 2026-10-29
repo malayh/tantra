@@ -48,7 +48,7 @@ class InputQueued(EventBase):
     input: str
     submitted_by: SubmittedBy | None = None
     sender_id: str | None = None
-    origin: Literal["user", "spawn", "message", "finished", "turn_ended"] | None = None
+    origin: Literal["user", "spawn", "message", "finished", "turn_ended", "event"] | None = None
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, InputQueued) and (self.origin is None) != (other.origin is None):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import multiprocessing
 import queue
 import time
@@ -34,11 +35,13 @@ from tantra.events import (
     CancellationRequested,
     InputQueued,
     SessionCreated,
+    ToolCallCompleted,
     TurnCancelled,
     TurnCompleted,
     TurnInterrupted,
     TurnStarted,
 )
+from tantra.hooks import Hook
 from tantra.providers.base import ModelLimits, ProviderEvent, SampleRequest, StreamEnd, ToolCall
 from tantra.providers.fake import FAKE_LIMITS, FakeProvider
 from tantra.runtime import _lifecycle_input
@@ -2082,9 +2085,11 @@ class EventProvider(EchoProvider):
         return [request.messages[-1].content for request in self.requests if request.model == model]
 
 
-async def _event_runtime(dsn: str, schema: str, provider: EventProvider) -> tuple[PostgresStore, Runtime]:
+async def _event_runtime(
+    dsn: str, schema: str, provider: EventProvider, hooks: tuple[Hook, ...] = ()
+) -> tuple[PostgresStore, Runtime]:
     store = PostgresStore(dsn, schema=schema)
-    runtime = Runtime(provider, store, [EventRoot], coordinator=_coordinator(store))
+    runtime = Runtime(provider, store, [EventRoot], coordinator=_coordinator(store), hooks=hooks)
     await runtime.start()
     return store, runtime
 
@@ -2307,3 +2312,178 @@ async def test_cancel_scope_through_the_coordinator_decides_a_queued_event(
     kept = not descendants
     assert [result.outcome for result in results] == ["cancelled", "cancelled", "completed" if kept else "cancelled"]
     assert provider.inputs == (["active", "[event sandbox] done"] if kept else ["active"])
+
+
+class CancelRecorder(Hook):
+    def __init__(self) -> None:
+        self.calls: list[tuple[UUID, list[UUID]]] = []
+        self.fail = False
+
+    async def on_cancel(self, root_id: UUID, agent_ids: list[UUID]) -> None:
+        self.calls.append((root_id, sorted(agent_ids)))
+        if self.fail:
+            raise RuntimeError("hook down")
+
+
+async def test_tree_cancel_through_the_coordinator_runs_on_cancel_on_the_caller_with_every_agent(
+    postgres_dsn: str, pg_schema: str
+) -> None:
+    owner_hook, worker_hook = CancelRecorder(), CancelRecorder()
+    owner_provider = EventProvider()
+    owner_store, owner = await _event_runtime(postgres_dsn, pg_schema, owner_provider, (owner_hook,))
+    worker_store: PostgresStore | None = None
+    worker: Runtime | None = None
+    try:
+        root_id = await owner.create(EventRoot)
+        root = await owner_store.header(root_id.hex)
+        assert root is not None
+        async with owner._lock(root.id):
+            await owner._ensure_owner_locked(root.id)
+        child_id = UUID(
+            await owner._actor_spawn(
+                root, EventRoot, _actor_context(owner_store, root.id, "s1"), "event_child", "start"
+            )
+        )
+        await _until_completed(owner_store, child_id.hex)
+        async with owner.connect(root_id, writable=True) as connection:
+            await connection.send("hold", command_id=uuid4())
+
+        async def held() -> None:
+            while "hold" not in owner_provider.inputs("root"):
+                await asyncio.sleep(0.02)
+
+        await asyncio.wait_for(held(), 5)
+        worker_store, worker = await _event_runtime(postgres_dsn, pg_schema, EventProvider(), (worker_hook,))
+        command = uuid4()
+        async with worker.connect(root_id, writable=True) as connection:
+            first = await connection.cancel(command_id=command)
+            assert root.id not in worker._ownerships
+            assert worker_hook.calls == [(root_id, sorted([root_id, child_id]))]
+            again = await connection.cancel(command_id=command)
+    finally:
+        owner_provider.hold.set()
+        if worker is not None:
+            await worker.aclose()
+        if worker_store is not None:
+            await worker_store.close()
+        await owner.aclose()
+        await owner_store.close()
+    assert (first.duplicate, again.duplicate) == (False, True)
+    assert worker_hook.calls == [worker_hook.calls[0]] * 2
+    assert owner_hook.calls == []
+
+
+async def test_on_cancel_through_the_coordinator_skips_root_only_cancel_and_a_reply_without_agent_ids(
+    postgres_dsn: str, pg_schema: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hook = CancelRecorder()
+    store, runtime = await _event_runtime(postgres_dsn, pg_schema, EventProvider(), (hook,))
+    try:
+        root_id = await runtime.create(EventRoot)
+        async with runtime.connect(root_id, writable=True) as connection:
+            await connection.cancel(command_id=uuid4(), descendants=False)
+            assert hook.calls == []
+            await connection.cancel(command_id=uuid4())
+            assert hook.calls == [(root_id, [root_id])]
+            request_command = runtime._request_command
+
+            async def without_agent_ids(*args: Any) -> dict[str, Any]:
+                result = await request_command(*args)
+                result.pop("agent_ids", None)
+                return result
+
+            monkeypatch.setattr(runtime, "_request_command", without_agent_ids)
+            receipt = await connection.cancel(command_id=uuid4())
+    finally:
+        await runtime.aclose()
+        await store.close()
+    assert receipt.duplicate is False
+    assert hook.calls == [(root_id, [root_id])]
+
+
+async def test_a_failing_on_cancel_through_the_coordinator_fails_the_cancel_and_a_retry_runs_it_again(
+    postgres_dsn: str, pg_schema: str
+) -> None:
+    hook = CancelRecorder()
+    hook.fail = True
+    store, runtime = await _event_runtime(postgres_dsn, pg_schema, EventProvider(), (hook,))
+    command = uuid4()
+    try:
+        root_id = await runtime.create(EventRoot)
+        async with runtime.connect(root_id, writable=True) as connection:
+            with pytest.raises(RuntimeError, match="hook down"):
+                await connection.cancel(command_id=command)
+            saved = [
+                event
+                for event in await _events(store, root_id.hex)
+                if isinstance(event, CancellationRequested) and event.command_id == command.hex
+            ]
+            hook.fail = False
+            again = await connection.cancel(command_id=command)
+    finally:
+        await runtime.aclose()
+        await store.close()
+    assert len(saved) == 1
+    assert again.duplicate is True
+    assert hook.calls == [(root_id, [root_id])] * 2
+
+
+class CancelAgentProvider(EventProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.target = ""
+
+    async def stream(self, req: SampleRequest) -> AsyncIterator[ProviderEvent]:
+        if req.messages[-1].content == "stop it":
+            yield StreamEnd(
+                tool_calls=[ToolCall(id="k1", name="cancel_agent", args=json.dumps({"agent_id": self.target}))]
+            )
+            return
+        async for event in super().stream(req):
+            yield event
+
+
+class DeliveringHook(Hook):
+    def __init__(self) -> None:
+        self.runtime: Runtime | None = None
+        self.delivered: list[UUID] = []
+
+    async def on_cancel(self, root_id: UUID, agent_ids: list[UUID]) -> None:
+        assert self.runtime is not None
+        command = uuid4()
+        await self.runtime.deliver(root_id, "stopped", command_id=command, source="sandbox")
+        self.delivered.append(command)
+
+
+async def test_on_cancel_hooks_that_deliver_through_the_coordinator_complete(postgres_dsn: str, pg_schema: str) -> None:
+    hook = DeliveringHook()
+    provider = CancelAgentProvider()
+    store, runtime = await _event_runtime(postgres_dsn, pg_schema, provider, (hook,))
+    hook.runtime = runtime
+    try:
+        root_id = await runtime.create(EventRoot)
+        root = await store.header(root_id.hex)
+        assert root is not None
+        async with runtime._lock(root.id):
+            await runtime._ensure_owner_locked(root.id)
+        provider.target = await runtime._actor_spawn(
+            root, EventRoot, _actor_context(store, root.id, "s1"), "event_child", "start"
+        )
+        await _until_completed(store, UUID(provider.target).hex)
+        async with runtime.connect(root_id, writable=True) as connection:
+            await asyncio.wait_for(connection.cancel(command_id=uuid4()), 5)
+            result = await asyncio.wait_for(connection.prompt("stop it", command_id=uuid4()), 5)
+            delivered = [
+                await asyncio.wait_for(runtime._wait_result(root.id, command), 5) for command in hook.delivered
+            ]
+        completed = next(
+            event
+            for event in await _events(store, root.id)
+            if isinstance(event, ToolCallCompleted) and event.call_id == "k1"
+        )
+    finally:
+        await runtime.aclose()
+        await store.close()
+    assert result.text == "root done"
+    assert not completed.is_error
+    assert [result.outcome for result in delivered] == ["completed", "completed"]

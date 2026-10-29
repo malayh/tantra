@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from tantra.context import TurnContext
 from tantra.events import LoggedEvent, SessionEvent, ToolCallRequested
@@ -46,3 +47,6 @@ class Hook:
 
     async def on_event(self, emitted: LoggedEvent) -> None:
         """Called for every emitted event."""
+
+    async def on_cancel(self, root_id: UUID, agent_ids: list[UUID]) -> None:
+        """Called after a tree cancel or `cancel_agent` is saved, with every agent it covers."""

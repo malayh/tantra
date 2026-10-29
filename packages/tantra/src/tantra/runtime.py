@@ -2056,7 +2056,12 @@ class Runtime:
                 async with self.coordinator.transaction(ownership) as store:
                     targets = await apply(store)
             self._cancel_local(targets, PARENT_CANCELLED)
+        await self._on_cancel(root_id, actors)
         return {"agent_id": str(child_uuid), "cancelled": bool(targets)}
+
+    async def _on_cancel(self, root_id: str, agent_ids: Sequence[str]) -> None:
+        for hook in self.hooks:
+            await hook.on_cancel(UUID(hex=root_id), [UUID(hex=agent_id) for agent_id in agent_ids])
 
     async def _child_status(self, header: SessionHeader, child_uuid: UUID) -> ActorStatus:
         child = await self._header(child_uuid.hex)
@@ -2507,6 +2512,8 @@ class Runtime:
                             else:
                                 after.append(lambda cancellation=cancellation: self._cancel_local(cancellation.targets))
                             result = {"command_id": str(payload.command_id), "duplicate": duplicate}
+                            if cancellation.descendants:
+                                result["agent_ids"] = [header.id for header in headers]
                         else:
                             raise TantraError(f"unsupported coordinator operation {request.operation!r}")
                     return CommandReply(request_id=request.request_id, result=result)
@@ -2854,6 +2861,9 @@ class Runtime:
                 CancelPayload(command_id=public_id, submitted_by=submitted_by, descendants=descendants),
                 connection._writer_token,
             )
+            agent_ids = result.get("agent_ids", [])
+            if agent_ids:
+                await self._on_cancel(connection._root, agent_ids)
             return CommandReceipt(public_id, bool(result["duplicate"]))
         async with self._lock(connection._root):
             self._check_writer(connection)
@@ -2937,7 +2947,10 @@ class Runtime:
                     task.cancel()
             if not event.descendants and (await self._operational(connection._root)).pending:
                 self._accepted_input(connection._root, connection._root)
-            return CommandReceipt(command_id=public_id, duplicate=duplicate)
+            agent_ids = [header.id for header in await self._tree_headers(connection._root)] if descendants else []
+        if agent_ids:
+            await self._on_cancel(connection._root, agent_ids)
+        return CommandReceipt(command_id=public_id, duplicate=duplicate)
 
     async def _wait_result(self, agent_id: str, command_id: UUID) -> TurnResult:
         root_id = self._known_roots.get(agent_id, agent_id)

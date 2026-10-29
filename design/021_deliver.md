@@ -177,7 +177,7 @@ class Hook:
   - The coordinator duplicate test keeps the root busy so the owner keeps ownership. Otherwise the duplicate re-acquires ownership and recovery starts the queued input by itself, which hides a missing re-activation.
   - `test_postgres_attribution.py::test_takeover_executes_accepted_unstarted_input_with_original_attribution` fails now and then in full runs under load, also on the code before this phase. It passes alone.
 
-### Phase 2 — `Hook.on_cancel` · deps: P1 · —
+### Phase 2 — `Hook.on_cancel` · deps: P1 · ✅ DONE
 
 - **Deliverables**
   - `hooks.py`: `on_cancel`, a no-op by default.
@@ -193,10 +193,14 @@ class Hook:
   - A hook that calls `runtime.deliver` on the same tree completes, on both paths.
   - A cancel reply without `agent_ids` doesn't call the hook.
 - **Checklist**
-  - [ ] hook method
-  - [ ] agent lists
-  - [ ] call sites and reply field
-  - [ ] tests
+  - [x] hook method
+  - [x] agent lists
+  - [x] call sites and reply field
+  - [x] tests
+- **Notes after landing**
+  - `Connection.cancel` runs inside `_shielded`. If the calling task is cancelled, the hook still runs to the end, and its error is dropped by `_consume`, as for every shielded command. `_actor_cancel` isn't shielded, so a cancelled parent turn also cancels its hook.
+  - The two-runtime test keeps the root busy so the owner keeps ownership. Otherwise the duplicate cancel can make the caller the owner. The hook runs on the caller either way.
+  - `test_postgres_runtime.py::test_tree_recovery_preserves_cancellation_targets_and_interrupts_only_started` fails now and then in full runs: it asserts ownership under a 0.12 s lease before any cancel. It passes alone.
 
 ### Phase 3 — ACP, client, docs, release · deps: P1, P2 · —
 

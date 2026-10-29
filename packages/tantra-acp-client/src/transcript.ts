@@ -51,6 +51,7 @@ export interface MessageEntry {
   text: string;
   finished: boolean;
   reply: boolean;
+  source: string | null;
 }
 
 export interface StatusEntry {
@@ -246,15 +247,19 @@ function progress(
   return upsert(view, { ...base, progress: [...base.progress, text] });
 }
 
-const message = (update: SessionMessage): MessageEntry => ({
-  kind: "message",
-  id: update.messageId,
-  sender: update.senderSessionId ?? null,
-  recipient: update.recipientSessionId ?? null,
-  text: textOf(update.content),
-  finished: tantraOf(update._meta)?.["finished"] === true,
-  reply: tantraOf(update._meta)?.["reply"] === true,
-});
+const message = (update: SessionMessage): MessageEntry => {
+  const source = tantraOf(update._meta)?.["source"];
+  return {
+    kind: "message",
+    id: update.messageId,
+    sender: update.senderSessionId ?? null,
+    recipient: update.recipientSessionId ?? null,
+    text: textOf(update.content),
+    finished: tantraOf(update._meta)?.["finished"] === true,
+    reply: tantraOf(update._meta)?.["reply"] === true,
+    source: typeof source === "string" ? source : null,
+  };
+};
 
 function state(view: SessionView, update: StateUpdate): SessionView {
   const next: ViewState = { state: update.state };

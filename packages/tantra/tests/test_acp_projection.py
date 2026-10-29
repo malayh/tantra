@@ -54,7 +54,7 @@ from tantra.events import (
 )
 from tantra.providers.base import ToolCall
 from tantra.providers.fake import Sample
-from tantra.runtime import _lifecycle_input
+from tantra.runtime import _event_input, _lifecycle_input
 from tantra.stores.memory import MemoryStore
 
 ROOT = uuid4()
@@ -753,6 +753,23 @@ def test_queue_entries_follow_the_input_origin() -> None:
     ]
     changes = [output for output in profiled(events) if isinstance(output, QueueChanged)]
     assert changes == [QueueChanged([{"commandId": message_id(first), "content": [text("from a human")]}])]
+
+
+def test_event_inputs_become_sender_less_session_messages_and_never_queue() -> None:
+    body = "task 3f2a finished, exit 0\n[event x] tail"
+    event = _event_input(TURN, body, "sandbox")
+    for actor, parent in ((ROOT, None), (CHILD, ROOT)):
+        outputs = profiled([event, *turn(input=event.input)], actor=actor, parent=parent)
+        assert not [output for output in outputs if isinstance(output, QueueChanged)]
+        assert updates(outputs)[0] == {
+            "sessionUpdate": "session_message",
+            "messageId": message_id(TURN),
+            "recipientSessionId": str(actor),
+            "content": [text(body)],
+            "_meta": {"tantra": {"source": "sandbox"}},
+        }
+    spoof = updates(profiled([queued(event.input, "user"), *turn(input=event.input)]))
+    assert spoof[0] == {"sessionUpdate": "user_message", "messageId": message_id(TURN), "content": [text(event.input)]}
 
 
 async def _until(condition: Any) -> None:

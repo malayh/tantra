@@ -97,6 +97,8 @@ test("replay from start reduces to the live transcript", () => {
       "agent",
       "message",
       "agent",
+      "message",
+      "agent",
       "user",
       "agent",
       "status",
@@ -115,6 +117,18 @@ test("replay from start reduces to the live transcript", () => {
   assert.deepEqual(
     [survey.toolKind, survey.rawInput, survey.rawOutput, survey.progress],
     ["other", {}, "Ada:blue", ["Collecting answers"]],
+  );
+  assert.deepEqual(
+    entries
+      .filter((entry) => entry.kind === "message")
+      .map(({ sender, source }) => [sender, source]),
+    [
+      [ROOT, null],
+      [CHILD, null],
+      [ROOT, null],
+      [CHILD, null],
+      [null, "sandbox"],
+    ],
   );
   assert.deepEqual(
     [entries.at(-2).text, entries.at(-2).final],
@@ -285,6 +299,35 @@ test("subagent messages flow both ways and an idle child wakes again", () => {
     [CHILD, ROOT, "The answer is 42.", true],
   ]);
   assert.deepEqual(descendants(t, ROOT), [CHILD]);
+});
+
+test("an event message carries its source and no sender", () => {
+  const event = {
+    sessionUpdate: "session_message",
+    messageId: "e",
+    recipientSessionId: "s",
+    content: [{ type: "text", text: "task done" }],
+    _meta: { tantra: { source: "sandbox" } },
+  };
+  const t = apply(empty(), "s", event);
+  assert.deepEqual(t.sessions.s.entries, [
+    {
+      kind: "message",
+      id: "e",
+      sender: null,
+      recipient: "s",
+      text: "task done",
+      finished: false,
+      reply: false,
+      source: "sandbox",
+    },
+  ]);
+  assert.equal(apply(t, "s", clone(event)), t);
+  const plain = apply(empty(), "s", {
+    ...event,
+    _meta: { tantra: { source: 1 } },
+  });
+  assert.equal(plain.sessions.s.entries[0].source, null);
 });
 
 test("only cursored idle stops add a status entry", () => {

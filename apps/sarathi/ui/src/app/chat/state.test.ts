@@ -278,7 +278,7 @@ test("the golden session reduces end to end through the store", () => {
   }
   assert.deepEqual(
     view.entries.filter((entry) => entry.kind === "message").map((entry) => entry.kind === "message" && entry.reply),
-    [false, true, false, true],
+    [false, true, false, true, false],
   );
   assert.equal(actorStatusLabel(transcript.roster[CHILD].state), "Replied");
   assert.equal(actorStatusLabel(view.state), "Cancelled");

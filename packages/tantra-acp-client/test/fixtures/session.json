@@ -909,37 +909,21 @@
     {
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
-        "sessionUpdate": "_tantra_queue_update",
-        "entries": [
-          {
-            "commandId": "00000000-0000-4000-8000-000000000017",
-            "content": [
-              {
-                "type": "text",
-                "text": "Start a long task."
-              }
-            ],
-            "submittedBy": "user"
+        "_meta": {
+          "tantra": {
+            "source": "sandbox",
+            "cursor": "74.0"
           }
-        ]
-      }
-    },
-    {
-      "sessionId": "00000000-0000-4000-8000-000000000001",
-      "update": {
-        "sessionUpdate": "user_message",
+        },
+        "sessionUpdate": "session_message",
         "messageId": "00000000-0000-4000-8000-000000000017",
+        "recipientSessionId": "00000000-0000-4000-8000-000000000001",
         "content": [
           {
             "type": "text",
-            "text": "Start a long task."
+            "text": "Task finished."
           }
-        ],
-        "_meta": {
-          "tantra": {
-            "cursor": "74.0"
-          }
-        }
+        ]
       }
     },
     {
@@ -957,8 +941,17 @@
     {
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
-        "sessionUpdate": "_tantra_queue_update",
-        "entries": []
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000018",
+        "content": {
+          "type": "text",
+          "text": "Noted "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "76.0"
+          }
+        }
       }
     },
     {
@@ -968,11 +961,142 @@
         "messageId": "00000000-0000-4000-8000-000000000018",
         "content": {
           "type": "text",
+          "text": "the "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "77.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000018",
+        "content": {
+          "type": "text",
+          "text": "event."
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "78.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message",
+        "messageId": "00000000-0000-4000-8000-000000000018",
+        "content": [
+          {
+            "type": "text",
+            "text": "Noted the event."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "79.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "80.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "idle",
+        "stopReason": "end_turn",
+        "_meta": {
+          "tantra": {
+            "cursor": "81.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "_tantra_queue_update",
+        "entries": [
+          {
+            "commandId": "00000000-0000-4000-8000-000000000019",
+            "content": [
+              {
+                "type": "text",
+                "text": "Start a long task."
+              }
+            ],
+            "submittedBy": "user"
+          }
+        ]
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "user_message",
+        "messageId": "00000000-0000-4000-8000-000000000019",
+        "content": [
+          {
+            "type": "text",
+            "text": "Start a long task."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "83.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "running",
+        "_meta": {
+          "tantra": {
+            "cursor": "83.1"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "_tantra_queue_update",
+        "entries": []
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000020",
+        "content": {
+          "type": "text",
           "text": "Working "
         },
         "_meta": {
           "tantra": {
-            "cursor": "76.0"
+            "cursor": "85.0"
           }
         }
       }
@@ -985,7 +1109,7 @@
         "stopReason": "cancelled",
         "_meta": {
           "tantra": {
-            "cursor": "78.0"
+            "cursor": "87.0"
           }
         }
       }
@@ -1899,19 +2023,21 @@
     {
       "sessionId": "00000000-0000-4000-8000-000000000001",
       "update": {
-        "sessionUpdate": "user_message",
+        "_meta": {
+          "tantra": {
+            "source": "sandbox",
+            "cursor": "74.0"
+          }
+        },
+        "sessionUpdate": "session_message",
         "messageId": "00000000-0000-4000-8000-000000000017",
+        "recipientSessionId": "00000000-0000-4000-8000-000000000001",
         "content": [
           {
             "type": "text",
-            "text": "Start a long task."
+            "text": "Task finished."
           }
-        ],
-        "_meta": {
-          "tantra": {
-            "cursor": "74.0"
-          }
-        }
+        ]
       }
     },
     {
@@ -1933,11 +2059,133 @@
         "messageId": "00000000-0000-4000-8000-000000000018",
         "content": {
           "type": "text",
-          "text": "Working "
+          "text": "Noted "
         },
         "_meta": {
           "tantra": {
             "cursor": "76.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000018",
+        "content": {
+          "type": "text",
+          "text": "the "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "77.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000018",
+        "content": {
+          "type": "text",
+          "text": "event."
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "78.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message",
+        "messageId": "00000000-0000-4000-8000-000000000018",
+        "content": [
+          {
+            "type": "text",
+            "text": "Noted the event."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "79.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "usage_update",
+        "used": 0,
+        "size": 1000000,
+        "_meta": {
+          "tantra": {
+            "cursor": "80.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "idle",
+        "stopReason": "end_turn",
+        "_meta": {
+          "tantra": {
+            "cursor": "81.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "user_message",
+        "messageId": "00000000-0000-4000-8000-000000000019",
+        "content": [
+          {
+            "type": "text",
+            "text": "Start a long task."
+          }
+        ],
+        "_meta": {
+          "tantra": {
+            "cursor": "83.0"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "state_update",
+        "state": "running",
+        "_meta": {
+          "tantra": {
+            "cursor": "83.1"
+          }
+        }
+      }
+    },
+    {
+      "sessionId": "00000000-0000-4000-8000-000000000001",
+      "update": {
+        "sessionUpdate": "agent_message_chunk",
+        "messageId": "00000000-0000-4000-8000-000000000020",
+        "content": {
+          "type": "text",
+          "text": "Working "
+        },
+        "_meta": {
+          "tantra": {
+            "cursor": "85.0"
           }
         }
       }
@@ -1950,7 +2198,7 @@
         "stopReason": "cancelled",
         "_meta": {
           "tantra": {
-            "cursor": "78.0"
+            "cursor": "87.0"
           }
         }
       }
@@ -2341,19 +2589,21 @@
       {
         "sessionId": "00000000-0000-4000-8000-000000000001",
         "update": {
-          "sessionUpdate": "user_message",
+          "_meta": {
+            "tantra": {
+              "source": "sandbox",
+              "cursor": "74.0"
+            }
+          },
+          "sessionUpdate": "session_message",
           "messageId": "00000000-0000-4000-8000-000000000017",
+          "recipientSessionId": "00000000-0000-4000-8000-000000000001",
           "content": [
             {
               "type": "text",
-              "text": "Start a long task."
+              "text": "Task finished."
             }
-          ],
-          "_meta": {
-            "tantra": {
-              "cursor": "74.0"
-            }
-          }
+          ]
         }
       },
       {
@@ -2375,11 +2625,133 @@
           "messageId": "00000000-0000-4000-8000-000000000018",
           "content": {
             "type": "text",
-            "text": "Working "
+            "text": "Noted "
           },
           "_meta": {
             "tantra": {
               "cursor": "76.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "00000000-0000-4000-8000-000000000018",
+          "content": {
+            "type": "text",
+            "text": "the "
+          },
+          "_meta": {
+            "tantra": {
+              "cursor": "77.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "00000000-0000-4000-8000-000000000018",
+          "content": {
+            "type": "text",
+            "text": "event."
+          },
+          "_meta": {
+            "tantra": {
+              "cursor": "78.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message",
+          "messageId": "00000000-0000-4000-8000-000000000018",
+          "content": [
+            {
+              "type": "text",
+              "text": "Noted the event."
+            }
+          ],
+          "_meta": {
+            "tantra": {
+              "cursor": "79.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "usage_update",
+          "used": 0,
+          "size": 1000000,
+          "_meta": {
+            "tantra": {
+              "cursor": "80.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "state_update",
+          "state": "idle",
+          "stopReason": "end_turn",
+          "_meta": {
+            "tantra": {
+              "cursor": "81.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "user_message",
+          "messageId": "00000000-0000-4000-8000-000000000019",
+          "content": [
+            {
+              "type": "text",
+              "text": "Start a long task."
+            }
+          ],
+          "_meta": {
+            "tantra": {
+              "cursor": "83.0"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "state_update",
+          "state": "running",
+          "_meta": {
+            "tantra": {
+              "cursor": "83.1"
+            }
+          }
+        }
+      },
+      {
+        "sessionId": "00000000-0000-4000-8000-000000000001",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "messageId": "00000000-0000-4000-8000-000000000020",
+          "content": {
+            "type": "text",
+            "text": "Working "
+          },
+          "_meta": {
+            "tantra": {
+              "cursor": "85.0"
             }
           }
         }
@@ -2392,7 +2764,7 @@
           "stopReason": "cancelled",
           "_meta": {
             "tantra": {
-              "cursor": "78.0"
+              "cursor": "87.0"
             }
           }
         }

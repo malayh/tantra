@@ -7,6 +7,7 @@ import re
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid4
 
 from acp_support import Client, Scripted, cursor_of
 
@@ -165,7 +166,7 @@ async def test_the_transcript_fixture_matches_a_scripted_session() -> None:
         scout=[Sample(text="First pass done."), Sample(text="The answer is 42.")],
     )
     first, second, wake = provider.gate("scout", 0), provider.gate("scout", 1), provider.gate("lead", 4)
-    provider.stalls.add(("lead", 7))
+    provider.stalls.add(("lead", 8))
     runtime = Runtime(provider, MemoryStore(), [Lead])
     server = AcpServer(runtime, agent=Lead, scope=scope, policy=allow, name="transcript")
     mirror: list[dict[str, Any]] = []
@@ -181,6 +182,7 @@ async def test_the_transcript_fixture_matches_a_scripted_session() -> None:
             Sample(tool_calls=calls("c4", "send", agent_id=spawned["sessionId"], input="Look again.")),
             Sample(text="Sent it."),
             Sample(text="The scout replied."),
+            Sample(text="Noted the event."),
             Sample(text="Working on it."),
         )
         first.set()
@@ -189,12 +191,14 @@ async def test_the_transcript_fixture_matches_a_scripted_session() -> None:
         await checkpoint(live, root, mirror, idle(2), RUNNING)
         second.set()
         await checkpoint(live, root, mirror, idle(3), END_TURN)
+        await runtime.deliver(UUID(root), "Task finished.", command_id=uuid4(), source="sandbox")
+        await live.until(lambda: idle(4)(states(live, root)))
         await live.prompt(root, "Start a long task.")
         await live.until(
             lambda: [u for u in live.of(root, "agent_message_chunk") if u["content"]["text"] == "Working "]
         )
         await live.notify("session/cancel", {"sessionId": root})
-        await live.until(lambda: idle(4)(states(live, root)))
+        await live.until(lambda: idle(5)(states(live, root)))
     stream = [params for params in live.updates if not mirrored(params["update"])]
     cut = cursor_of(spawned)
     start = await replay(server, root, {"type": "start"})

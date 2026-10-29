@@ -58,7 +58,7 @@ const client = new TantraAcpClient({
 });
 ```
 
-- Entries are `user`, `agent`, `thought`, `tool`, `message` (subagent traffic) and `status` (a cursored `idle` that was cancelled, interrupted or failed).
+- Entries are `user`, `agent`, `thought`, `tool`, `message` (subagent traffic and `Runtime.deliver` events, with `sender`, `recipient`, `text`, `reply`, `finished`, and `source` from `_meta.tantra.source`, else `null`) and `status` (a cursored `idle` that was cancelled, interrupted or failed).
 - `askOf(request)` gives `{kind: "approval" | "choice" | "free_text", askId, title, body, options, respond}`.
 - `reset`, `descendants`, `treeRunning` and `pendingRequest` cover reopening a session, the subagent tree and the next ask.
 

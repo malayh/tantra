@@ -98,6 +98,7 @@ Error messages are fixed strings and never carry exception details. If a session
 |---|---|
 | `TurnStarted`, user input | `user_message {messageId: command UUID, content: decode_input(input)}`, then `state_update running` |
 | `TurnStarted`, agent input | An incoming `session_message` for an input whose `origin` is `message` (`[agent X] …`), `turn_ended` with a reply (`[agent X replied] …`, with `_meta.tantra.reply`), `finished` (`[agent X finished] …`, with `_meta.tantra.finished`, journals written before 3.0) or `spawn` (a child's spawn input); nothing for a status-only `turn_ended` notice. Then `state_update running`. The sender `X` must be the session's parent or one of its children; anything else, and every `origin: "user"` input, is an ordinary `user_message`. Inputs from a child hidden by `view` produce nothing and never enter the queue; they keep their output index, so cursors do not shift. Inputs without `origin`, from older journals, are classified by their prefixes under the same sender rule. |
+| `TurnStarted`, event input | An incoming `session_message` for an input whose `origin` is `event` (from `Runtime.deliver`), with no `senderSessionId`, the session as `recipientSessionId`, the text after the `[event <source>] ` prefix, and `_meta.tantra.source`. Then `state_update running`. Event inputs never enter the queue. Since 3.1.0. |
 | `TextDelta`, `ReasoningDelta` | `agent_message_chunk`, `agent_thought_chunk` with the sample UUID as `messageId` |
 | `TextPart`, `ReasoningPart` | `agent_message` / `agent_thought` upserts that replace the chunks |
 | `ToolCallRequested`, `ToolCallStarted`, `ToolProgress`, `ToolCallCompleted` | `tool_call_update` (`pending`, `in_progress`, `completed` or `failed` with `rawInput` / `rawOutput`) and `tool_call_content_chunk`. `toolCallId = uuid5(session, "<sample>:<call_id>")`. Call IDs are unique within a session: the turn engine rewrites a colliding provider ID to a deterministic `call_<24 hex>` before journaling (see [Providers](/tantra/docs/reference/providers/)). |
@@ -119,7 +120,7 @@ Pending asks are sent only to the writer: an approval becomes `session/request_p
 
 ## `tantra` profile
 
-A client opts in by sending `"_meta": {"tantra": {"version": 1}}` in `initialize.params.capabilities`; the agent always advertises the same value. Profile-only output (`_tantra_writer`, `_tantra_queue_update`, `_tantra_notice`, `_meta.tantra.cursor`) goes only to profile clients. The `_tantra_finished` / `_tantra_interrupted` stop reasons and `_meta.tantra.ask` / `reply` / `finished` go to every client. Without the profile, `commandId` and `mode` are ignored, `_tantra_after` is rejected with `-32602`, and `_tantra/session/claim_writer` answers `-32601`.
+A client opts in by sending `"_meta": {"tantra": {"version": 1}}` in `initialize.params.capabilities`; the agent always advertises the same value. Profile-only output (`_tantra_writer`, `_tantra_queue_update`, `_tantra_notice`, `_meta.tantra.cursor`) goes only to profile clients. The `_tantra_finished` / `_tantra_interrupted` stop reasons and `_meta.tantra.ask` / `reply` / `finished` / `source` go to every client. Without the profile, `commandId` and `mode` are ignored, `_tantra_after` is rejected with `-32602`, and `_tantra/session/claim_writer` answers `-32601`.
 
 | Feature | Wire | Semantics |
 |---|---|---|
@@ -274,7 +275,7 @@ Errors carry `rpcCode`, `sessionId` and `commandId` when known. `crypto.randomUU
   - `user`: the raw content blocks.
   - `agent` / `thought`: chunks append to `text`; the full message replaces it and sets `final`. Thought blocks are joined by a blank line.
   - `tool`: fields merged (the ACP `kind` is `toolKind`). Content chunks before `completed`/`failed` go to `progress`; `rawOutput` is the result.
-  - `message`: a `session_message` with `sender`, `recipient`, `text`, `reply` (`_meta.tantra.reply`, since 2.1.0) and `finished`.
+  - `message`: a `session_message` with `sender` (`null` for an event), `recipient`, `text`, `reply` (`_meta.tantra.reply`, since 2.1.0), `finished` and `source` (`_meta.tantra.source`, else `null`, since 2.2.0).
   - `status`: a **cursored** `state_update idle` with `cancelled`, `_tantra_interrupted` or `error`, keyed by its cursor. The uncursored resume snapshot adds none.
 - **Roster:** `{parentId, title, state}` per child id, where `parentId` is the session the `subagent_update` arrived on; missing fields are kept.
 - `usage_update`, compaction updates, `_tantra_notice` and unknown kinds change nothing.

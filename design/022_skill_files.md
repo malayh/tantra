@@ -133,7 +133,7 @@ class Skills(Protocol):
   - Checked against the real `~/.claude/skills` (symlinked skill folders): 14 skills, a 335-line root listing, sibling reads, and escapes refused.
   - Postgres tests skip without a DSN (311). This phase doesn't touch stores.
 
-### Phase 2 — Docs, changelog, 4.0.0 · deps: P1 · —
+### Phase 2 — Docs, changelog, 4.0.0 · deps: P1 · CODE DONE, release pending owner approval
 
 - **Deliverables**
   - Docs in `website/src/content/docs/docs/`:
@@ -141,9 +141,8 @@ class Skills(Protocol):
     - `guides/skills.md`: `skill_file`, writing cross-references between skills, and what a custom `Skills` backend must implement.
     - `concepts/architecture.md:32`: mention files read on demand with `skill_file`.
   - `packages/tantra/CHANGELOG.md` 4.0.0:
-    - Breaking: `Skills.read` is required; `skill_file` is a reserved tool name.
-    - Added: `skill_file`, `FileSystemSkills.read`.
-    - Changed: `load`'s file list includes symlinked subfolders; the skills guidance text.
+    - Changed: `skill_file` is a reserved tool name; the skills guidance text; `load`'s file list includes symlinked subfolders. ~~Breaking:~~ the 2.0.0 and 3.0.0 entries put breaking changes under `Changed:`.
+    - Added: `skill_file`, `Skills.read` (required), `FileSystemSkills.read`.
     - Compatibility: journals load unchanged with no migration; custom `Skills` backends must add `read`.
   - Versions: `packages/tantra/pyproject.toml` 4.0.0 and the `tantra-harness` entry in `uv.lock` (`uv.lock:1454`). Publish after the owner approves.
 - **Verify**
@@ -151,10 +150,13 @@ class Skills(Protocol):
   - No doc still says `skill` is the only skills tool: `grep -rn "skill tool" website/src/content/docs`.
   - `just lint` and `just test` pass.
 - **Checklist**
-  - [ ] docs
-  - [ ] changelog
-  - [ ] versions
+  - [x] docs
+  - [x] changelog
+  - [x] versions
   - [ ] release
+- **Notes after landing**
+  - Added beyond the list, by the repo's convention for a major: `guides/migration-4.0.md`, its sidebar entry in `website/astro.config.mjs`, and a 4.0 line in `docs/index.md`. Also corrected now-inaccurate lines in `reference/compaction.md`, `guides/compaction.md`, `reference/tools.md` and `reference/agent.md`.
+  - The changelog and guide call out two upgrade breaks found in review: a child agent whose rules resolve `skill_file` to `ask` fails Runtime construction (`runtime.py:406-412`), and `Agent.skills` no longer hides other skills' contents.
 
 ### Conventions (all phases)
 
@@ -174,11 +176,13 @@ class Skills(Protocol):
 
 - **Dotfiles in listings.** Default: listed, as `_files` lists them today. A skill folder that is a git checkout lists `.git/`, up to the cap.
 - **An empty folder.** Default: an empty string.
+- **Follow-up: real folders should win over symlink aliases in listings.** The shared real-path guard keeps the first path in sorted walk order, so with `adocs -> docs`, `load` lists `adocs/x.md` where 3.x listed `docs/x.md`. Fix: walk without following links first to claim real folders, then follow links only to folders not yet claimed. This is P1 code, so it wasn't done in P2.
 
 ## Risks
 
 - **Custom `Skills` backends break on upgrade.** Without `read`, every `skill_file` call is a tool error. The changelog names it as breaking.
 - **An agent tool already named `skill_file`** fails `Runtime` construction after the upgrade.
+- **A child agent whose rules resolve `skill_file` to `ask`** (`"*": "ask"` granting only `skill`, or `"*_file": "ask"`) fails `Runtime` construction after the upgrade.
 - **A symlink under the root that points outside it is readable.** That is the operator's layout, by design. A downloaded skill that ships such a link exposes its target.
 - **Large catalogues.** A root listing of a big catalogue stops at the cap, and each `skill_file` call re-scans every `SKILL.md`.
 - **`load` now follows symlinked subfolders.** A skill that ships `docs -> /` makes every `load` and folder read walk that tree synchronously, before the cap applies.

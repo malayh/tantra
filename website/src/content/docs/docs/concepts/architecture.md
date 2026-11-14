@@ -29,6 +29,6 @@ Model guidance has four layers:
 1. The application behavior prompt comes from `Agent.prompt` and remains the first system block.
 2. The execution environment is one final system block assembled from active capabilities, such as available skill names and child lifecycle semantics. It is omitted when no guidance applies.
 3. Tool schemas and descriptions define tool arguments and ordinary usage.
-4. Skill bodies provide detailed instructions only after the model loads them on demand with the skill tool.
+4. Skill bodies provide detailed instructions only after the model loads them on demand with the skill tool. Files they refer to are read on demand with `skill_file`.
 
 The execution-environment layer is rebuilt from active framework capabilities for each sample. Compaction may replace only journal-derived history; application prompts, this environment block, and tool schemas are preserved exactly.

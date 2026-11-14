@@ -13,7 +13,7 @@ title: Agent
 | `tools` | `[]` | `Tool` objects |
 | `subagents` | `[]` | Child declarations available to `spawn` |
 | `permissions` | `{}` | Name or glob rules |
-| `skills` | `None` | All, selected, or no skills |
+| `skills` | `None` | All, selected, or no skills. A list limits the index and `skill`, not `skill_file` reads |
 | `max_steps` | implementation default | Sample limit per turn |
 | `output_schema` | `None` | Pydantic terminal-output schema |
 

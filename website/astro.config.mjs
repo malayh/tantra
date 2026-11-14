@@ -85,6 +85,7 @@ export default defineConfig({
         {
           label: "Upgrading",
           items: [
+            { label: "Migrate to 4.0", slug: "docs/guides/migration-4.0" },
             { label: "Migrate to 3.0", slug: "docs/guides/migration-3.0" },
             { label: "Migrate to 2.0", slug: "docs/guides/migration-2.0" },
             { label: "Migrate to 1.4", slug: "docs/guides/migration-1.4" },

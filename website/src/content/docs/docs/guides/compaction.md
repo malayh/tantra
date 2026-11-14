@@ -34,7 +34,7 @@ A request exactly at the threshold compacts. `OpenAICompatible` resolves limits 
 
 ## What is preserved
 
-`PruneThenSummarize` first replaces large, regenerable tool results with durable stubs. Skill output is not pruned. It then summarizes the evicted prefix while retaining a recent window capped by `recent_tokens`, preferring whole turns and valid tool-call/result pairs. A later summary includes the previous summary, so repeated compaction carries critical context forward.
+`PruneThenSummarize` first replaces large, regenerable tool results with durable stubs. `skill` output is never pruned; `skill_file` results prune like other tool results. It then summarizes the evicted prefix while retaining a recent window capped by `recent_tokens`, preferring whole turns and valid tool-call/result pairs. A later summary includes the previous summary, so repeated compaction carries critical context forward.
 
 The journal stays append-only. `CompactionApplied` records the summary, estimated sizes, and retained floor in the actor's journal; old events are not deleted or rewritten. Request assembly selects the latest summary plus the retained suffix. The application prompt, execution-environment block, and tool schemas remain byte-identical across the rebuild.
 

@@ -1,5 +1,27 @@
 # Changelog
 
+## 4.0.0
+
+Changed:
+
+- `skill_file` is a reserved tool name for agents with skills. An agent tool with that name fails Runtime construction.
+- The skills guidance tells the model to read files a loaded skill refers to with `skill_file`. The system prompt changes once for agents with skills.
+- `FileSystemSkills.load` lists files under symlinked subfolders. A folder reached by two paths is listed once, under the first in sorted walk order, so a 3.x path such as `docs/x.md` can appear as `adocs/x.md` when `adocs -> docs`.
+
+Added:
+
+- `skill_file(skill, path)`, a framework tool for agents with skills. It reads one file, or lists one folder, in the catalogue. `path` is relative to the named skill's folder, so `../other-skill/x.md` reaches a sibling skill. A folder returns every file under it, sorted, one path per line, each usable as `path` with the same skill. Any skill can be named, whatever `Agent.skills` allows. Results over 64 000 characters end with `[truncated at 64000 chars]`. Compaction prunes its results and still never prunes `skill` output. See the [Skills reference](https://malayh.github.io/tantra/docs/reference/skills/).
+- `Skills.read(name, path)`, required. It resolves `path` as text inside the catalogue, never through storage, and raises `TantraError` for an unknown skill, an absolute path or one above the root, nothing at the path, or a file that isn't UTF-8.
+- `FileSystemSkills.read`. It follows symlinks under its root, so symlinked skill folders work and a symlink pointing outside the root is readable. A file it can't read raises `TantraError` naming the agent's path.
+
+Compatibility and upgrade:
+
+- Custom `Skills` backends must add `read`. Without it, every `skill_file` call is a tool error.
+- Both skills tools declare `allow`, but any matching agent rule wins (`"*"`, `"*_file"`, …). Grant `"skill_file": "allow"` wherever `skill` is granted. On a child agent, an `ask` verdict for `skill_file` fails Runtime construction, so a child with `{"*": "ask", "send": "allow", "skill": "allow"}` that worked in 3.x now raises `TantraError`.
+- `Agent.skills` no longer hides other skills' contents: `skill_file` reads any file in the catalogue, `SKILL.md` included. Use `skills = []` to hide the catalogue from an agent.
+- Virtual paths are POSIX. `\` isn't a separator, so on Windows `FileSystemSkills` can't keep `..\` paths inside its root.
+- Journals written by 3.x load unchanged and need no migration. See the [4.0 upgrade guide](https://malayh.github.io/tantra/docs/guides/migration-4.0/).
+
 ## 3.1.0
 
 Added:

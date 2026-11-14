@@ -133,7 +133,7 @@ class Skills(Protocol):
   - Checked against the real `~/.claude/skills` (symlinked skill folders): 14 skills, a 335-line root listing, sibling reads, and escapes refused.
   - Postgres tests skip without a DSN (311). This phase doesn't touch stores.
 
-### Phase 2 — Docs, changelog, 4.0.0 · deps: P1 · CODE DONE, release pending owner approval
+### Phase 2 — Docs, changelog, 4.0.0 · deps: P1 · ✅ DONE, owner cuts the `tantra-v4.0.0` tag
 
 - **Deliverables**
   - Docs in `website/src/content/docs/docs/`:
@@ -153,7 +153,7 @@ class Skills(Protocol):
   - [x] docs
   - [x] changelog
   - [x] versions
-  - [ ] release
+  - [x] release: pushed to `main`; the owner pushes the `tantra-v4.0.0` tag, which runs `publish.yml`
 - **Notes after landing**
   - Added beyond the list, by the repo's convention for a major: `guides/migration-4.0.md`, its sidebar entry in `website/astro.config.mjs`, and a 4.0 line in `docs/index.md`. Also corrected now-inaccurate lines in `reference/compaction.md`, `guides/compaction.md`, `reference/tools.md` and `reference/agent.md`.
   - The changelog and guide call out two upgrade breaks found in review: a child agent whose rules resolve `skill_file` to `ask` fails Runtime construction (`runtime.py:406-412`), and `Agent.skills` no longer hides other skills' contents.

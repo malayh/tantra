@@ -18,7 +18,7 @@ Tantra 4.0 adds the `skill_file` tool, so agents read any file in the skills cat
 - `skill_file` is a reserved tool name. An agent with skills that declares its own `skill_file` fails Runtime construction.
 - Both skills tools declare `allow`, but any matching agent rule wins (`"*"`, `"*_file"`, …). Grant `"skill_file": "allow"` wherever `skill` is granted. On a child agent, an `ask` verdict for `skill_file` fails Runtime construction, so a child with `{"*": "ask", "send": "allow", "skill": "allow"}` that worked in 3.x now raises `TantraError`.
 - `Agent.skills` no longer hides other skills' contents: `skill_file` reads any file in the catalogue, `SKILL.md` included. Use `skills = []` to hide the catalogue from an agent.
-- `FileSystemSkills.load` now lists files under symlinked subfolders. A folder reached by two paths is listed once, under the first in sorted walk order, so a 3.x path such as `docs/x.md` can appear as `adocs/x.md` when `adocs -> docs`.
+- `FileSystemSkills.load` now lists files under symlinked subfolders. A folder reached by two paths is listed once, under its real path when the listing reaches it, otherwise under the first link in sorted order.
 - `FileSystemSkills` follows symlinks under its root, so a symlink that points outside the root is readable. Check downloaded skills for such links. `load` and folder listings walk symlinked folders synchronously, so a link to a large tree stalls them.
 - Virtual paths are POSIX. `\` isn't a separator, so on Windows `FileSystemSkills` can't keep `..\` paths inside its root.
 

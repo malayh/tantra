@@ -444,6 +444,47 @@ async def test_a_symlinked_subfolder_appears_in_read_listings_and_load_files(roo
     assert await skills.read("cold-email", "shared/tone.md") == "Plain words.\n"
 
 
+async def test_a_real_folder_is_listed_under_its_own_name_not_a_symlink_alias(root: Path) -> None:
+    write(root / "cold-email" / "docs" / "x.md", "X.\n")
+    (root / "cold-email" / "adocs").symlink_to("docs")
+    skills = FileSystemSkills(root)
+
+    assert (await skills.load("cold-email")).files == ("docs/x.md", "references/frameworks.md")
+    assert await skills.read("cold-email", ".") == "SKILL.md\ndocs/x.md\nreferences/frameworks.md"
+    assert await skills.read("cold-email", "adocs/x.md") == "X.\n"
+
+
+async def test_a_link_into_a_sibling_skill_lists_under_the_siblings_path_when_the_listing_reaches_it(
+    root: Path,
+) -> None:
+    (root / "cold-email" / "tooutreach").symlink_to("../outreach")
+    skills = FileSystemSkills(root)
+
+    assert (await skills.read("cold-email", "..")).split("\n") == [
+        "../outreach/SKILL.md",
+        "../seo/SKILL.md",
+        "SKILL.md",
+        "references/frameworks.md",
+    ]
+    assert await skills.read("cold-email", ".") == "SKILL.md\nreferences/frameworks.md\ntooutreach/SKILL.md"
+
+
+async def test_an_alias_inside_a_symlinked_skill_folder_loses_to_its_real_subfolder(root: Path, tmp_path: Path) -> None:
+    write(tmp_path / "elsewhere" / "linked" / "SKILL.md", "---\nname: linked\ndescription: Linked in.\n---\n\nBody.\n")
+    write(tmp_path / "elsewhere" / "linked" / "docs" / "x.md", "X.\n")
+    (tmp_path / "elsewhere" / "linked" / "adocs").symlink_to("docs")
+    (root / "linked").symlink_to(tmp_path / "elsewhere" / "linked")
+    skills = FileSystemSkills(root)
+
+    listing = (await skills.read("seo", "..")).split("\n")
+    assert "../linked/docs/x.md" in listing
+    assert not [line for line in listing if line.startswith("../linked/adocs/")]
+    anchored = (await skills.read("linked", "..")).split("\n")
+    assert "docs/x.md" in anchored
+    assert not [line for line in anchored if line.startswith("adocs/")]
+    assert (await skills.load("linked")).files == ("docs/x.md",)
+
+
 async def test_a_symlink_cycle_terminates(root: Path) -> None:
     (root / "cold-email" / "references" / "back").symlink_to("..")
     skills = FileSystemSkills(root)

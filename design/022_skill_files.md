@@ -127,7 +127,7 @@ class Skills(Protocol):
   - [x] tool, registration, guidance
   - [x] tests
 - **Notes after landing**
-  - The real-path guard in `_walk` is shared across one walk, and folder names are sorted. A folder reachable by two paths is listed once, under the first in sorted order: with `a/tob -> ../b`, a root listing shows `b`'s files only under `a/tob/`.
+  - The real-path guard in `_walk` is shared across one walk, and folder names are sorted. ~~A folder reachable by two paths is listed under the first in sorted order.~~ Fixed after P2: `_walk` first claims every folder reached without following links, and claims a followed link's tree before entering it. A link to a claimed folder is skipped, so a real folder is listed under its own name and a symlink alias loses (`adocs -> docs` lists `docs/x.md`; `a/tob -> ../b` lists `../b/...` from the root).
   - A folder the process can't read is silently left out of listings (`os.walk` drops the error).
   - Listing paths are built with `PurePosixPath.relative_to(folder, walk_up=True)`, not `posixpath.relpath`, which calls `os.getcwd()` and fails if the cwd is deleted.
   - Checked against the real `~/.claude/skills` (symlinked skill folders): 14 skills, a 335-line root listing, sibling reads, and escapes refused.
@@ -176,7 +176,6 @@ class Skills(Protocol):
 
 - **Dotfiles in listings.** Default: listed, as `_files` lists them today. A skill folder that is a git checkout lists `.git/`, up to the cap.
 - **An empty folder.** Default: an empty string.
-- **Follow-up: real folders should win over symlink aliases in listings.** The shared real-path guard keeps the first path in sorted walk order, so with `adocs -> docs`, `load` lists `adocs/x.md` where 3.x listed `docs/x.md`. Fix: walk without following links first to claim real folders, then follow links only to folders not yet claimed. This is P1 code, so it wasn't done in P2.
 
 ## Risks
 
@@ -185,6 +184,6 @@ class Skills(Protocol):
 - **A child agent whose rules resolve `skill_file` to `ask`** (`"*": "ask"` granting only `skill`, or `"*_file": "ask"`) fails `Runtime` construction after the upgrade.
 - **A symlink under the root that points outside it is readable.** That is the operator's layout, by design. A downloaded skill that ships such a link exposes its target.
 - **Large catalogues.** A root listing of a big catalogue stops at the cap, and each `skill_file` call re-scans every `SKILL.md`.
-- **`load` now follows symlinked subfolders.** A skill that ships `docs -> /` makes every `load` and folder read walk that tree synchronously, before the cap applies.
+- **`load` now follows symlinked subfolders.** A skill that ships `docs -> /` makes every `load` and folder read walk that tree synchronously, twice (claim, then list), before the cap applies.
 - **POSIX only.** `\` isn't a separator in virtual paths, but on Windows `self.root / virtual` would split on it, so `..\..\x` would escape.
 - **The system prompt changes once** with the new guidance text, which invalidates prompt caches for agents with skills a single time.

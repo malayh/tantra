@@ -16,7 +16,7 @@ Runtime adds allowed skill names and index descriptions to one execution-environ
 - `..` reaches sibling skills. A path that is absolute or climbs above the catalogue root is refused.
 - A file returns its UTF-8 text.
 - A folder returns every file under it, recursively and sorted, one per line. Each path is relative to the skill's folder, so it reads back with the same `name`.
-- In `FileSystemSkills`, a folder reachable by two paths is listed once, under the first in sorted order. A folder the process can't read is silently left out of listings.
+- In `FileSystemSkills`, a folder reachable by two paths is listed once, under its real path when the listing reaches it, otherwise under the first link in sorted order. A folder the process can't read is silently left out of listings.
 
 `read` raises `TantraError` for an unknown skill, an absolute path or one above the root, nothing at the path, or a file that is not UTF-8. `FileSystemSkills` also raises `TantraError` when a file can't be read, naming the agent's path rather than the storage path.
 

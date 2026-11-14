@@ -118,6 +118,7 @@ def _virtual(folder: str, path: str) -> str | None:
 
 
 def _walk(base: Path) -> list[str]:
+    claimed = {os.path.realpath(dirpath) for dirpath, _, _ in os.walk(base)}
     seen: set[str] = set()
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(base, followlinks=True):
@@ -126,7 +127,15 @@ def _walk(base: Path) -> list[str]:
             dirnames.clear()
             continue
         seen.add(real)
-        dirnames.sort()
+        dirnames[:] = sorted(
+            name
+            for name in dirnames
+            if not os.path.islink(os.path.join(dirpath, name))
+            or os.path.realpath(os.path.join(dirpath, name)) not in claimed
+        )
+        for name in dirnames:
+            if os.path.islink(os.path.join(dirpath, name)):
+                claimed.update(os.path.realpath(path) for path, _, _ in os.walk(os.path.join(dirpath, name)))
         relative = Path(dirpath).relative_to(base)
         found += [
             (relative / filename).as_posix()

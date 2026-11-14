@@ -6,7 +6,7 @@ Changed:
 
 - `skill_file` is a reserved tool name for agents with skills. An agent tool with that name fails Runtime construction.
 - The skills guidance tells the model to read files a loaded skill refers to with `skill_file`. The system prompt changes once for agents with skills.
-- `FileSystemSkills.load` lists files under symlinked subfolders. A folder reached by two paths is listed once, under the first in sorted walk order, so a 3.x path such as `docs/x.md` can appear as `adocs/x.md` when `adocs -> docs`.
+- `FileSystemSkills.load` lists files under symlinked subfolders. A folder reached by two paths is listed once, under its real path when the listing reaches it, otherwise under the first link in sorted order.
 
 Added:
 

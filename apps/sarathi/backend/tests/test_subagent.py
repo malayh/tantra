@@ -62,6 +62,7 @@ def test_framework_tool_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         "memory_recall",
         "memory_write",
         "skill",
+        "skill_file",
         "spawn",
         "send",
         "status",
@@ -76,6 +77,7 @@ def test_framework_tool_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         "read_doc",
         "memory_recall",
         "skill",
+        "skill_file",
         "send",
     }
 

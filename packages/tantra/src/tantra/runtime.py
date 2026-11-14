@@ -85,7 +85,7 @@ from tantra.hooks import Hook
 from tantra.loop import DEFAULT_RETRY, RetryConfig, TurnEngine
 from tantra.permissions import check_permission, decide
 from tantra.providers.base import Provider
-from tantra.skills import SKILL_TOOL, SkillInfo, Skills
+from tantra.skills import SKILL_FILE_TOOL, SKILL_TOOL, SkillInfo, Skills
 from tantra.stores.base import UNSET, HistorySnapshot, OperationalState, Store, reduce_journal
 from tantra.stores.postgres import PostgresStore, _hydrate
 from tantra.tools import Context, Tool
@@ -117,6 +117,7 @@ REPLY_LIMIT = 32768
 REPLY_TRUNCATED = "\n[reply truncated at 32 KiB]"
 NO_REPLY = "(no text reply)"
 SOURCE_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,31}")
+SKILL_FILE_MAX_CHARS = 64_000
 
 
 def _check_schema(label: str, entry: Tool) -> None:
@@ -146,6 +147,24 @@ def _skill_tool(skills: Skills, allowed: list[str] | None) -> Tool:
     return Tool(
         skill,
         description="Load one available skill by name and return its full instructions plus its bundled file list.",
+        permission="allow",
+    )
+
+
+def _skill_file_tool(skills: Skills) -> Tool:
+    async def skill_file(skill: str, path: str) -> str:
+        text = await skills.read(skill, path)
+        if len(text) <= SKILL_FILE_MAX_CHARS:
+            return text
+        return f"{text[:SKILL_FILE_MAX_CHARS]}\n[truncated at {SKILL_FILE_MAX_CHARS} chars]"
+
+    return Tool(
+        skill_file,
+        description=(
+            "Read one file, or list one folder, in the skills catalogue. `path` is relative to the named skill's "
+            "folder, exactly as that skill writes it; `../other-skill/file.md` reaches another skill. A folder "
+            "returns every file under it, one path per line, each usable as `path` with the same skill."
+        ),
         permission="allow",
     )
 
@@ -367,9 +386,11 @@ class Runtime:
             for name, agent in self.agents.items():
                 if agent.skills == []:
                     continue
-                if SKILL_TOOL in self.tools[name]:
-                    raise TantraError(f"agent {name!r}: duplicate tool name {SKILL_TOOL!r}")
+                for reserved_name in (SKILL_TOOL, SKILL_FILE_TOOL):
+                    if reserved_name in self.tools[name]:
+                        raise TantraError(f"agent {name!r}: duplicate tool name {reserved_name!r}")
                 self.tools[name][SKILL_TOOL] = _skill_tool(skills, agent.skills)
+                self.tools[name][SKILL_FILE_TOOL] = _skill_file_tool(skills)
         child_agents = {agent_name(child) for parent in self.agents.values() for child in parent.subagents}
         for name, agent in self.agents.items():
             reserved = set()

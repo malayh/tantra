@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -125,8 +126,9 @@ def test_execution_environment_is_one_final_capability_block() -> None:
     assert environment == (
         "Execution environment\n\n"
         "Skills\n\n"
-        "Available skills can be loaded on demand with the skill tool. Load a skill when its description matches "
-        "the task or the user explicitly requests it:\n"
+        "Available skills can be loaded on demand with the skill tool. Read a file a loaded skill refers to with "
+        "skill_file, passing that skill's name and the path exactly as written. Load a skill when its description "
+        "matches the task or the user explicitly requests it:\n"
         "- release: Ship safely.\n\n"
         "Child lifecycle\n\n"
         "When your turn ends, your parent receives your final message as your reply, or your submitted output if you "
@@ -369,3 +371,125 @@ async def test_loading_a_skipped_skill_raises_like_an_unknown_one(root: Path) ->
         await skills.load("half-written")
 
     assert [path for path, _ in skills.skipped] == [root / "half-written" / "SKILL.md"]
+
+
+async def test_read_returns_a_file_relative_to_the_named_skills_folder(root: Path) -> None:
+    write(root / "drafts" / "SKILL.md", "---\nname: drafting\ndescription: Draft things.\n---\n\nBody.\n")
+    write(root / "drafts" / "outline.md", "Outline.\n")
+    skills = FileSystemSkills(root)
+
+    assert await skills.read("cold-email", "references/frameworks.md") == "PAS. AIDA. BAB.\n"
+    assert await skills.read("drafting", "outline.md") == "Outline.\n"
+
+
+async def test_read_climbs_into_a_sibling_skill_with_dotdot(root: Path) -> None:
+    write(root / "outreach" / "notes.md", "Three touches.\n")
+
+    assert await FileSystemSkills(root).read("cold-email", "../outreach/notes.md") == "Three touches.\n"
+
+
+async def test_reading_a_folder_lists_its_files_relative_to_the_anchor_skill(root: Path) -> None:
+    skills = FileSystemSkills(root)
+
+    assert await skills.read("cold-email", "references") == "references/frameworks.md"
+    assert await skills.read("cold-email", ".") == "SKILL.md\nreferences/frameworks.md"
+    assert await skills.read("seo", "../cold-email") == "../cold-email/SKILL.md\n../cold-email/references/frameworks.md"
+
+
+async def test_reading_the_root_lists_the_whole_catalogue_as_paths_that_read_back(root: Path) -> None:
+    skills = FileSystemSkills(root)
+
+    listing = (await skills.read("seo", "..")).split("\n")
+
+    assert listing == [
+        "../cold-email/SKILL.md",
+        "../cold-email/references/frameworks.md",
+        "../outreach/SKILL.md",
+        "SKILL.md",
+    ]
+    assert [await skills.read("seo", line) for line in listing] == [COLD_EMAIL, "PAS. AIDA. BAB.\n", OUTREACH, SEO]
+
+
+async def test_a_symlinked_skill_folder_reads_and_lists_like_a_plain_folder(root: Path, tmp_path: Path) -> None:
+    write(tmp_path / "elsewhere" / "linked" / "SKILL.md", "---\nname: linked\ndescription: Linked in.\n---\n\nBody.\n")
+    write(tmp_path / "elsewhere" / "linked" / "guide.md", "Guide.\n")
+    write(tmp_path / "elsewhere" / "outreach" / "SKILL.md", "decoy beside the link target")
+    (root / "linked").symlink_to(tmp_path / "elsewhere" / "linked")
+    skills = FileSystemSkills(root)
+
+    assert "linked" in [info.name for info in await skills.index()]
+    assert await skills.read("linked", "guide.md") == "Guide.\n"
+    assert await skills.read("linked", ".") == "SKILL.md\nguide.md"
+    assert await skills.read("linked", "../outreach/SKILL.md") == OUTREACH
+    assert (await skills.read("linked", "..")).split("\n") == [
+        "../cold-email/SKILL.md",
+        "../cold-email/references/frameworks.md",
+        "../outreach/SKILL.md",
+        "../seo/SKILL.md",
+        "SKILL.md",
+        "guide.md",
+    ]
+    assert "../linked/guide.md" in (await skills.read("seo", "..")).split("\n")
+    assert (await skills.load("linked")).files == ("guide.md",)
+
+
+async def test_a_symlinked_subfolder_appears_in_read_listings_and_load_files(root: Path, tmp_path: Path) -> None:
+    write(tmp_path / "shared-docs" / "tone.md", "Plain words.\n")
+    (root / "cold-email" / "shared").symlink_to(tmp_path / "shared-docs")
+    skills = FileSystemSkills(root)
+
+    assert (await skills.load("cold-email")).files == ("references/frameworks.md", "shared/tone.md")
+    assert await skills.read("cold-email", ".") == "SKILL.md\nreferences/frameworks.md\nshared/tone.md"
+    assert await skills.read("cold-email", "shared") == "shared/tone.md"
+    assert await skills.read("cold-email", "shared/tone.md") == "Plain words.\n"
+
+
+async def test_a_symlink_cycle_terminates(root: Path) -> None:
+    (root / "cold-email" / "references" / "back").symlink_to("..")
+    skills = FileSystemSkills(root)
+
+    assert await skills.read("cold-email", ".") == "SKILL.md\nreferences/frameworks.md"
+    assert (await skills.load("cold-email")).files == ("references/frameworks.md",)
+    assert "../outreach/SKILL.md" in (await skills.read("cold-email", "..")).split("\n")
+
+
+@pytest.mark.parametrize("path", ["../..", "../../secret.txt", "/etc/passwd", "references/../../../secret.txt"])
+async def test_paths_above_the_catalogue_root_are_refused_even_when_the_target_exists(root: Path, path: str) -> None:
+    (root.parent / "secret.txt").write_text("top secret")
+    assert (root / "cold-email" / path).exists()
+
+    with pytest.raises(TantraError, match="outside the skills catalogue") as raised:
+        await FileSystemSkills(root).read("cold-email", path)
+
+    assert "'cold-email'" in str(raised.value)
+    assert repr(path) in str(raised.value)
+
+
+async def test_reading_a_missing_path_raises(root: Path) -> None:
+    with pytest.raises(TantraError, match="no file or folder at 'references/missing.md'"):
+        await FileSystemSkills(root).read("cold-email", "references/missing.md")
+
+
+async def test_reading_a_file_that_is_not_utf8_raises(root: Path) -> None:
+    (root / "cold-email" / "references" / "latin1.md").write_bytes(b"caf\xe9")
+
+    with pytest.raises(TantraError, match="'references/latin1.md' is not UTF-8 text"):
+        await FileSystemSkills(root).read("cold-email", "references/latin1.md")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads files whatever their mode")
+async def test_reading_an_unreadable_file_raises_without_the_storage_path(root: Path) -> None:
+    locked = root / "cold-email" / "references" / "locked.md"
+    locked.write_text("hidden")
+    locked.chmod(0)
+
+    with pytest.raises(TantraError, match="cannot read 'references/locked.md': Permission denied") as raised:
+        await FileSystemSkills(root).read("cold-email", "references/locked.md")
+
+    assert "'cold-email'" in str(raised.value)
+    assert str(root) not in str(raised.value)
+
+
+async def test_reading_from_an_unknown_skill_raises(root: Path) -> None:
+    with pytest.raises(TantraError, match="unknown skill 'nope'"):
+        await FileSystemSkills(root).read("nope", "SKILL.md")

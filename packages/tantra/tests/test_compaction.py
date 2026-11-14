@@ -300,6 +300,17 @@ async def test_skill_output_is_never_stubbed() -> None:
     assert "r" * 160_000 in provider.requests[0].messages[2].content
 
 
+async def test_skill_file_output_is_stubbed() -> None:
+    history = session(result_chars=160_000, text_chars=4_000, name="skill_file")
+
+    events = await PruneThenSummarize().compact(context_for(history, TinyProvider([])))
+
+    assert [event.call_id for event in stubs_in(events)] == ["c-tail", "c5", "c4", "c3"]
+    messages = build_messages(history + events)
+    contents = {message.call_id: message.content for message in messages if isinstance(message, ToolResultMessage)}
+    assert contents["c5"] == f"[pruned: skill_file output, {160_000} chars omitted]"
+
+
 async def test_results_inside_the_protected_tail_are_never_stubbed() -> None:
     history = session(result_chars=160_000, text_chars=4_000)
     tail_result = next(event for event in history if isinstance(event, ToolCallCompleted) and event.call_id == "c-tail")

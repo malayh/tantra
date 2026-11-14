@@ -35,8 +35,9 @@ from tantra.skills import SkillInfo
 from tantra.tracing import NULL_TRACER, Tracer
 
 SKILLS_GUIDANCE = (
-    "Available skills can be loaded on demand with the skill tool. Load a skill when its description matches the "
-    "task or the user explicitly requests it:"
+    "Available skills can be loaded on demand with the skill tool. Read a file a loaded skill refers to with "
+    "skill_file, passing that skill's name and the path exactly as written. Load a skill when its description "
+    "matches the task or the user explicitly requests it:"
 )
 CHILD_LIFECYCLE_GUIDANCE = (
     "When your turn ends, your parent receives your final message as your reply, or your submitted output if you "

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -49,7 +50,7 @@ from tantra.providers.base import (
     UserMessage,
 )
 from tantra.providers.fake import FAKE_LIMITS, FakeProvider, Sample
-from tantra.skills import Skill, SkillInfo
+from tantra.skills import FileSystemSkills, Skill, SkillInfo
 from tantra.stores.memory import MemoryStore
 from tantra.tools import Context
 
@@ -988,8 +989,9 @@ async def test_runtime_skills_are_disclosed_and_load_through_the_internal_tool()
     assert provider.requests[0].system[-1].text == (
         "Execution environment\n\n"
         "Skills\n\n"
-        "Available skills can be loaded on demand with the skill tool. Load a skill when its description matches "
-        "the task or the user explicitly requests it:\n"
+        "Available skills can be loaded on demand with the skill tool. Read a file a loaded skill refers to with "
+        "skill_file, passing that skill's name and the path exactly as written. Load a skill when its description "
+        "matches the task or the user explicitly requests it:\n"
         "- release: Ship safely."
     )
     assert "Read the checklist." not in provider.requests[0].system[-1].text
@@ -1001,6 +1003,81 @@ async def test_runtime_skills_are_disclosed_and_load_through_the_internal_tool()
     assert skill_schema.parameters["required"] == ["name"]
     assert completed[0].result == "Read the checklist.\n\n## Files\nguide.md"
     await runtime.aclose()
+
+
+def two_skills(root: Path) -> FileSystemSkills:
+    (root / "a").mkdir()
+    (root / "a" / "SKILL.md").write_text("---\nname: a\ndescription: First.\n---\n\nSee ../b/x.md.\n")
+    (root / "b").mkdir()
+    (root / "b" / "SKILL.md").write_text("---\nname: b\ndescription: Second.\n---\n\nBody.\n")
+    (root / "b" / "x.md").write_text("from b")
+    (root / "b" / "big.md").write_text("z" * 70_000)
+    return FileSystemSkills(root)
+
+
+async def test_skill_file_reads_across_skills_whatever_the_allowlist_and_caps_large_files(tmp_path: Path) -> None:
+    class Narrow(Agent):
+        skills = ["a"]
+
+    provider = FakeProvider(
+        [
+            Sample(
+                tool_calls=[
+                    call("skill_file", '{"skill":"a","path":"../b/x.md"}', "c1"),
+                    call("skill_file", '{"skill":"b","path":"x.md"}', "c2"),
+                    call("skill_file", '{"skill":"a","path":"../b/big.md"}', "c3"),
+                ]
+            ),
+            Sample(text="done"),
+        ]
+    )
+    store = MemoryStore()
+    runtime = Runtime(provider, store, [Narrow], default_model="m", skills=two_skills(tmp_path))
+    sid = await runtime.create(Narrow)
+
+    async with runtime.connect(sid, writable=True) as connection:
+        result = await connection.prompt("read", command_id=uuid4())
+
+    completed = {
+        event.call_id: event.result for event in await history(store, sid) if isinstance(event, ToolCallCompleted)
+    }
+    schema = next(tool for tool in provider.requests[0].tools if tool.name == "skill_file")
+    assert result.text == "done"
+    assert provider.requests[0].system[-1].text.endswith("- a: First.")
+    assert completed["c1"] == "from b"
+    assert completed["c2"] == "from b"
+    assert completed["c3"] == "z" * 64_000 + "\n[truncated at 64000 chars]"
+    assert schema.description == (
+        "Read one file, or list one folder, in the skills catalogue. `path` is relative to the named skill's folder, "
+        "exactly as that skill writes it; `../other-skill/file.md` reaches another skill. A folder returns every file "
+        "under it, one path per line, each usable as `path` with the same skill."
+    )
+    assert set(schema.parameters["properties"]) == {"skill", "path"}
+    assert set(schema.parameters["required"]) == {"skill", "path"}
+    await runtime.aclose()
+
+
+async def test_an_agent_without_skills_gets_no_skill_file_tool(tmp_path: Path) -> None:
+    class Skilless(Agent):
+        skills = []
+
+    runtime = Runtime(FakeProvider([]), MemoryStore(), [Skilless], default_model="m", skills=two_skills(tmp_path))
+
+    assert "skill_file" not in runtime.tools["skilless"]
+    assert "skill" not in runtime.tools["skilless"]
+    await runtime.aclose()
+
+
+async def test_an_agent_tool_named_skill_file_is_rejected_at_construction(tmp_path: Path) -> None:
+    @tool
+    async def skill_file(skill: str, path: str) -> str:
+        return path
+
+    class Clash(Agent):
+        tools = [skill_file]
+
+    with pytest.raises(TantraError, match="duplicate tool name 'skill_file'"):
+        Runtime(FakeProvider([]), MemoryStore(), [Clash], default_model="m", skills=two_skills(tmp_path))
 
 
 async def test_runtime_memory_tools_write_and_recall_without_a_coordinator() -> None:

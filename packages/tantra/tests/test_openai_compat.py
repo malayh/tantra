@@ -182,6 +182,29 @@ async def test_reasoning_arrives_under_either_delta_field(tmp_path: Path, provid
     assert end.finish_reason == "stop"
 
 
+async def test_length_finish_returns_the_truncated_output(tmp_path: Path, provider) -> None:
+    usage = {"prompt_tokens": 100, "completion_tokens": 7, "prompt_tokens_details": {"cached_tokens": 60}}
+    chunks = [
+        frame({"role": "assistant", "content": "partial "}),
+        frame({"content": "answer"}),
+        frame({"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "search", "arguments": '{"q": "ra'}}]}),
+        frame({}, finish="length"),
+        f"data: {json.dumps({'choices': [], 'usage': usage})}\n\n",
+        "data: [DONE]\n\n",
+    ]
+
+    events = await collect(provider(replay(tmp_path, chunks)).stream(REQ))
+
+    end = events[-1]
+    assert isinstance(end, StreamEnd)
+    assert end.finish_reason == "length"
+    assert end.text == "partial answer"
+    assert end.tool_calls == [ToolCall(id="call_1", name="search", args='{"q": "ra')]
+    assert end.usage.input_tokens == 40
+    assert end.usage.cache_read_tokens == 60
+    assert end.usage.output_tokens == 7
+
+
 async def test_usage_splits_cached_tokens_out_of_the_input_count(provider) -> None:
     events = await collect(provider(cassette_transport(CASSETTE)).stream(REQ))
 

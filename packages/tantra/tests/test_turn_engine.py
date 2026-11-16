@@ -888,6 +888,46 @@ async def test_a_repeated_call_id_with_invalid_json_does_not_skip_its_valid_twin
     assert isinstance(terminal, TurnCompleted)
 
 
+async def test_no_tool_call_from_a_length_truncated_sample_runs() -> None:
+    ran: list[str] = []
+
+    @tool
+    async def record(value: str = "default") -> str:
+        ran.append(value)
+        return value
+
+    class Bot(Agent):
+        tools = [record]
+
+    engine, store, queued = await build(
+        [
+            Sample(
+                text="working",
+                tool_calls=[
+                    call("record", '{"value":"ok"}', "call_0"),
+                    call("record", "", "call_1"),
+                    call("record", '{"value":"cut', "call_2"),
+                ],
+                finish_reason="length",
+            ),
+            Sample(text="done"),
+        ],
+        Bot,
+    )
+
+    terminal = await engine.run(queued)
+    journal = await events(store, engine.header.id)
+    completed = [
+        (event.call_id, event.result, event.is_error) for event in journal if isinstance(event, ToolCallCompleted)
+    ]
+    reason = "output limit reached before this tool call finished; it was not run"
+
+    assert ran == []
+    assert completed == [(cid, reason, True) for cid in ("call_0", "call_1", "call_2")]
+    assert [event.text for event in journal if isinstance(event, TextPart)] == ["working", "done"]
+    assert isinstance(terminal, TurnCompleted)
+
+
 async def test_a_call_id_repeated_in_a_later_turn_is_rewritten_against_the_journal() -> None:
     provider = FakeProvider(
         [

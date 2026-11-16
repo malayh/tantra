@@ -215,7 +215,10 @@ class OpenAICompatible:
 
             if not saw_chunk:
                 raise ProviderError(f"no SSE data frames from {self.base_url}")
-            final = state.get_final_completion()
+            try:
+                final = state.get_final_completion()
+            except openai.LengthFinishReasonError as exc:
+                final = exc.completion
         except openai.OpenAIError as exc:
             raise ProviderError(
                 str(exc),

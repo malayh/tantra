@@ -442,21 +442,22 @@ class TurnEngine:
             events.append(TextPart(sample_id=sample_id, text=end.text))
         rejected: list[SessionEvent] = []
         for call in end.tool_calls:
+            error = None
             try:
                 args = json.loads(call.args) if call.args.strip() else {}
                 if not isinstance(args, dict):
                     raise ValueError("arguments must be a JSON object")
             except ValueError as exc:
                 args = {}
+                error = f"invalid JSON arguments: {exc}"
+            if end.finish_reason == "length":
+                error = "output limit reached before this tool call finished; it was not run"
+            if error is not None:
                 invalid.add(call.id)
                 rejected.extend(
                     [
                         ToolCallStarted(call_id=call.id),
-                        ToolCallCompleted(
-                            call_id=call.id,
-                            result=f"invalid JSON arguments: {exc}",
-                            is_error=True,
-                        ),
+                        ToolCallCompleted(call_id=call.id, result=error, is_error=True),
                     ]
                 )
             requested = ToolCallRequested(

@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.1.0
+
+Fixed:
+
+- `OpenAICompatible.stream` no longer raises `ProviderError` when a sample hits its output limit. It ends with `StreamEnd(finish_reason="length")` carrying the text, reasoning, tool calls and usage received so far. A tool call cut off mid-arguments keeps its partial `args`.
+- The turn loop runs no tool call from a sample that ended with `finish_reason="length"`, even one whose arguments parse. Each completes as a tool error, `output limit reached before this tool call finished; it was not run`, and the turn continues with the next sample. The sample's text and reasoning are kept.
+
 ## 4.0.0
 
 Changed:
